@@ -1,0 +1,74 @@
+{
+  "at": "2026-06-12T16:12:13.583Z",
+  "matrix": [
+    {
+      "year": 2023,
+      "rows": [
+        {
+          "mode": "fast",
+          "ms": 186854,
+          "primary": "19/19 (100.0%)",
+          "misses": []
+        },
+        {
+          "mode": "balanced",
+          "ms": 247103,
+          "primary": "19/19 (100.0%)",
+          "misses": []
+        },
+        {
+          "mode": "thorough",
+          "ms": 357472,
+          "primary": "19/19 (100.0%)",
+          "misses": []
+        }
+      ]
+    },
+    {
+      "year": 2024,
+      "rows": [
+        {
+          "mode": "fast",
+          "ms": 242871,
+          "primary": "20/20 (100.0%)",
+          "misses": []
+        },
+        {
+          "mode": "balanced",
+          "ms": 255325,
+          "primary": "20/20 (100.0%)",
+          "misses": []
+        },
+        {
+          "mode": "thorough",
+          "ms": 431119,
+          "primary": "20/20 (100.0%)",
+          "misses": []
+        }
+      ]
+    },
+    {
+      "year": 2025,
+      "rows": [
+        {
+          "mode": "fast",
+          "ms": 212738,
+          "primary": "21/21 (100.0%)",
+          "misses": []
+        },
+        {
+          "mode": "balanced",
+          "ms": 233011,
+          "primary": "21/21 (100.0%)",
+          "misses": []
+        },
+        {
+          "mode": "thorough",
+          "ms": 407209,
+          "primary": "21/21 (100.0%)",
+          "misses": []
+        }
+      ]
+    }
+  ]
+}

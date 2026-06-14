@@ -1,0 +1,44 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0",
+    "lint": "next lint",
+    "eval:tax": "npx --yes tsx scripts/eval-tax-accuracy.ts",
+    "eval:tax:all": "npx --yes tsx scripts/eval-tax-all-years.ts",
+    "eval:tax:cached": "npx --yes tsx scripts/eval-tax-cached.ts",
+    "eval:tax:refresh": "npx --yes tsx scripts/eval-tax-cached.ts -- --refresh",
+    "ocr:debug": "node scripts/ocr-debug-variant.cjs",
+    "benchmark:ocr": "npx --yes tsx scripts/benchmark-ocr.ts",
+    "benchmark:ocr:matrix": "npx --yes tsx scripts/benchmark-ocr.ts --all",
+    "benchmark:progressive": "npx --yes tsx scripts/benchmark-progressive-ocr.ts",
+    "benchmark:progressive:all": "npx --yes tsx scripts/benchmark-progressive-ocr.ts --all",
+    "benchmark:vercel-modes": "npx --yes tsx scripts/benchmark-vercel-modes.ts",
+    "test:upload": "npx --yes tsx scripts/test-upload-edge-cases.ts && npx --yes tsx scripts/test-export-table.ts",
+    "test:tax-ui": "npx --yes tsx scripts/test-tax-ui-flow.ts",
+    "test:pipeline": "npx --yes tsx scripts/test-pipeline-e2e.ts",
+    "eval:tax:fast": "npx --yes tsx scripts/eval-tax-cached.ts -- --mode fast"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.105.4",
+    "next": "14.2.18",
+    "pdf-parse": "^2.4.5",
+    "react": "^18",
+    "react-dom": "^18",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.18",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5"
+  }
+}

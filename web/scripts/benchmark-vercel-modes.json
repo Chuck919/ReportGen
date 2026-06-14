@@ -1,0 +1,106 @@
+{
+  "at": "2026-06-14T20:07:33.537Z",
+  "coldStart": true,
+  "limitMs": 295000,
+  "rows": [
+    {
+      "mode": "vercel-fast",
+      "year": 2023,
+      "ms": 82694,
+      "under": true,
+      "primary": "15/19 (78.9%)",
+      "misses": [
+        "sales: exp 1086475, got 3465",
+        "rent: exp 146427, got 11146",
+        "other_current_liabilities: exp 54043, got 137506",
+        "unclassified_equity: exp 104624, got 1104"
+      ],
+      "pages": 14
+    },
+    {
+      "mode": "vercel-balanced",
+      "year": 2023,
+      "ms": 190126,
+      "under": true,
+      "primary": "18/19 (94.7%)",
+      "misses": [
+        "notes_minus_short_term: exp 68139, got blank"
+      ],
+      "pages": 26
+    },
+    {
+      "mode": "vercel-thorough",
+      "year": 2023,
+      "ms": 186093,
+      "under": true,
+      "primary": "18/19 (94.7%)",
+      "misses": [
+        "notes_minus_short_term: exp 68139, got blank"
+      ],
+      "pages": 26
+    },
+    {
+      "mode": "vercel-fast",
+      "year": 2024,
+      "ms": 72248,
+      "under": true,
+      "primary": "16/20 (80.0%)",
+      "misses": [
+        "advertising: exp 19737, got blank",
+        "rent: exp 122219, got blank",
+        "taxes_licenses: exp 26919, got 1854",
+        "other_current_liabilities: exp 52003, got blank"
+      ],
+      "pages": 14
+    },
+    {
+      "mode": "vercel-balanced",
+      "year": 2024,
+      "ms": 207606,
+      "under": true,
+      "primary": "20/20 (100.0%)",
+      "misses": [],
+      "pages": 26
+    },
+    {
+      "mode": "vercel-thorough",
+      "year": 2024,
+      "ms": 207526,
+      "under": true,
+      "primary": "20/20 (100.0%)",
+      "misses": [],
+      "pages": 26
+    },
+    {
+      "mode": "vercel-fast",
+      "year": 2025,
+      "ms": 87333,
+      "under": true,
+      "primary": "18/21 (85.7%)",
+      "misses": [
+        "rent: exp 125016, got blank",
+        "other_assets: exp 11000, got 14203",
+        "other_current_liabilities: exp 49749, got blank"
+      ],
+      "pages": 14
+    },
+    {
+      "mode": "vercel-balanced",
+      "year": 2025,
+      "ms": 236037,
+      "under": true,
+      "primary": "21/21 (100.0%)",
+      "misses": [],
+      "pages": 26
+    },
+    {
+      "mode": "vercel-thorough",
+      "year": 2025,
+      "ms": 234907,
+      "under": true,
+      "primary": "21/21 (100.0%)",
+      "misses": [],
+      "pages": 26
+    }
+  ]
+}

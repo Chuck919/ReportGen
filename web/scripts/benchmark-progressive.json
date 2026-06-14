@@ -1,0 +1,39 @@
+{
+  "at": "2026-06-14T05:18:20.977Z",
+  "allRows": [
+    {
+      "year": 2024,
+      "rows": [
+        {
+          "label": "progressive-vercel-fast",
+          "ms": 73270,
+          "primary": "16/20 (80.0%)",
+          "pct": 80,
+          "tiers": "vercel-fast:73s/14p/preview",
+          "pages": 14,
+          "misses": [
+            "advertising: exp 19737, got (blank)",
+            "rent: exp 122219, got (blank)",
+            "taxes_licenses: exp 26919, got 1854",
+            "other_current_liabilities: exp 52003, got (blank)"
+          ]
+        },
+        {
+          "label": "progressive-vercel-balanced",
+          "ms": 298944,
+          "primary": "15/20 (75.0%)",
+          "pct": 75,
+          "tiers": "vercel-fast:66s/14p/preview + vercel-balanced:232s/42p/delta",
+          "pages": 44,
+          "misses": [
+            "cogs: exp 313334, got 313",
+            "advertising: exp 19737, got (blank)",
+            "taxes_licenses: exp 26919, got (blank)",
+            "cash: exp 280309, got 1",
+            "other_current_liabilities: exp 52003, got 91955"
+          ]
+        }
+      ]
+    }
+  ]
+}
