@@ -12,43 +12,42 @@ export const LOCAL_OCR_MODE_OPTIONS: OcrModeOption[] = [
   {
     id: "fast",
     label: "Fast",
-    hint: "~3–4 min",
-    detail: "Quickest full pass. Good when the PDF is clean.",
+    hint: "~2 min",
+    detail: "14-page preview — quick sanity check, not for full Excel paste.",
   },
   {
     id: "balanced",
     label: "Balanced",
-    hint: "~4–5 min",
-    detail: "Default. Best mix of speed and field coverage.",
+    hint: "~4 min",
+    detail: "Default. 26 pages + selective hi-DPI. Target 100% primary for Excel paste.",
   },
   {
     id: "thorough",
     label: "Thorough",
     hint: "~6–8 min",
-    detail: "Extra hi-DPI on Schedule L and statement attachments.",
+    detail: "Two balanced passes merged per page. Maximum reliability on hard scans (local/VPS).",
   },
 ];
 
-/** Vercel Hobby — one OCR request per mode (under 5 min). Use Oracle/VPS for local 100% presets. */
+/** Vercel Hobby — mirrors local tiers (workers=1). */
 export const VERCEL_OCR_MODE_OPTIONS: OcrModeOption[] = [
   {
     id: "vercel-fast",
     label: "Fast",
-    hint: "~1 min",
-    detail: "14 key pages. Quick preview — verify totals or use Balanced for full coverage.",
+    hint: "~2 min",
+    detail: "Same as local Fast — 14 pages, preview only.",
   },
   {
     id: "vercel-balanced",
     label: "Balanced",
-    hint: "~3–4 min",
-    detail: "Full local-Fast pipeline in one request. Default — best speed/accuracy tradeoff.",
+    hint: "~4 min",
+    detail: "Same as local Balanced — 26 pages + selective hi-DPI. Default for Excel paste.",
   },
   {
     id: "vercel-thorough",
     label: "Thorough",
-    hint: "~5–8 min",
-    detail:
-      "Two API passes: full Balanced scan, then hi-DPI retries on blank fields. Best when Balanced leaves gaps.",
+    hint: "~5 min",
+    detail: "Same as local Thorough — full hi-DPI when Balanced misses fields.",
   },
 ];
 

@@ -31,7 +31,7 @@ export function TaxUploadPanel({
         label="Drop 1120-S tax return PDF"
         hint={
           isVercelDeploy()
-            ? "One PDF at a time · ~3–5 min on Balanced"
+            ? "One PDF at a time · ~3 min on Balanced"
             : "PDF with statements included · multiple years OK"
         }
         accept="application/pdf"

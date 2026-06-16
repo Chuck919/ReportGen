@@ -159,6 +159,8 @@ docker compose up -d --build
 
 - `web/Dockerfile` — production image with OCR deps
 - `web/docker-compose.yml` — app + Caddy
-- `web/deploy/oracle/install-on-vm.sh` — runs on VM
+- `web/deploy/oracle/install-on-vm.sh` — runs on VM (Docker + compose up)
 - `web/deploy/oracle/push-to-vm.ps1` — upload from Windows
+- `web/deploy/oracle/.env.production.example` — VPS env template
 - `web/deploy/oracle/Caddyfile` — reverse proxy
+- `web/AGENT_HANDOFF_ORACLE_DEPLOY.md` — **agent copy-paste deploy runbook**

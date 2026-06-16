@@ -152,7 +152,12 @@ export function extractForm1120Anchors(text: string): FieldExtraction {
       { id: "taxes_licenses", re: /taxes\s+and\s+licen/i, source: "Form 1120-S line 12 (tail scan)", conf: 99 },
       { id: "cogs", re: /cost\s*of\s*goods|costof\s*goods|goods\s*soid/i, source: "Form 1120-S line 2 (tail scan)", conf: 98 },
       { id: "other_current_liabilities", re: /other\s+curren\w*\s+liabilit|curent\s+labi/i, source: "Schedule L line 18 (tail scan)", conf: 98 },
-      { id: "notes_minus_short_term", re: /year\s*or\s*more|yearormore|fyearormo|mortgages?.{0,12}notes.{0,12}bonds.{0,12}payable/i, source: "Schedule L line 20 (tail scan)", conf: 97 },
+      {
+        id: "notes_minus_short_term",
+        re: /1\s*year\s*or\s*more|1yearormore|yearormore|fyearormo|payable.{0,16}in\s*1\s*year/i,
+        source: "Schedule L line 20 (tail scan)",
+        conf: 97,
+      },
       { id: "unclassified_equity", re: /24\s+retained|retained\s+e\w*rnings/i, source: "Schedule L line 24 (tail scan)", conf: 97 },
       { id: "gross_fixed_assets", re: /10a\s+buildings|other depreciable assets/i, source: "Schedule L line 10a (tail scan)", conf: 98 },
       { id: "accumulated_depreciation", re: /less accumulated depreciation/i, source: "Schedule L line 10b (tail scan)", conf: 98 },

@@ -1,3 +1,4 @@
+import "@/lib/tax/pdf-server-polyfill";
 import { PDFParse } from "pdf-parse";
 import { parseTaxReturn } from "@/lib/tax-return-parser";
 import type { OcrMode, ParsedTaxYear } from "@/lib/api/types";
@@ -35,7 +36,9 @@ export async function processTaxPdfFile(
   try {
     inspect = await inspectPdfBuffer(forParse);
     log(`  inspect pages=${inspect.pageCount} embeddedLen=${inspect.embeddedTextLen} scanned=${inspect.likelyScanned}`);
-  } catch {
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    log(`  inspect failed: ${detail}`);
     return { status: "error", filename: file.name, message: "Could not read PDF — file may be corrupt or password-protected." };
   }
 

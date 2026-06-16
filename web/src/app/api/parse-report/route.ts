@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import "@/lib/tax/pdf-server-polyfill";
 import { PDFParse } from "pdf-parse";
 import { parseFinancialTablesFromText } from "@/lib/financial-text-parser";
 import { buildBenchmarkEntryRows } from "@/lib/benchmark-entry";

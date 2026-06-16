@@ -3,8 +3,25 @@
  * then full-resolution OCR only on those pages (plus heuristic fallback).
  * Stdout is a single JSON object (includes logs for debugging).
  */
-const { PDFParse } = require("pdf-parse");
-const { createWorker } = require("tesseract.js");
+try {
+  require("pdf-parse/worker");
+  const { DOMMatrix, ImageData, Path2D } = require("@napi-rs/canvas");
+  if (!globalThis.DOMMatrix) globalThis.DOMMatrix = DOMMatrix;
+  if (!globalThis.Path2D) globalThis.Path2D = Path2D;
+  if (!globalThis.ImageData) globalThis.ImageData = ImageData;
+} catch {
+  // local dev without canvas still surfaces a clear error from pdf-parse
+}
+const path = require("node:path");
+function requirePkg(name) {
+  try {
+    return require(name);
+  } catch {
+    return require(path.join(process.cwd(), "node_modules", name));
+  }
+}
+const { PDFParse } = requirePkg("pdf-parse");
+const { createWorker } = requirePkg("tesseract.js");
 const { readFile } = require("node:fs/promises");
 const { preprocessPageImage, buildTaxVariants } = require("./ocr-preprocess.cjs");
 const { resolveOcrMode, selectVariants } = require("./ocr-modes.cjs");
@@ -57,6 +74,31 @@ function scheduleLMoneyScore(text) {
   return score;
 }
 
+function scheduleLLineHasAmount(text, lineNum) {
+  const re = new RegExp(`\\b${lineNum}\\b[^\\n]{0,140}\\d[\\d,]{4,}`, "i");
+  return re.test(text);
+}
+
+/** Only append hi-dpi when it adds Schedule L amounts the full pass missed. */
+function hiDpiShouldAppend(fullText, hiText) {
+  if (!fullText) return Boolean(hiText);
+  if (!hiText) return false;
+  if (corruptsFormLineNumbers(fullText, hiText)) return false;
+
+  const slLines = [17, 20, 22, 27];
+  const fullHas = slLines.filter((l) => scheduleLLineHasAmount(fullText, l));
+  const hiHas = slLines.filter((l) => scheduleLLineHasAmount(hiText, l));
+
+  if (fullHas.length >= 2 && hiHas.length < fullHas.length) return false;
+  if (hiHas.length > fullHas.length) return true;
+
+  if (scheduleLLineHasAmount(fullText, 17) && scheduleLLineHasAmount(fullText, 20)) {
+    if (!scheduleLLineHasAmount(hiText, 17) || !scheduleLLineHasAmount(hiText, 20)) return false;
+  }
+
+  return true;
+}
+
 async function recognizeHiDpiPage(worker, page, mode) {
   const baselineBuffer = Buffer.from(page.data);
   const baseline = await worker.recognize(baselineBuffer);
@@ -78,7 +120,10 @@ async function recognizeHiDpiPage(worker, page, mode) {
       const buffer = await preprocessPageImage(page.data, variant);
       const result = await worker.recognize(buffer);
       const score = scoreOcrCandidate(result);
-      if (score > best.score + mode.minScoreGain) {
+      const variantText = result.data.text || "";
+      if (corruptsFormLineNumbers(baseline.data.text || "", variantText)) continue;
+      const gain = minGainForPage(mode, true);
+      if (score > best.score + gain) {
         best = { name: variant.name, result, score };
         stagnant = 0;
       } else {
@@ -91,6 +136,27 @@ async function recognizeHiDpiPage(worker, page, mode) {
   }
 
   return best;
+}
+
+/** Reject variants that corrupt 1120-S line numbers (e.g. 11→111, 16→116). */
+function corruptsFormLineNumbers(baselineText, variantText) {
+  const pairs = [
+    [/\b11\b[^\n]{0,40}Rents/i, /\b111\s+Rents/i],
+    [/\b16\b[^\n]{0,40}Advertising/i, /\b116\s+Advertising/i],
+    [/\[11\]/i, /=\s*111\s+Rents/i],
+    [/\[16\]/i, /\$?\s*116\s+Advertising/i],
+  ];
+  for (const [good, bad] of pairs) {
+    if (good.test(baselineText) && bad.test(variantText) && !good.test(variantText)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function minGainForPage(mode, formCritical) {
+  const base = mode.minScoreGain || 1.5;
+  return formCritical ? Math.max(base, 2.5) : base;
 }
 
 function isFormCriticalPage(text) {
@@ -220,7 +286,10 @@ async function recognizeBestPage(worker, page, profile, mode) {
         const buffer = await preprocessPageImage(page.data, variant);
         const result = await worker.recognize(buffer);
         const score = scoreOcrCandidate(result);
-        if (score > best.score + (mode.minScoreGain || 1)) {
+        const variantText = result.data.text || "";
+        if (corruptsFormLineNumbers(baselineText, variantText)) continue;
+        const gain = minGainForPage(mode, formCritical);
+        if (score > best.score + gain) {
           best = { name: variant.name, buffer, result, score };
         }
       } catch (error) {
@@ -265,12 +334,15 @@ async function recognizeBestPage(worker, page, profile, mode) {
   });
 
   let stagnant = 0;
+  const gain = minGainForPage(mode, formCritical);
   for (const variant of variants) {
     try {
       const buffer = await preprocessPageImage(page.data, variant);
       const result = await worker.recognize(buffer);
       const score = scoreOcrCandidate(result);
-      if (score > best.score + mode.minScoreGain) {
+      const variantText = result.data.text || "";
+      if (corruptsFormLineNumbers(baselineText, variantText)) continue;
+      if (score > best.score + gain) {
         best = { name: variant.name, buffer, result, score };
         stagnant = 0;
       } else {
@@ -531,10 +603,16 @@ async function main() {
         const hiScore = scheduleLMoneyScore(hiText);
         const hiConf = recognized.data.confidence || 0;
         const fullConf = existing?.confidence || 0;
+        if (!hiDpiShouldAppend(existing?.text || "", hiText)) {
+          logs.push(`hi-dpi page ${page.pageNumber} skipped (full pass already has key Schedule L amounts)`);
+          continue;
+        }
+        const isThorough =
+          ocrMode.name === "thorough" || ocrMode.name === "vercel-thorough";
         const keepHi =
-          hiScore > fullScore ||
-          (hiScore === fullScore && hiConf > fullConf + 3) ||
-          (ocrMode.name !== "thorough" && hiConf >= fullConf);
+          hiScore > fullScore + (isThorough ? 2 : 0) ||
+          (hiScore === fullScore && hiConf > fullConf + (isThorough ? 8 : 3)) ||
+          (!isThorough && hiConf >= fullConf);
         if (!keepHi) {
           logs.push(
             `hi-dpi page ${page.pageNumber} skipped (fullScore=${fullScore} hiScore=${hiScore})`,

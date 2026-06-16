@@ -7,7 +7,16 @@ export const VERCEL_FUNCTION_MAX_MS = 300_000;
 export const VERCEL_OCR_BUDGET_MS = 280_000;
 
 const LOCAL_MODES: OcrMode[] = ["fast", "balanced", "thorough"];
-const VERCEL_MODES: OcrMode[] = ["vercel-fast", "vercel-balanced", "vercel-thorough"];
+const VERCEL_MODES: OcrMode[] = [
+  "vercel-fast",
+  "vercel-balanced-scan",
+  "vercel-pass1-wide",
+  "vercel-balanced-retry",
+  "vercel-balanced",
+  "vercel-thorough-retry",
+  "vercel-thorough-full",
+  "vercel-thorough",
+];
 const ALL_MODES = new Set<OcrMode>([...LOCAL_MODES, ...VERCEL_MODES]);
 
 export function isVercelRuntime(): boolean {

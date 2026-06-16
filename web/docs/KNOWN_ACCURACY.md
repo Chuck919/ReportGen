@@ -1,57 +1,67 @@
 # Known OCR / parse accuracy limits
 
-**Do not block Vercel deploy for these.** Tesseract output varies on scanned 1120-S PDFs; parser fixes are in place but fresh OCR can still miss fields.
+**Last verified:** 2026-06-16 (live prod API + cached OCR eval)
 
-## Cold-start benchmark (2026-06-14)
+## We already use `vercel-balanced` on Vercel
 
-Fresh OCR, no cache reads, `workers=1`, limit 295s. Full results: `scripts/benchmark-vercel-modes.json`.
+Balanced is the **default** UI mode and posts `ocrMode=vercel-balanced` (26-page single pass, no hi-DPI). There is no separate “better balanced” preset sitting unused.
 
-| Mode | 2023 | 2024 | 2025 | Time range |
-|------|------|------|------|------------|
-| `vercel-fast` | 78.9% (15/19) | 80.0% (16/20) | 85.7% (18/21) | 72–87s |
-| `vercel-balanced` | 94.7% (18/19) | **100%** (20/20) | **100%** (21/21) | 190–236s |
-| `vercel-thorough` | 94.7% (18/19) | **100%** (20/20) | **100%** (21/21) | 186–235s |
+The **100% @ ~208s** figure in `benchmark-vercel-modes.json` is from **local OCR simulation** (`VERCEL=1`, `workers=1`, same preset) — not a guarantee on deployed Vercel cold starts.
 
-All 9 runs **PASS** under 295s.
+## Live production reverify (2026-06-16, 75-page 2024 PDF)
 
-### Fresh-run misses (this benchmark)
+`npx tsx scripts/test-prod-api.ts https://reportgen-three.vercel.app 2024`
 
-| Year | Mode | Misses |
-|------|------|--------|
-| 2023 | `vercel-fast` | `sales`, `rent`, `other_current_liabilities`, `unclassified_equity` |
-| 2023 | `vercel-balanced` / `thorough` | `notes_minus_short_term` |
-| 2024 | `vercel-fast` | `advertising`, `rent`, `taxes_licenses`, `other_current_liabilities` |
-| 2025 | `vercel-fast` | `rent`, `other_assets`, `other_current_liabilities` |
+| Mode | Time | Primary | Notes |
+|------|------|---------|-------|
+| `vercel-fast` | 121s | 70% (14/20) | Preview tier |
+| `vercel-balanced` | 161s | **75%** (15/20) | **Default — already in use** |
+| `vercel-thorough` | 177s | **85%** (17/20) | 26 pg + hi-DPI |
 
-`vercel-balanced` and `vercel-thorough` scored **100%** on 2024 and 2025 in this run.
+All under 300s. TSV export: 58 lines ✓
 
-## Fresh-run variance (Tesseract)
+## Parser vs OCR
 
-Re-running OCR on the same PDF can produce different text. Historical occasional misses on **fresh** runs:
+Cached OCR from a good run parses at **100%**:
 
-| Year | Typical `vercel-balanced` | Occasional misses |
-|------|---------------------------|-------------------|
-| 2023 | ~95% primary | `notes_minus_short_term` (Schedule L line 20) |
-| 2024 | ~95–100% primary | `cogs` — OCR reads `2` or wrong line vs `313334` |
-| 2025 | ~85–100% primary | `sales`, `other_income`, `notes_minus_short_term` when OCR garbles Form 1c / Stmt 1 / Schedule L line 20 |
+```bash
+npx tsx scripts/eval-tax-cached.ts -- --mode vercel-balanced
+# 2024: 20/20 primary, 2025: 21/21 primary
+```
 
-**Cached good runs** (`scripts/ocr-cache/{year}-vercel-balanced.txt`) parse at **100%** with current parser.
+When production OCR quality is good, the parser is fine. Low prod scores are **Tesseract variance** on fresh scans, not missing presets.
 
-## Not Vercel-specific
+## Local simulation reference (`benchmark-vercel-modes.json`, 2026-06-14)
 
-Same misses appear on **local `fast`** with the **same OCR text**. Fix parser when text is good; re-run OCR or use cache when Tesseract variance hurts.
+| Mode | 2024 primary | Time | Pages |
+|------|--------------|------|-------|
+| `vercel-fast` | 80% | 72s | 14 |
+| `vercel-balanced` | **100%** | 208s | 26 |
+| `vercel-thorough` | **100%** | 208s | 26 |
 
-## Production expectations (Vercel Hobby)
+Local sim can hit 100% while prod cold start on the same preset gets 75% — same code path, different runtime luck.
 
-| Mode | Time | Accuracy |
-|------|------|----------|
-| `vercel-fast` | ~1 min | ~79–86% preview |
-| `vercel-balanced` | ~3–4 min | **Best default** — fast pipeline, critical-only hi-DPI |
-| `vercel-thorough` | ~5–8 min (2+ API calls) | Balanced pass + hi-DPI delta on blank fields via `/api/ocr-pages` |
+## Vercel UI presets (current)
+
+| UI | Preset | Role |
+|----|--------|------|
+| Fast | `vercel-fast` | 14 pages, ~2 min preview |
+| Balanced | `vercel-balanced` | 26 pages, default, ~2.7 min |
+| Thorough | `vercel-thorough` | 26 pages + hi-DPI, ~3 min, best prod accuracy |
+
+**Bug fixed 2026-06-16:** UI Thorough had been remapping to `vercel-thorough-full` (20 pg + phase-1). Now uses `vercel-thorough` directly like the API test.
 
 ## For reliable 100%
 
-- Oracle/VPS with local `balanced` / `thorough`, or  
-- Keep OCR cache from a successful run (`scripts/ocr-cache/`)
+- **Oracle/VPS** with local `fast` / `balanced` / `thorough` (no 300s cap) — see `AGENT_HANDOFF_ORACLE_DEPLOY.md`
+- Or reuse OCR cache from a successful run (`scripts/ocr-cache/`)
 
-See `docs/DEPLOY_ORACLE.md`, `web/AGENT_HANDOFF_VERCEL_OCR.md`.
+## Benchmark artifacts
+
+| File | Purpose |
+|------|---------|
+| `scripts/benchmark-vercel-modes.json` | Local sim, all modes/years |
+| `scripts/benchmark-prod-cold.json` | Latest live HTTP cold benchmark |
+| `scripts/benchmark-matrix.json` | Local VPS presets (fast/balanced/thorough) |
+
+Run prod check: `npm run test:prod-api -- https://reportgen-three.vercel.app 2024`

@@ -225,9 +225,20 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     }
   }
 
-  const notesLine = text.split(/\n/).find((row) =>
-    /year\s*or\s*more|yearormore|fyearormo|mortgages?.{0,12}notes.{0,12}bonds.{0,12}payable/i.test(row),
-  );
+  const notesCandidates = text.split(/\n/).filter((row) => {
+    if (/less\s*than|inless\s*then|in\s*1\s*year\b/i.test(row)) return false;
+    return /1\s*year\s*or\s*more|1yearormore|yearormore|fyearormo|mortgages?.{0,12}notes.{0,12}bonds.{0,12}payable.{0,20}in/i.test(
+      row,
+    );
+  });
+  notesCandidates.sort((a, b) => {
+    const score = (row: string) =>
+      (/^\s*20\b/.test(row) ? 5 : 0) +
+      (/1yearormore|yearormore|fyearormo/i.test(row) ? 3 : 0) +
+      (scheduleLineAmount(row) !== undefined ? 2 : 0);
+    return score(b) - score(a);
+  });
+  const notesLine = notesCandidates[0];
   if (notesLine) {
     const amt = scheduleLineAmount(notesLine);
     if (amt !== undefined) {

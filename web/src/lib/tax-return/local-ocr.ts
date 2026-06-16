@@ -25,7 +25,75 @@ export async function runLocalOcr(
   ocrMode?: string;
   timingMs?: Record<string, number>;
 }> {
+  if (options?.mode === "thorough") {
+    return runThoroughMerged(bytes, options);
+  }
   return runOcrScript(bytes, options);
+}
+
+/** Local thorough: two balanced cold passes, per-page merge (beats Tesseract variance). */
+async function runThoroughMerged(
+  bytes: Uint8Array,
+  options?: { profile?: LocalOcrProfile; mode?: OcrMode },
+) {
+  const balancedOpts = { ...options, mode: "balanced" as OcrMode };
+  const pass1 = await runOcrScript(bytes, balancedOpts);
+  const pass2 = await runOcrScript(bytes, balancedOpts);
+  const merged = mergeOcrPageTexts(pass1.text, pass2.text);
+  const totalMs =
+    (pass1.timingMs?.total ?? 0) + (pass2.timingMs?.total ?? 0);
+  return {
+    ...pass1,
+    text: merged.text,
+    confidence: Math.max(pass1.confidence, pass2.confidence),
+    ocrMode: "thorough",
+    timingMs: { ...pass1.timingMs, total: totalMs, thorough_merge_picks: merged.picks },
+    logs: [
+      ...pass1.logs,
+      "--- thorough pass 2 (balanced) ---",
+      ...pass2.logs,
+      `thorough: merged ${merged.picks}/${merged.pages} pages from pass 2`,
+    ],
+  };
+}
+
+function extractOcrPages(text: string): Map<number, string> {
+  const chunks = new Map<number, string[]>();
+  for (const part of text.split(/(?=--- OCR PAGE \d+)/)) {
+    const m = part.match(/^--- OCR PAGE (\d+)/);
+    if (!m) continue;
+    const n = Number(m[1]);
+    const arr = chunks.get(n) ?? [];
+    arr.push(part.trimEnd());
+    chunks.set(n, arr);
+  }
+  const joined = new Map<number, string>();
+  for (const [n, arr] of chunks) joined.set(n, arr.join("\n"));
+  return joined;
+}
+
+function ocrPageBlockScore(block: string): number {
+  const money = (block.match(/\d{1,3}(?:,\d{3})+|\d{4,}/g) || []).length;
+  const schedL = /schedule\s+l|line\s*(?:1[0-9]|2[0-4])\b/i.test(block) ? 4 : 0;
+  const form1 = /\b1a\b|\[1c\]|gross receipt/i.test(block) ? 4 : 0;
+  return money + schedL + form1 + block.length / 2500;
+}
+
+function mergeOcrPageTexts(a: string, b: string): { text: string; picks: number; pages: number } {
+  const pagesA = extractOcrPages(a);
+  const pagesB = extractOcrPages(b);
+  const nums = [...new Set([...pagesA.keys(), ...pagesB.keys()])].sort((x, y) => x - y);
+  const out: string[] = [];
+  let picks = 0;
+  for (const n of nums) {
+    const blockA = pagesA.get(n) ?? "";
+    const blockB = pagesB.get(n) ?? "";
+    const scoreA = ocrPageBlockScore(blockA);
+    const scoreB = ocrPageBlockScore(blockB);
+    if (blockB && scoreB > scoreA) picks++;
+    out.push(scoreB > scoreA ? blockB : blockA);
+  }
+  return { text: out.join("\n"), picks, pages: nums.length };
 }
 
 export type OcrPlanResult = {
@@ -55,7 +123,9 @@ export async function runOcrPlan(
   try {
     const scriptPath = path.join(process.cwd(), "scripts", "ocr-plan.cjs");
     const env: NodeJS.ProcessEnv = { ...process.env, FREE_OCR_MODE: mode, FREE_OCR_PROFILE: "tax" };
-    if (process.env.VERCEL === "1" && !env.FREE_OCR_WORKERS) {
+    const nodeModules = path.join(process.cwd(), "node_modules");
+    env.NODE_PATH = env.NODE_PATH ? `${nodeModules}${path.delimiter}${env.NODE_PATH}` : nodeModules;
+    if (!env.FREE_OCR_WORKERS) {
       env.FREE_OCR_WORKERS = "1";
     }
     if (options?.deltaFrom) env.FREE_OCR_DELTA_FROM = options.deltaFrom;
@@ -109,7 +179,9 @@ async function runOcrScript(
   try {
     const scriptPath = path.join(process.cwd(), "scripts", "free-ocr.cjs");
     const env = { ...process.env, ...extraEnv };
-    if (process.env.VERCEL === "1" && !env.FREE_OCR_WORKERS) {
+    const nodeModules = path.join(process.cwd(), "node_modules");
+    env.NODE_PATH = env.NODE_PATH ? `${nodeModules}${path.delimiter}${env.NODE_PATH}` : nodeModules;
+    if (!env.FREE_OCR_WORKERS) {
       env.FREE_OCR_WORKERS = "1";
     }
     if (process.env.VERCEL === "1" && !env.FREE_OCR_TIMEOUT_MS) {

@@ -16,6 +16,7 @@ import {
   validateClientFileList,
   validatePdfFileSize,
 } from "../src/lib/tax/validate-upload";
+import { VERCEL_MULTIPASS } from "../src/lib/tax/vercel-multipass-config";
 import { maxFilesPerApiRequest } from "../src/lib/tax/upload-policy";
 
 let passed = 0;
@@ -87,13 +88,26 @@ console.log("\n=== vercel OCR preset diff ===");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { resolveOcrMode } = require("./ocr-modes.cjs") as typeof import("./ocr-modes.cjs");
 process.env.VERCEL = "1";
-const balanced = resolveOcrMode("vercel-balanced");
-const thorough = resolveOcrMode("vercel-thorough");
-assert(balanced.skipPhase3UnlessCritical === true, "balanced uses critical-only hi-DPI");
-assert(thorough.maxHiDpiPages > balanced.maxHiDpiPages, "thorough has more hi-DPI pages");
-assert(thorough.hiScale > balanced.hiScale, "thorough uses higher hi-DPI scale");
-assert(thorough.skipPhase3UnlessCritical === false, "thorough runs full hi-DPI on delta pages");
+const vFast = resolveOcrMode("vercel-fast");
+const vBalanced = resolveOcrMode("vercel-balanced");
+const vThorough = resolveOcrMode("vercel-thorough");
 process.env.VERCEL = prev;
+const localFast = resolveOcrMode("fast");
+const localBalanced = resolveOcrMode("balanced");
+const localThorough = resolveOcrMode("thorough");
+assert(vFast.maxPhase2Pages === localFast.maxPhase2Pages, "vercel-fast mirrors local fast pages");
+assert(vBalanced.maxHiDpiPages === localBalanced.maxHiDpiPages, "vercel-balanced mirrors local balanced hi-DPI");
+assert(vFast.maxPhase2Pages === 14, "fast caps at 14 pages");
+assert(vFast.maxHiDpiPages === 0, "fast skips hi-DPI");
+assert(vBalanced.maxPhase2Pages === 26, "balanced scans 26 pages");
+assert(vBalanced.maxHiDpiPages > 0, "balanced has selective hi-DPI");
+assert(vThorough.maxPhase2Pages === 26, "thorough scans 26 pages");
+assert(vThorough.maxPhase2Pages === vBalanced.maxPhase2Pages, "thorough scans same pages as balanced");
+assert(vThorough.maxHiDpiPages === vBalanced.maxHiDpiPages, "thorough preset matches balanced (local runs 2×)");
+assert(
+  localFast.workers === 1 && localBalanced.workers === 1 && localThorough.workers === 1,
+  "local workers=1",
+);
 
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);
 process.exit(failed > 0 ? 1 : 0);

@@ -7,7 +7,12 @@ export type OcrMode =
   | "balanced"
   | "thorough"
   | "vercel-fast"
+  | "vercel-balanced-scan"
+  | "vercel-pass1-wide"
+  | "vercel-balanced-retry"
   | "vercel-balanced"
+  | "vercel-thorough-retry"
+  | "vercel-thorough-full"
   | "vercel-thorough";
 
 const OCR_MODES = new Set<OcrMode>([
@@ -15,7 +20,12 @@ const OCR_MODES = new Set<OcrMode>([
   "balanced",
   "thorough",
   "vercel-fast",
+  "vercel-balanced-scan",
+  "vercel-pass1-wide",
+  "vercel-balanced-retry",
   "vercel-balanced",
+  "vercel-thorough-retry",
+  "vercel-thorough-full",
   "vercel-thorough",
 ]);
 

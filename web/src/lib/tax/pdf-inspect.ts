@@ -1,3 +1,4 @@
+import "@/lib/tax/pdf-server-polyfill";
 import { PDFParse } from "pdf-parse";
 import { isLikelyScannedPdf, isLikelyTaxReturnText } from "./validate-upload";
 

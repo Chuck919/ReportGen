@@ -57,6 +57,17 @@ export function getMissingFieldsForNextTier(
   column: Pick<TaxYearValues, "values" | "confidence" | "warnings">,
   nextTierMode: string,
 ): string[] {
+  if (nextTierMode === "primary") {
+    return getMissingPrimaryFieldIds(column);
+  }
+  if (nextTierMode === "primary+attach") {
+    const primary = getMissingPrimaryFieldIds(column);
+    const attach = getMissingAttachmentFieldIds(column);
+    return Array.from(new Set([...primary, ...attach]));
+  }
+  if (nextTierMode === "all-input") {
+    return getMissingInputFieldIds(column);
+  }
   if (nextTierMode === "vercel-balanced" || nextTierMode === "balanced") {
     return getMissingPrimaryFieldIds(column);
   }

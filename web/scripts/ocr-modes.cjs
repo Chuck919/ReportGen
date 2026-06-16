@@ -4,74 +4,37 @@
  * fast / balanced / thorough — local & VPS (100% matrix presets; do not retune for Vercel).
  * vercel-fast / vercel-balanced — separate Hobby-tier modes only.
  */
+/**
+ * Local/VPS tiers (workers=1 for Oracle/Hetzner CPU limits):
+ *   fast     — quick preview ~2 min, fewer pages, no hi-DPI
+ *   balanced — proven 100% KCF preset (~4 min), promoted from old fast
+ *   thorough — max pages + hi-DPI on critical pages only (~6–12 min)
+ */
+const BALANCED_PRESET = {
+  label: "Balanced",
+  quickScale: 0.4,
+  fullScale: 2.08,
+  hiScale: 3.55,
+  maxPhase2Pages: 26,
+  maxHiDpiPages: 5,
+  maxVariantsEasy: 1,
+  maxVariantsNormal: 3,
+  maxVariantsHeavy: 4,
+  maxHiDpiVariants: 4,
+  easyPageMinConf: 85,
+  easyPageMinMoney: 8,
+  baselineGoodConf: 79,
+  baselineGoodMoney: 6,
+  earlyExitStreak: 1,
+  minScoreGain: 1.75,
+  skipHiDpiMinConf: 72,
+  skipPhase3UnlessCritical: true,
+  workers: 1,
+};
+
 const MODES = {
   fast: {
     label: "Fast",
-    quickScale: 0.4,
-    fullScale: 2.08,
-    hiScale: 3.55,
-    maxPhase2Pages: 26,
-    maxHiDpiPages: 5,
-    maxVariantsEasy: 1,
-    maxVariantsNormal: 3,
-    maxVariantsHeavy: 4,
-    maxHiDpiVariants: 4,
-    easyPageMinConf: 85,
-    easyPageMinMoney: 8,
-    baselineGoodConf: 79,
-    baselineGoodMoney: 6,
-    earlyExitStreak: 1,
-    minScoreGain: 1.75,
-    skipHiDpiMinConf: 72,
-    skipPhase3UnlessCritical: true,
-    workers: 3,
-  },
-  balanced: {
-    label: "Balanced",
-    quickScale: 0.5,
-    fullScale: 2.35,
-    hiScale: 4.2,
-    maxPhase2Pages: 30,
-    maxHiDpiPages: 8,
-    maxVariantsEasy: 2,
-    maxVariantsNormal: 4,
-    maxVariantsHeavy: 5,
-    maxHiDpiVariants: 4,
-    easyPageMinConf: 82,
-    easyPageMinMoney: 8,
-    baselineGoodConf: 78,
-    baselineGoodMoney: 6,
-    earlyExitStreak: 2,
-    minScoreGain: 1.5,
-    skipHiDpiMinConf: 72,
-    workers: 2,
-  },
-  thorough: {
-    label: "Thorough",
-    quickScale: 0.55,
-    fullScale: 2.35,
-    hiScale: 4.65,
-    maxPhase2Pages: 36,
-    maxHiDpiPages: 12,
-    maxVariantsEasy: 3,
-    maxVariantsNormal: 6,
-    maxVariantsHeavy: 8,
-    maxHiDpiVariants: 6,
-    easyPageMinConf: 78,
-    easyPageMinMoney: 7,
-    baselineGoodConf: 0,
-    baselineGoodMoney: 0,
-    earlyExitStreak: 3,
-    minScoreGain: 1.5,
-    skipHiDpiMinConf: 0,
-    workers: 2,
-  },
-};
-
-/** Vercel Hobby only — never merged into fast/balanced/thorough. */
-const VERCEL_MODES = {
-  "vercel-fast": {
-    label: "Vercel Fast",
     quickScale: 0.4,
     fullScale: 1.82,
     hiScale: 3.55,
@@ -94,29 +57,142 @@ const VERCEL_MODES = {
     baselineOnly: true,
     workers: 1,
   },
-  /** Same pipeline as local `fast`; workers capped to 1 on Vercel (1 vCPU). */
-  "vercel-balanced": {
-    label: "Vercel Balanced",
+  balanced: { ...BALANCED_PRESET },
+  thorough: {
+    label: "Thorough",
+    ...BALANCED_PRESET,
+  },
+};
+
+/** Vercel Hobby only — never merged into fast/balanced/thorough. */
+const VERCEL_MODES = {
+  "vercel-fast": {
+    label: "Vercel Fast",
     ...MODES.fast,
     workers: 1,
   },
-  /**
-   * Balanced + deeper hi-DPI: higher scale, more pages/variants, lower skip threshold.
-   * Slower than Balanced; use when Schedule L / attachment fields are still blank.
-   */
-  /**
-   * Pass-2 preset for delta hi-DPI (used after a full vercel-balanced pass).
-   * Each /api/ocr-pages call is a small page subset — can run deeper OCR within 300s.
-   */
-  "vercel-thorough": {
-    label: "Vercel Thorough",
+  /** Balanced — mirrors local balanced: 26 pg + selective hi-DPI (~4 min target). */
+  "vercel-balanced": {
+    label: "Vercel Balanced",
+    quickScale: 0.4,
+    fullScale: 2.08,
+    hiScale: 3.55,
+    maxPhase2Pages: 26,
+    maxHiDpiPages: 5,
+    maxVariantsEasy: 1,
+    maxVariantsNormal: 3,
+    maxVariantsHeavy: 4,
+    maxHiDpiVariants: 4,
+    easyPageMinConf: 85,
+    easyPageMinMoney: 8,
+    baselineGoodConf: 79,
+    baselineGoodMoney: 6,
+    earlyExitStreak: 1,
+    minScoreGain: 1.75,
+    skipHiDpiMinConf: 72,
+    skipPhase3UnlessCritical: true,
+    skipPhase1QuickScan: true,
+    useFastHeuristicPages: true,
+    workers: 1,
+  },
+  /** Thorough pass 1 — more pages than scan, still no hi-DPI (benchmark: better base OCR). */
+  "vercel-pass1-wide": {
+    label: "Vercel Pass1 Wide",
+    quickScale: 0.4,
+    fullScale: 1.95,
+    hiScale: 3.55,
+    maxPhase2Pages: 20,
+    maxHiDpiPages: 0,
+    maxVariantsEasy: 0,
+    maxVariantsNormal: 0,
+    maxVariantsHeavy: 2,
+    maxHiDpiVariants: 0,
+    easyPageMinConf: 84,
+    easyPageMinMoney: 8,
+    baselineGoodConf: 72,
+    baselineGoodMoney: 5,
+    earlyExitStreak: 1,
+    minScoreGain: 1.75,
+    skipHiDpiMinConf: 0,
+    skipPhase3: true,
+    skipPhase1QuickScan: true,
+    useFastHeuristicPages: true,
+    baselineOnly: true,
+    workers: 1,
+  },
+  /** Alias for pass 1 in multi-pass flows. */
+  "vercel-balanced-scan": {
+    label: "Vercel Balanced Scan",
     ...MODES.fast,
+    quickScale: 0.4,
+    fullScale: 1.88,
+    hiScale: 3.55,
+    maxPhase2Pages: 16,
+    maxHiDpiPages: 0,
+    maxVariantsEasy: 0,
+    maxVariantsNormal: 0,
+    maxVariantsHeavy: 2,
+    maxHiDpiVariants: 0,
+    easyPageMinConf: 86,
+    easyPageMinMoney: 8,
+    baselineGoodConf: 74,
+    baselineGoodMoney: 5,
+    earlyExitStreak: 1,
+    minScoreGain: 1.75,
+    skipHiDpiMinConf: 0,
+    skipPhase3: true,
+    skipPhase1QuickScan: true,
+    useFastHeuristicPages: true,
+    baselineOnly: true,
+    workers: 1,
+  },
+  /** Pass 2 delta hi-DPI for Balanced UI — primary gaps only, capped pages. */
+  "vercel-balanced-retry": {
+    label: "Vercel Balanced Retry",
+    ...MODES.fast,
+    fullScale: 1.82,
+    hiScale: 3.5,
+    maxPhase2Pages: 4,
+    maxHiDpiPages: 4,
+    maxHiDpiVariants: 3,
+    maxVariantsNormal: 3,
+    skipHiDpiMinConf: 68,
+    skipPhase3UnlessCritical: true,
+    workers: 1,
+  },
+  /** Pass 2 delta hi-DPI for Thorough multi-pass. */
+  "vercel-thorough-retry": {
+    label: "Vercel Thorough Retry",
+    ...MODES.fast,
+    fullScale: 1.82,
     hiScale: 4.0,
-    maxHiDpiPages: 10,
+    maxPhase2Pages: 6,
+    maxHiDpiPages: 8,
     maxHiDpiVariants: 6,
     maxVariantsNormal: 5,
     skipHiDpiMinConf: 0,
     skipPhase3UnlessCritical: false,
+    workers: 1,
+  },
+  /** Thorough UI — phase1 discovery + 20 pages + hi-DPI (90% on 75pg @ ~266s; 26 pages times out). */
+  "vercel-thorough-full": {
+    label: "Vercel Thorough Full",
+    ...MODES.fast,
+    fullScale: 1.95,
+    maxPhase2Pages: 20,
+    maxHiDpiPages: 6,
+    maxHiDpiVariants: 5,
+    maxVariantsNormal: 4,
+    skipHiDpiMinConf: 0,
+    skipPhase3UnlessCritical: false,
+    workers: 1,
+  },
+  /** Thorough on Vercel — single balanced pass (Hobby timeout; local thorough runs 2× merge). */
+  "vercel-thorough": {
+    label: "Vercel Thorough",
+    ...BALANCED_PRESET,
+    skipPhase1QuickScan: true,
+    useFastHeuristicPages: true,
     workers: 1,
   },
 };
