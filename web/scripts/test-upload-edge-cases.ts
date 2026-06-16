@@ -97,6 +97,8 @@ const localBalanced = resolveOcrMode("balanced");
 const localThorough = resolveOcrMode("thorough");
 assert(vFast.maxPhase2Pages === localFast.maxPhase2Pages, "vercel-fast mirrors local fast pages");
 assert(vBalanced.maxHiDpiPages === localBalanced.maxHiDpiPages, "vercel-balanced mirrors local balanced hi-DPI");
+assert(!vBalanced.useFastHeuristicPages, "vercel-balanced must not skip pages via fast heuristic");
+assert(!vBalanced.skipPhase1QuickScan, "vercel-balanced must not skip phase1 quick scan");
 assert(vFast.maxPhase2Pages === 14, "fast caps at 14 pages");
 assert(vFast.maxHiDpiPages === 0, "fast skips hi-DPI");
 assert(vBalanced.maxPhase2Pages === 26, "balanced scans 26 pages");

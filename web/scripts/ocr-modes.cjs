@@ -71,28 +71,10 @@ const VERCEL_MODES = {
     ...MODES.fast,
     workers: 1,
   },
-  /** Balanced — mirrors local balanced: 26 pg + selective hi-DPI (~4 min target). */
+  /** Balanced — exact local balanced preset (no fast-heuristic page skip). */
   "vercel-balanced": {
     label: "Vercel Balanced",
-    quickScale: 0.4,
-    fullScale: 2.08,
-    hiScale: 3.55,
-    maxPhase2Pages: 26,
-    maxHiDpiPages: 5,
-    maxVariantsEasy: 1,
-    maxVariantsNormal: 3,
-    maxVariantsHeavy: 4,
-    maxHiDpiVariants: 4,
-    easyPageMinConf: 85,
-    easyPageMinMoney: 8,
-    baselineGoodConf: 79,
-    baselineGoodMoney: 6,
-    earlyExitStreak: 1,
-    minScoreGain: 1.75,
-    skipHiDpiMinConf: 72,
-    skipPhase3UnlessCritical: true,
-    skipPhase1QuickScan: true,
-    useFastHeuristicPages: true,
+    ...BALANCED_PRESET,
     workers: 1,
   },
   /** Thorough pass 1 — more pages than scan, still no hi-DPI (benchmark: better base OCR). */
@@ -187,12 +169,10 @@ const VERCEL_MODES = {
     skipPhase3UnlessCritical: false,
     workers: 1,
   },
-  /** Thorough on Vercel — single balanced pass (Hobby timeout; local thorough runs 2× merge). */
+  /** Thorough on Vercel — exact local balanced preset (single pass; local runs 2× merge). */
   "vercel-thorough": {
     label: "Vercel Thorough",
     ...BALANCED_PRESET,
-    skipPhase1QuickScan: true,
-    useFastHeuristicPages: true,
     workers: 1,
   },
 };
