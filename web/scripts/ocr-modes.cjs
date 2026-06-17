@@ -32,6 +32,13 @@ const BALANCED_PRESET = {
   workers: 1,
 };
 
+/** Vercel Hobby — same page set as local balanced, tuned to finish under 280s on 75pg returns. */
+const VERCEL_BALANCED_PRESET = {
+  ...BALANCED_PRESET,
+  skipPhase1QuickScan: true,
+  maxHiDpiVariants: 3,
+};
+
 const MODES = {
   fast: {
     label: "Fast",
@@ -71,10 +78,10 @@ const VERCEL_MODES = {
     ...MODES.fast,
     workers: 1,
   },
-  /** Balanced — exact local balanced preset (no fast-heuristic page skip). */
+  /** Balanced — Vercel budget variant (26 pg, no page-skip heuristics). */
   "vercel-balanced": {
     label: "Vercel Balanced",
-    ...BALANCED_PRESET,
+    ...VERCEL_BALANCED_PRESET,
     workers: 1,
   },
   /** Thorough pass 1 — more pages than scan, still no hi-DPI (benchmark: better base OCR). */
@@ -169,10 +176,10 @@ const VERCEL_MODES = {
     skipPhase3UnlessCritical: false,
     workers: 1,
   },
-  /** Thorough on Vercel — exact local balanced preset (single pass; local runs 2× merge). */
+  /** Thorough on Vercel — same budget preset as vercel-balanced. */
   "vercel-thorough": {
     label: "Vercel Thorough",
-    ...BALANCED_PRESET,
+    ...VERCEL_BALANCED_PRESET,
     workers: 1,
   },
 };
