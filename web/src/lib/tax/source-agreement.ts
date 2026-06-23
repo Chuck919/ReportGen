@@ -90,6 +90,49 @@ export function hasSourceDisagreement(snapshots: SourceSnapshot[]): boolean {
   return new Set(values).size > 1;
 }
 
+const MATERIAL_DISAGREEMENT_PCT = 0.08;
+
+/** Families treated as independent cross-check evidence (excludes OCR noise). */
+const CROSS_CHECK_FAMILIES = new Set<SourceFamily>([
+  "form",
+  "schedule-l",
+  "comparison",
+  "structured",
+]);
+
+function credibleCrossCheckSnapshots(snapshots: SourceSnapshot[]): SourceSnapshot[] {
+  return snapshots.filter(
+    (s) => CROSS_CHECK_FAMILIES.has(s.family) && s.confidence >= 70,
+  );
+}
+
+/** Largest relative percent gap between `chosen` and any alternate read. */
+export function largestDisagreementPercent(chosen: number, snapshots: SourceSnapshot[]): number {
+  let max = 0;
+  for (const snap of snapshots) {
+    if (valuesExactlyEqual(snap.value, chosen)) continue;
+    const pct = Math.abs(snap.value - chosen) / Math.max(Math.abs(chosen), 1);
+    if (pct > max) max = pct;
+  }
+  return max;
+}
+
+/**
+ * Material cross-family disagreement: a credible independent source disagrees by ≥8%
+ * and fewer than two families corroborate the chosen value.
+ * OCR reads and uncorroborated statement-only alternates are ignored.
+ */
+export function hasMaterialDisagreement(chosen: number, snapshots: SourceSnapshot[]): boolean {
+  const crossCheck = credibleCrossCheckSnapshots(snapshots);
+  if (crossCheck.length < 2) return false;
+  if (countAgreeingFamilies(chosen, crossCheck) >= 2) return false;
+  return crossCheck.some(
+    (s) =>
+      !valuesExactlyEqual(s.value, chosen) &&
+      Math.abs(s.value - chosen) / Math.max(Math.abs(chosen), 1) >= MATERIAL_DISAGREEMENT_PCT,
+  );
+}
+
 export function pickBestSnapshot(snapshots: SourceSnapshot[]): SourceSnapshot {
   const byValue = new Map<number, SourceSnapshot[]>();
   for (const snap of snapshots) {

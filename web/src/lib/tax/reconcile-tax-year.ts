@@ -8,10 +8,11 @@ import {
   buildSourceSnapshots,
   classifySourceFamily,
   countAgreeingFamilies,
-  hasSourceDisagreement,
+  hasMaterialDisagreement,
   resolveValuesFromSnapshots,
   sourceDisagreementDetail,
   valuesExactlyEqual,
+  largestDisagreementPercent,
   type SourceFamily,
   type SourceSnapshot,
   withinTolerance,
@@ -80,11 +81,36 @@ function isSubtractiveStatementSource(source: string | undefined): boolean {
   return /total\s+minus\s+util/i.test(source ?? "");
 }
 
+function isStatementLine18Source(source: string | undefined): boolean {
+  return /statement\s*\(?\s*line\s*18\)?/i.test(source ?? "");
+}
+
+/** Form/comparison corroboration for Stmt Line 18 — not Schedule L attachment OCR. */
+function statementLine18CrossCheckSnapshots(snaps: SourceSnapshot[]): SourceSnapshot[] {
+  return snaps.filter((s) => s.family === "form" || s.family === "comparison");
+}
+
+function statementLine18Uncorroborated(
+  value: number,
+  source: string | undefined,
+  snaps: SourceSnapshot[],
+): boolean {
+  if (!isStatementLine18Source(source)) return false;
+  const crossCheck = statementLine18CrossCheckSnapshots(snaps);
+  if (!crossCheck.length) return true;
+  return !crossCheck.some((s) => valuesExactlyEqual(s.value, value));
+}
+
 function isTrustedSingleSource(source: string | undefined, parserConf: number): boolean {
+  if (isStatementLine18Source(source)) return false;
   if (isAuthoritativeSource(source)) return parserConf >= 65;
   if (/comparison/i.test(source ?? "") && parserConf >= 84) return true;
   if (/structured financial/i.test(source ?? "")) return true;
   return false;
+}
+
+function hasMaterialSourceDisagreement(snaps: SourceSnapshot[], chosen: number): boolean {
+  return hasMaterialDisagreement(chosen, snaps);
 }
 
 function addFlag(flags: Record<string, string[]>, id: string, msg: string): void {
@@ -234,20 +260,33 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     }
 
     const snaps = sourceSnapshots[id] ?? [];
+    const source = fieldSources[id];
+    const line18Isolated = statementLine18Uncorroborated(value, source, snaps);
     const agreement = snaps.length
-      ? countAgreeingFamilies(value, snaps)
+      ? line18Isolated
+        ? countAgreeingFamilies(value, statementLine18CrossCheckSnapshots(snaps))
+        : countAgreeingFamilies(value, snaps)
       : (persistedAgreement[id] ?? 0);
     sourceAgreement[id] = agreement;
 
-    const family = classifySourceFamily(fieldSources[id]);
-    const source = fieldSources[id];
+    const family = classifySourceFamily(source);
     const parserConf = confidence[id] ?? 70;
+
+    if (line18Isolated) {
+      addFlag(fieldFlags, id, "low_trust_source");
+    }
 
     if (agreement < 2) {
       if (family === "ocr" || isWeakSource(source)) {
         addFlag(fieldFlags, id, "OCR label match only — no corroboration");
       } else if (isSubtractiveStatementSource(source)) {
         addFlag(fieldFlags, id, "Subtractive formula — verify against detail lines");
+      } else if (
+        isStatementLine18Source(source) &&
+        snaps.length &&
+        hasMaterialSourceDisagreement(snaps, value)
+      ) {
+        addFlag(fieldFlags, id, "Statement Line 18 — corroborating source disagrees");
       } else if (!isTrustedSingleSource(source, parserConf) && !statementPassesStructuralClosure(source)) {
         addFlag(fieldFlags, id, "Low-trust source — verify manually");
       }
@@ -265,21 +304,24 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
       addFlag(fieldFlags, id, "Likely form line number or OCR noise — verify");
     }
 
-    const disagreeMsg = hasSourceDisagreement(snaps)
-      ? sourceDisagreementDetail(snaps, value)
-      : undefined;
+    const materialDisagree = hasMaterialSourceDisagreement(snaps, value);
+    const disagreeMsg = materialDisagree ? sourceDisagreementDetail(snaps, value) : undefined;
     if (disagreeMsg) addFlag(fieldFlags, id, disagreeMsg);
 
     const capped =
-      agreement >= 2
-        ? Math.min(parserConf, DISPLAY_CONF_CAP_AGREED)
-        : isTrustedSingleSource(source, parserConf)
-          ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
-          : statementPassesStructuralClosure(source)
-            ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
-            : isSubtractiveStatementSource(source)
-              ? Math.min(parserConf, SUBTRACTIVE_CONF_CAP)
-              : Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE);
+      line18Isolated
+        ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
+        : agreement >= 2
+          ? Math.min(parserConf, DISPLAY_CONF_CAP_AGREED)
+          : materialDisagree
+            ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
+            : isTrustedSingleSource(source, parserConf)
+              ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
+              : statementPassesStructuralClosure(source)
+                ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
+                : isSubtractiveStatementSource(source)
+                  ? Math.min(parserConf, SUBTRACTIVE_CONF_CAP)
+                  : Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE);
     displayConfidence[id] = capped;
 
     const hardFlags = (fieldFlags[id] ?? []).filter(isHardFlag);
@@ -288,14 +330,15 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     const needsReview =
       hardFlags.length > 0 ||
       suspicious ||
-      hasSourceDisagreement(snaps) ||
+      materialDisagree ||
       parserConf < 65 ||
       family === "ocr" ||
       isWeakSource(source) ||
+      line18Isolated ||
       (agreement < 2 &&
         !isTrustedSingleSource(source, parserConf) &&
         !structuralOk &&
-        !(family === "statement" && parserConf >= 88 && !isSubtractiveStatementSource(source)));
+        !(family === "statement" && parserConf >= 88 && !isSubtractiveStatementSource(source) && !isStatementLine18Source(source)));
     fieldStatus[id] = needsReview ? "review" : "verified";
 
     fieldTrustTier[id] = resolveFieldTrustTier({

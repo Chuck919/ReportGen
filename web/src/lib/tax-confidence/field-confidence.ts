@@ -1,7 +1,5 @@
 import type { OcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
-import {
-  STMT_ATTACHMENT_FIELD_IDS,
-} from "@/lib/tax-return/ocr-coverage-rescan";
+import { STMT_ATTACHMENT_FIELD_IDS, isStatementSourcedField } from "@/lib/tax-return/ocr-coverage-rescan";
 import type { OpexCandidate } from "@/lib/tax-return/opex-candidate-ranking";
 import {
   capConfidenceForFlags,
@@ -10,10 +8,12 @@ import {
   mergeConfidenceFlags,
 } from "./confidence-flags";
 import { opexCandidateUncertainty } from "./candidate-uncertainty";
-import { isSuspiciousTaxValue } from "@/lib/tax-return/confidence-gates";
+import { isSuspiciousTaxValue, isAuthoritativeSource } from "@/lib/tax-return/confidence-gates";
 import {
-  hasSourceDisagreement,
+  hasMaterialDisagreement,
   sourceDisagreementDetail,
+  countAgreeingFamilies,
+  valuesExactlyEqual,
   type SourceSnapshot,
 } from "./source-agreement";
 
@@ -46,6 +46,32 @@ export type ApplyFieldConfidenceInput = {
   ocrCoverage?: OcrCoverageDiagnostics;
 };
 
+function isStatementLine18Source(source?: string): boolean {
+  return /statement\s*\(?\s*line\s*18\)?/i.test(source ?? "");
+}
+
+/** Form/comparison only — Schedule L OCR often reads the same statement attachment block. */
+function statementLine18CrossCheckSnapshots(snapshots?: SourceSnapshot[]): SourceSnapshot[] {
+  return snapshots?.filter((s) => s.family === "form" || s.family === "comparison") ?? [];
+}
+
+/** Statement Line 18 — flag when no form or comparison worksheet corroborates the value. */
+function statementLine18NeedsReview(
+  value: number,
+  source: string | undefined,
+  snapshots?: SourceSnapshot[],
+): boolean {
+  if (!isStatementLine18Source(source)) return false;
+  const crossCheck = statementLine18CrossCheckSnapshots(snapshots);
+  if (!crossCheck.length) return true;
+  if (crossCheck.some((s) => valuesExactlyEqual(s.value, value))) return false;
+  return crossCheck.some(
+    (s) =>
+      !valuesExactlyEqual(s.value, value) &&
+      Math.abs(s.value - value) / Math.max(Math.abs(value), 1) >= 0.08,
+  );
+}
+
 function ocrCoverageFlags(coverage: OcrCoverageDiagnostics): ConfidenceFlag[] {
   const flags: ConfidenceFlag[] = [];
   for (const raw of coverage.flags) {
@@ -73,7 +99,7 @@ function ocrCoverageFlags(coverage: OcrCoverageDiagnostics): ConfidenceFlag[] {
   }
   if (
     flags.some((f) =>
-      ["stmt2_missing_lines", "comparison_missing", "page_truncation", "missing_key_schedule"].includes(f),
+      ["comparison_missing", "formula_inconsistency", "page_truncation", "missing_key_schedule"].includes(f),
     )
   ) {
     flags.push("ocr_incomplete");
@@ -81,16 +107,32 @@ function ocrCoverageFlags(coverage: OcrCoverageDiagnostics): ConfidenceFlag[] {
   return [...new Set(flags)];
 }
 
-/** When document OCR is incomplete, flag statement-sourced attachment fields. */
+/** When document OCR is incomplete, flag statement-sourced attachment fields only. */
 function propagateDocumentOcrFlags(
   fieldId: string,
-  _source: string | undefined,
+  source: string | undefined,
   _existingFlags: string[] | undefined,
   ocrCoverage?: OcrCoverageDiagnostics,
+  value?: number,
+  sourceSnapshots?: SourceSnapshot[],
 ): ConfidenceFlag[] {
   if (!ocrCoverage?.flags.length) return [];
   if (!STMT_ATTACHMENT_FIELD_IDS.has(fieldId)) return [];
-  return ["ocr_incomplete"];
+  if (/form 1120|page 1 block/i.test(source ?? "")) return [];
+  if (/two-year comparison/i.test(source ?? "")) return [];
+  if (!isStatementSourcedField(source)) return [];
+  if (
+    value !== undefined &&
+    sourceSnapshots?.length &&
+    countAgreeingFamilies(value, sourceSnapshots) >= 2
+  ) {
+    return [];
+  }
+  if (fieldId === "other_operating_expenses") return ["ocr_incomplete"];
+  if (/OCR label|fuzzy|label match|verify|residual|inferred|tail scan/i.test(source ?? "")) {
+    return ["ocr_incomplete"];
+  }
+  return [];
 }
 
 /**
@@ -105,8 +147,12 @@ export function applyFieldConfidence(input: ApplyFieldConfidenceInput): {
 } {
   const codes: ConfidenceFlag[] = [];
 
-  if (input.sourceSnapshots?.length && hasSourceDisagreement(input.sourceSnapshots)) {
+  if (input.sourceSnapshots?.length && hasMaterialDisagreement(input.value, input.sourceSnapshots)) {
     codes.push("source_disagreement");
+  }
+
+  if (statementLine18NeedsReview(input.value, input.source, input.sourceSnapshots)) {
+    codes.push("low_trust_source");
   }
 
   if (input.fieldId === "other_operating_expenses" && input.opexCandidates?.length) {
@@ -124,11 +170,18 @@ export function applyFieldConfidence(input: ApplyFieldConfidenceInput): {
       input.source,
       input.existingFlags,
       input.ocrCoverage,
+      input.value,
+      input.sourceSnapshots,
     ),
   );
 
   if (
-    isSuspiciousTaxValue(input.fieldId, input.value, input.source, input.taxYear)
+    isSuspiciousTaxValue(input.fieldId, input.value, input.source, input.taxYear) &&
+    !(
+      input.value === 0 &&
+      (/coherence:|routed to/i.test(input.source ?? "") ||
+        (input.fieldId === "amortization" && /no intangibles/i.test(input.source ?? "")))
+    )
   ) {
     codes.push("low_trust_source");
   }
@@ -153,7 +206,7 @@ export function applyFieldConfidence(input: ApplyFieldConfidenceInput): {
     (input.fieldId === "taxes_paid" || input.fieldId === "other_current_liabilities") &&
     input.value > 0 &&
     input.value < 100_000 &&
-    !/form 1120|schedule|comparison|statement \(line/i.test(input.source ?? "")
+    !/form 1120|schedule|comparison|statement\s*\(?\s*line/i.test(input.source ?? "")
   ) {
     codes.push("low_trust_source");
   }
@@ -162,7 +215,7 @@ export function applyFieldConfidence(input: ApplyFieldConfidenceInput): {
 
   let fieldFlags = mergeConfidenceFlags(input.existingFlags, codes);
 
-  if (input.sourceSnapshots?.length) {
+  if (input.sourceSnapshots?.length && codes.includes("source_disagreement")) {
     const detail = sourceDisagreementDetail(input.sourceSnapshots, input.value);
     if (detail && !fieldFlags.some((f) => /other reads/i.test(f))) {
       fieldFlags = [...fieldFlags, detail];

@@ -7,7 +7,9 @@ export {
   classifySourceFamily,
   countAgreeingFamilies,
   getAlternateReads,
+  hasMaterialDisagreement,
   hasSourceDisagreement,
+  largestDisagreementPercent,
   pickBestSnapshot,
   resolveValuesFromSnapshots,
   sourceDisagreementDetail,
@@ -16,9 +18,11 @@ export {
   type SourceFamily,
   type SourceSnapshot,
 } from "@/lib/tax/source-agreement";
-
-import type { SourceSnapshot } from "@/lib/tax/source-agreement";
-import { hasSourceDisagreement, valuesExactlyEqual } from "@/lib/tax/source-agreement";
+import {
+  hasSourceDisagreement,
+  valuesExactlyEqual,
+  type SourceSnapshot,
+} from "@/lib/tax/source-agreement";
 import type { ConfidenceFlag } from "./confidence-flags";
 
 /** Detect cross-family disagreement for confidence flagging. */

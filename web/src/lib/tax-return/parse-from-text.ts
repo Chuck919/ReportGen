@@ -24,6 +24,7 @@ import {
   buildVerificationSnapshots,
   reconcileTaxYear,
 } from "@/lib/tax/reconcile-tax-year";
+import type { SourceSnapshot } from "@/lib/tax/source-agreement";
 import {
   countStatement1DetailLines,
   extractStatementDeductions,
@@ -45,6 +46,19 @@ import { generateOpexCandidates } from "./opex-candidate-ranking";
 import { applyWorkbookConfidenceLayer } from "@/lib/tax-confidence/field-confidence";
 import { capConfidenceForFlags, mergeConfidenceFlags } from "@/lib/tax-confidence/confidence-flags";
 import { STMT_ATTACHMENT_FIELD_IDS } from "./ocr-coverage-rescan";
+import { reconcileCogsFromSources } from "./cogs-reconcile";
+
+/** P&L lines that should surface OCR-gap warnings when still missing after parse. */
+const MISSING_MATERIAL_FIELD_IDS = new Set([
+  "sales",
+  "cogs",
+  "advertising",
+  "taxes_licenses",
+  "rent",
+  "officer_compensation",
+  "salaries_wages",
+  ...STMT_ATTACHMENT_FIELD_IDS,
+]);
 
 const INPUT_ROW_IDS = new Set(
   TAX_WORKBOOK_ROWS.filter((row) => row.excelBehavior === "input").map((row) => row.id),
@@ -1029,38 +1043,20 @@ export function parseTaxReturnFromText(
     }
   }
 
-  const formCogs = formAnchors.values.cogs ?? resolved.values.cogs;
-  if (
-    comparison?.values.cogs !== undefined &&
-    comparison.values.cogs >= 10_000 &&
-    formCogs !== undefined &&
-    Math.abs(formCogs - comparison.values.cogs) / Math.max(comparison.values.cogs, 1) > 0.015
-  ) {
-    resolved.values.cogs = comparison.values.cogs;
-    resolved.confidence.cogs = comparison.confidence.cogs ?? 92;
-    resolved.sources.cogs = "Two-year comparison (COGS row — form year column mismatch)";
-  } else if (
-    formCogs !== undefined &&
-    formCogs >= 10_000 &&
-    (formAnchors.confidence.cogs ?? 0) >= 96
-  ) {
+  const cogsPick = reconcileCogsFromSources({
+    formCogs: formAnchors.values.cogs ?? resolved.values.cogs,
+    formConfidence: formAnchors.confidence.cogs,
+    formSource: formAnchors.sources.cogs,
+    comparisonCogs: comparison?.values.cogs,
+    comparisonConfidence: comparison?.confidence.cogs,
+    sales: resolved.values.sales ?? formAnchors.values.sales,
+  });
+  if (cogsPick) {
     const got = resolved.values.cogs;
-    if (got === undefined || Math.abs(got - formCogs) / Math.max(formCogs, 1) > 0.02) {
-      resolved.values.cogs = formCogs;
-      resolved.confidence.cogs = formAnchors.confidence.cogs ?? 97;
-      resolved.sources.cogs = formAnchors.sources.cogs ?? "Form 1120-S line 2";
-    }
-  } else if (
-    comparison?.values.cogs !== undefined &&
-    comparison.headerYears &&
-    comparison.values.cogs >= 10_000
-  ) {
-    const comp = comparison.values.cogs;
-    const got = resolved.values.cogs;
-    if (got === undefined || Math.abs(got - comp) / Math.max(comp, 1) > 0.02) {
-      resolved.values.cogs = comp;
-      resolved.confidence.cogs = comparison.confidence.cogs ?? 90;
-      resolved.sources.cogs = "Two-year comparison (COGS row)";
+    if (got === undefined || Math.abs(got - cogsPick.value) / Math.max(cogsPick.value, 1) > 0.02) {
+      resolved.values.cogs = cogsPick.value;
+      resolved.confidence.cogs = cogsPick.confidence;
+      resolved.sources.cogs = cogsPick.source;
     }
   }
 
@@ -1239,6 +1235,7 @@ export function parseTaxReturnFromText(
     comparison,
     formAnchors,
     embeddedScheduleL,
+    sourceSnapshots: snapshots,
     parseDebug: options?.parseDebug,
   });
 }
@@ -1252,6 +1249,7 @@ function applyPostVerificationWorkbookFixes(
     comparison: ReturnType<typeof parseTwoYearComparisonBlock> | null | undefined;
     formAnchors: ReturnType<typeof extractForm1120Anchors>;
     embeddedScheduleL: FieldExtraction;
+    sourceSnapshots: Record<string, SourceSnapshot[]>;
     parseDebug?: {
       onOpexReconcile?: (debug: OpexReconcileDebug) => void;
       priorYearValues?: Record<number, Record<string, number>>;
@@ -1277,7 +1275,7 @@ function applyPostVerificationWorkbookFixes(
       (weak && Math.abs(cur - stmt18Total) / Math.max(stmt18Total, 1) > 0.08)
     ) {
       values.other_current_liabilities = stmt18Total;
-      confidence.other_current_liabilities = 99;
+      confidence.other_current_liabilities = Math.min(confidence.other_current_liabilities ?? 82, 82);
       fieldSources.other_current_liabilities = "Statement (Line 18) total";
     }
   }
@@ -1310,16 +1308,21 @@ function applyPostVerificationWorkbookFixes(
 
   normalizeEquityBuckets(post);
 
-  const formCogs = ctx.formAnchors.values.cogs ?? values.cogs;
-  if (
-    ctx.comparison?.values.cogs !== undefined &&
-    ctx.comparison.values.cogs >= 10_000 &&
-    formCogs !== undefined &&
-    Math.abs(formCogs - ctx.comparison.values.cogs) / Math.max(ctx.comparison.values.cogs, 1) > 0.015
-  ) {
-    values.cogs = ctx.comparison.values.cogs;
-    confidence.cogs = ctx.comparison.confidence.cogs ?? 92;
-    fieldSources.cogs = "Two-year comparison (COGS row — form year column mismatch)";
+  const cogsPick = reconcileCogsFromSources({
+    formCogs: ctx.formAnchors.values.cogs ?? values.cogs,
+    formConfidence: ctx.formAnchors.confidence.cogs,
+    formSource: ctx.formAnchors.sources.cogs,
+    comparisonCogs: ctx.comparison?.values.cogs,
+    comparisonConfidence: ctx.comparison?.confidence.cogs,
+    sales: values.sales ?? ctx.formAnchors.values.sales,
+  });
+  if (cogsPick) {
+    const got = values.cogs;
+    if (got === undefined || Math.abs(got - cogsPick.value) / Math.max(cogsPick.value, 1) > 0.02) {
+      values.cogs = cogsPick.value;
+      confidence.cogs = cogsPick.confidence;
+      fieldSources.cogs = cogsPick.source;
+    }
   }
 
   if (ctx.comparison?.values.depreciation !== undefined) {
@@ -1424,6 +1427,7 @@ function applyPostVerificationWorkbookFixes(
     values,
     confidence,
     fieldSources,
+    sourceSnapshots: ctx.sourceSnapshots,
     taxYear: ctx.year,
   });
 
@@ -1447,6 +1451,7 @@ function applyPostVerificationWorkbookFixes(
     displayConfidence: reconciliation.displayConfidence,
     fieldFlags: reconciliation.fieldFlags,
     fieldSources,
+    sourceSnapshots: ctx.sourceSnapshots,
     opexCandidates,
     ocrCoverage,
     taxYear: ctx.year,
@@ -1461,9 +1466,12 @@ function applyPostVerificationWorkbookFixes(
   if (ocrCoverage?.flags.length) {
     for (const id of INPUT_ROW_IDS) {
       if (values[id] !== undefined) continue;
-      fieldFlagsOut[id] = mergeConfidenceFlags(fieldFlagsOut[id], ["ocr_incomplete"]);
-      displayConfidenceOut[id] = capConfidenceForFlags(displayConfidenceOut[id] ?? 70, ["ocr_incomplete"]);
-      fieldStatus[id] = "review";
+      fieldStatus[id] = "missing";
+      displayConfidenceOut[id] = displayConfidenceOut[id] ?? 70;
+      if (MISSING_MATERIAL_FIELD_IDS.has(id)) {
+        fieldFlagsOut[id] = mergeConfidenceFlags(fieldFlagsOut[id], ["ocr_incomplete"]);
+        displayConfidenceOut[id] = capConfidenceForFlags(displayConfidenceOut[id] ?? 70, ["ocr_incomplete"]);
+      }
       if (STMT_ATTACHMENT_FIELD_IDS.has(id) || id === "cash" || id === "accumulated_depreciation") {
         fieldTrustTier[id] = "moderate";
       }

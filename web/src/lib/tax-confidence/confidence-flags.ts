@@ -75,6 +75,7 @@ export const FLAG_CONFIDENCE_CAP: Partial<Record<ConfidenceFlag, number>> = {
   low_numeric_density: 60,
   page_truncation: 55,
   missing_key_schedule: 68,
+  low_trust_source: 58,
   subtractive_formula: 72,
 };
 
