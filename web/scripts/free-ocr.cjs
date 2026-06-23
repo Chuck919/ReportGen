@@ -38,7 +38,7 @@ const profile = process.env.FREE_OCR_PROFILE || "tax";
 const ocrMode = resolveOcrMode(process.env.FREE_OCR_MODE);
 
 const TAX_KW =
-  /\b1120-?s\b|form\s*1120|schedule\s*l\b|schedule\s*k-?1|schedule\s*m-?1|\bm-1\b|shareholder|ordinary\s*business|balance\s*sheet|assets?\s+and\s+liabilit|gross\s*receipts|cost\s*of\s*good|total\s*assets|return\s*summary|deductions|worksheet|comparison|1120\b|compensation\s*of|two\s*year|stmt\s*\d|statement\s*\d|other\s+deduct|1125|13a\s+intangible|less\s+accumulated\s+amort|federal\s+statements/i;
+  /\b1120-?s\b|form\s*1120|form\s*1041|form\s*1065|schedule\s*l\b|schedule\s*b\b|schedule\s*k-?1|schedule\s*m-?1|\bm-1\b|shareholder|fiduciary|ordinary\s*business|balance\s*sheet|assets?\s+and\s+liabilit|gross\s*receipts|cost\s*of\s*good|total\s*assets|return\s*summary|deductions|worksheet|comparison|1120\b|compensation\s*of|two\s*year|stmt\s*\d|statement\s*\d|other\s+deduct|1125|13a\s+intangible|less\s+accumulated\s+amort|federal\s+statements|interest\s+income|estates?\s+and\s+trusts/i;
 
 const ATTACHMENT_KW =
   /stmt\s*\d|statement\s*\d|other\s+deduct|1125|attached\s+statement|deductions?\s+statement|see\s+stmt|other\s+operating|bank\s*(?:and|&)?\s*credit|professional\s+fees|utilities|federal\s+statements|two\s*year\s*comparison|comparison\s+worksheet/i;

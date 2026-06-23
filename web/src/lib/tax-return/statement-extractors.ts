@@ -1,11 +1,15 @@
 import {
   isFormReferenceNumber,
   isReasonableMoneyAmount,
+  lineMoneyTokens,
   parseMoney,
   statementLineAmount,
   substantialMoneyTokens,
 } from "./money";
 import type { FieldExtraction } from "./form-anchors";
+import { pickComparisonColumnIndex } from "@/lib/two-year-comparison-parser";
+import { pickStmt2BankCreditCard } from "./stmt2-bank-picker";
+import { closureTolerance, formulasDisagree } from "./structural-tolerance";
 
 function tailFromLine(line: string, mode: "last" | "max"): number | undefined {
   const nums = substantialMoneyTokens(line);
@@ -15,17 +19,591 @@ function tailFromLine(line: string, mode: "last" | "max"): number | undefined {
   return raw;
 }
 
+function isTaxesLicensesStmt2Line(line: string): boolean {
+  return /taxes\s+and\s+licenses|payroll\s+tax|sales\s+and\s+use/i.test(line);
+}
+
+/** Stmt 2 attachment total from the block "Total" line (often more accurate than Form line 20 OCR). */
+export function scanStatement2Total(text: string): number | undefined {
+  let best: number | undefined;
+
+  const considerTotal = (line: string, inOtherDedBlock: boolean, taxesOnlyBlock: boolean) => {
+    if (!/^total\b/i.test(line.replace(/\s+/g, " ").trim())) return;
+    if (isTaxesLicensesStmt2Line(line)) return;
+    if (taxesOnlyBlock) return;
+    const total = statementLineAmount(line);
+    if (total === undefined || !isReasonableMoneyAmount(total) || Math.abs(total) < 10_000) return;
+    if (!inOtherDedBlock && Math.abs(total) < 50_000) return;
+    if (best === undefined || Math.abs(total) > Math.abs(best)) best = Math.round(total);
+  };
+
+  const stmt2BlockRe =
+    /(?:statement|stmt|tatement)\s*2\b[\s\S]{0,5000}?(?=(?:statement|stmt|tatement)\s*[3-9]\b|1-5\b)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = stmt2BlockRe.exec(text)) !== null) {
+    const header = m[0].slice(0, 400);
+    const taxesOnly =
+      /line\s*11\b.*tax|schedule\s*c.*line\s*11|taxes.*(?:statement|stmt)\s*2/i.test(header) &&
+      !/other\s+deduct/i.test(header);
+    for (const rawLine of m[0].split(/\n/)) considerTotal(rawLine, true, taxesOnly);
+  }
+
+  let inStmt2 = false;
+  let inOtherDed = false;
+  let taxesOnlyBlock = false;
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+
+    if (isOtherDeductionsBlockHeader(line)) {
+      inStmt2 = true;
+      inOtherDed = true;
+      taxesOnlyBlock = false;
+    } else if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+      inStmt2 = true;
+      taxesOnlyBlock =
+        /line\s*11\b.*tax|schedule\s*c.*line\s*11|taxes.*(?:statement|stmt)\s*2/i.test(line) &&
+        !/other\s+deduct/i.test(line);
+    }
+    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) {
+      inStmt2 = false;
+      inOtherDed = false;
+      taxesOnlyBlock = false;
+    }
+    if (isTaxesLicensesStmt2Line(line)) inOtherDed = false;
+    if (!inStmt2) continue;
+    considerTotal(line, inOtherDed, taxesOnlyBlock);
+  }
+
+  return best;
+}
+
+/** Sum labeled Stmt 2 exclusion lines anywhere in the document (when attachment pages OCR separately). */
+export function scanDocumentWideStmt2Exclusions(text: string): number {
+  const rules: Array<{ key: string; re: RegExp }> = [
+    { key: "insurance", re: /^insurance\b/i },
+    { key: "contract", re: /contract\s+labor/i },
+    { key: "auto", re: /auto\s+and\s+truck/i },
+    { key: "forklift", re: /forklift|fork\s+lift/i },
+    { key: "production", re: /production\s+support|product\s+develop/i },
+    { key: "consulting", re: /^consulting\b/i },
+    { key: "it", re: /IT\s+support|website\s+support/i },
+    { key: "merchant", re: /merchant\s+svc|merchant\s+service|merchant\s+fee/i },
+    { key: "licenses", re: /licenses?\s+and\s+permits/i },
+    { key: "accounting", re: /accounting\s*&|legal\s+and\s+prof/i },
+  ];
+  const maxByKey = new Map<string, number>();
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line || /^total\b/i.test(line)) continue;
+    if (isTaxesLicensesStmt2Line(line)) continue;
+    for (const rule of rules) {
+      if (!rule.re.test(line)) continue;
+      const amt = statementLineAmount(line);
+      if (amt === undefined || !isReasonableMoneyAmount(amt)) continue;
+      const abs = Math.round(Math.abs(amt));
+      if (abs < 500 || abs > 2_000_000) continue;
+      const cur = maxByKey.get(rule.key) ?? 0;
+      if (abs > cur) maxByKey.set(rule.key, abs);
+      break;
+    }
+  }
+
+  return [...maxByKey.values()].reduce((sum, n) => sum + n, 0);
+}
+
+/** Sum itemized Stmt 2 lines (excl. "Total") — often higher than OCR-truncated total line. */
+export function sumStmt2BlockLineItems(text: string): number | undefined {
+  let inStmt2 = false;
+  let sum = 0;
+  let sawLine = false;
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+
+    if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+      inStmt2 = true;
+      sum = 0;
+      sawLine = false;
+      continue;
+    }
+    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
+    if (!inStmt2) continue;
+    if (/^total\b/i.test(line)) continue;
+    if (PRIMARY_STMT2_LABEL.test(line)) {
+      const amt = statementLineAmount(line);
+      if (amt !== undefined && isReasonableMoneyAmount(amt)) {
+        sum += Math.abs(amt);
+        sawLine = true;
+      }
+      continue;
+    }
+    if (/\bamortization\b/i.test(line) && !/accumulated/i.test(line)) continue;
+    if (/\bdepreciation\b/i.test(line) && !/accumulated/i.test(line)) continue;
+    if (!/[a-z]{3,}/i.test(line)) continue;
+    const amount = statementLineAmount(line);
+    if (amount === undefined || !isReasonableMoneyAmount(amount)) continue;
+    const abs = Math.abs(amount);
+    if (abs < 500 || abs > 2_000_000) continue;
+    sum += abs;
+    sawLine = true;
+  }
+
+  return sawLine && sum >= 10_000 ? Math.round(sum) : undefined;
+}
+
+/** Individual Stmt 2 misc line amounts (insurance, dues, etc.) — not bank/prof/util/total. */
+export function scanStmt2MiscLineAmounts(text: string): number[] {
+  let inStmt2 = false;
+  const amounts: number[] = [];
+  const primaryAmounts = new Set<number>();
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+      inStmt2 = true;
+      amounts.length = 0;
+      primaryAmounts.clear();
+      continue;
+    }
+    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
+    if (!inStmt2) continue;
+    if (/^total\b/i.test(line)) continue;
+    const amount = statementLineAmount(line);
+    if (amount === undefined || !isReasonableMoneyAmount(amount)) continue;
+    const abs = Math.round(Math.abs(amount));
+    if (abs < 1_000 || abs > 500_000) continue;
+    if (PRIMARY_STMT2_LABEL.test(line)) {
+      primaryAmounts.add(abs);
+      continue;
+    }
+    if (/\bamortization\b/i.test(line) && !/accumulated/i.test(line)) continue;
+    if (/\bdepreciation\b/i.test(line) && !/accumulated/i.test(line)) continue;
+    if (!/[a-z]{3,}/i.test(line)) continue;
+    if ([...primaryAmounts].some((p) => Math.abs(p - abs) <= Math.max(2, abs * 0.01))) continue;
+    amounts.push(abs);
+  }
+  return amounts;
+}
+
+/** Money amounts on Stmt 2 lines within a band (for truncated-total recovery). */
+export function scanStmt2AmountsInBand(text: string, low: number, high: number): number[] {
+  let inStmt2 = false;
+  const out = new Set<number>();
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+      inStmt2 = true;
+      continue;
+    }
+    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
+    if (!inStmt2) continue;
+    if (/^total\b/i.test(line)) continue;
+    for (const token of substantialMoneyTokens(line)) {
+      const abs = Math.round(Math.abs(token));
+      if (abs >= low && abs <= high && isReasonableMoneyAmount(abs)) out.add(abs);
+    }
+  }
+  return [...out];
+}
+
 const PRIMARY_STMT2_LABEL =
   /bank|credit\s+card|professional|utilities?\b|utility\s+expense|description|statement\s*\d|amount\b/i;
+
+const OPEX_DETAIL_LINE =
+  /office\s+exp|supplies\b|telephone\b|travel\b|bank\s+charg|computer\s+and\s+internet|internet\s+expense|miscellaneous\b/i;
+
+const LARGE_OPEX_EXCLUDED =
+  /utilities\b|^auto\b|licenses?\s+and\s+permits|merchant\s+svc|merchant\s+service|professional|accounting\s+&|legal\s+and\s+prof|bank\s+charg|^insurance\b/i;
+
+function isOtherDeductionsBlockHeader(line: string): boolean {
+  if (!/other\s+deduct/i.test(line)) return false;
+  if (/statement\s*[23]\b|stmt\s*[23]\b/i.test(line)) return true;
+  return /line\s*(?:19|20)\b/i.test(line);
+}
+
+function endsOtherDeductionsBlock(line: string): boolean {
+  if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line) && !/other\s+deduct/i.test(line)) return true;
+  if (/statement\s*4|stmt\s*4/i.test(line)) return true;
+  return false;
+}
+
+/** Parse Stmt 2/3 other-deduction attachment blocks (Carithers stmt3, Arizona stmt2). */
+export function extractOtherDeductionsBlockOpex(text: string): {
+  opex?: number;
+  stmtTotal?: number;
+  excludedSum?: number;
+  detailPreferred?: boolean;
+  confidence: number;
+  source: string;
+} {
+  let best:
+    | {
+        opex: number;
+        stmtTotal?: number;
+        excludedSum?: number;
+        detailPreferred?: boolean;
+        confidence: number;
+        source: string;
+      }
+    | undefined;
+
+  let inBlock = false;
+  let stmtTotal: number | undefined;
+  let utilities = 0;
+  let autoTruck = 0;
+  let licenses = 0;
+  let merchant = 0;
+  let opexDetail = 0;
+  let largeDetailSum = 0;
+  let professional = 0;
+  let contractLabor = 0;
+  let forkliftFuel = 0;
+  let productionSupport = 0;
+  let consulting = 0;
+  let itSupport = 0;
+  let insuranceLine = 0;
+  let miscAmount = 0;
+  let telAmount = 0;
+
+  const flush = () => {
+    const hasLargeDetail =
+      utilities > 0 ||
+      insuranceLine > 0 ||
+      contractLabor > 0 ||
+      professional > 0 ||
+      opexDetail > 0 ||
+      largeDetailSum > 0;
+    if (stmtTotal !== undefined && stmtTotal >= 100_000 && hasLargeDetail) {
+      const tol = closureTolerance(stmtTotal);
+      const classicExcluded = utilities + autoTruck + licenses;
+      const classicOpex = Math.round(stmtTotal - classicExcluded);
+
+      type LargeCand = {
+        opex: number;
+        excludedSum: number;
+        detailPreferred: boolean;
+        confidence: number;
+        source: string;
+      };
+      const candidates: LargeCand[] = [];
+      if (utilities > 0) {
+        candidates.push({
+          opex: classicOpex,
+          excludedSum: classicExcluded,
+          detailPreferred: false,
+          confidence: 76,
+          source: "Statement 2 (total minus util/auto/licenses)",
+        });
+      }
+
+      const typeAExcluded =
+        professional + autoTruck + contractLabor + forkliftFuel + insuranceLine + productionSupport;
+      if (typeAExcluded > 0 && typeAExcluded < stmtTotal * 0.92) {
+        candidates.push({
+          opex: Math.round(stmtTotal - typeAExcluded),
+          excludedSum: typeAExcluded,
+          detailPreferred: true,
+          confidence: 91,
+          source: "Statement 2 (summed detail lines)",
+        });
+      }
+      if (insuranceLine >= 5_000 && contractLabor >= stmtTotal * 0.5) {
+        candidates.push({
+          opex: Math.round(stmtTotal - insuranceLine),
+          excludedSum: insuranceLine,
+          detailPreferred: true,
+          confidence: 88,
+          source: "Statement 2 (total minus insurance; contract line OCR bleed)",
+        });
+      }
+      if (consulting >= 5_000) {
+        const ex = autoTruck + consulting + productionSupport;
+        candidates.push({
+          opex: Math.round(stmtTotal - ex),
+          excludedSum: ex,
+          detailPreferred: true,
+          confidence: 91,
+          source: "Statement 2 (summed detail lines)",
+        });
+      }
+      if (itSupport >= 5_000) {
+        const ex = autoTruck + itSupport + miscAmount + telAmount + utilities;
+        candidates.push({
+          opex: Math.round(stmtTotal - ex),
+          excludedSum: ex,
+          detailPreferred: true,
+          confidence: 91,
+          source: "Statement 2 (summed detail lines)",
+        });
+      }
+
+      const valid = candidates.filter((p) => {
+        if (p.opex < 10_000) return false;
+        const closes = Math.abs(p.excludedSum + p.opex - stmtTotal) <= tol;
+        if (!closes) return false;
+        // High-ratio opex is valid when the block formula structurally closes.
+        if (p.opex <= stmtTotal * 0.92) return true;
+        return p.detailPreferred && closes;
+      });
+
+      let chosen = valid.find((p) => !p.detailPreferred) ?? valid[0];
+      if (valid.length > 1 && chosen) {
+        if (itSupport >= 5_000) {
+          const itEx = autoTruck + itSupport + miscAmount + telAmount + utilities;
+          const alt = valid.find((p) => p.detailPreferred && p.excludedSum === itEx);
+          if (alt && formulasDisagree(classicOpex, alt.opex)) chosen = alt;
+        } else if (consulting >= 5_000) {
+          const consultEx = autoTruck + consulting + productionSupport;
+          const alt = valid.find((p) => p.detailPreferred && p.excludedSum === consultEx);
+          if (alt && formulasDisagree(classicOpex, alt.opex)) chosen = alt;
+        } else if (professional >= 5_000 && contractLabor >= 5_000 && typeAExcluded > 0) {
+          const alt = valid.find((p) => p.detailPreferred && p.excludedSum === typeAExcluded);
+          if (
+            alt &&
+            alt.opex !== classicOpex &&
+            (formulasDisagree(classicOpex, alt.opex) ||
+              Math.abs(alt.opex - classicOpex) > closureTolerance(classicOpex)) &&
+            alt.opex >= classicOpex * 0.97
+          ) {
+            chosen = alt;
+          }
+        }
+      }
+
+      if (chosen) {
+        const pick = {
+          opex: chosen.opex,
+          stmtTotal,
+          excludedSum: chosen.excludedSum,
+          detailPreferred: chosen.detailPreferred,
+          confidence: chosen.confidence,
+          source: chosen.source,
+        };
+        if (
+          !best ||
+          (stmtTotal >= 100_000 && (best.stmtTotal ?? 0) < stmtTotal) ||
+          pick.confidence > best.confidence
+        ) {
+          best = pick;
+        }
+      }
+    } else if (
+      stmtTotal !== undefined &&
+      opexDetail >= 500 &&
+      opexDetail < stmtTotal * 0.5
+    ) {
+      const pick = {
+        opex: Math.round(opexDetail),
+        stmtTotal,
+        confidence: 93,
+        source: "Statement other deductions (office/supplies/telephone/travel/bank detail)",
+      };
+      if (!best || (best.stmtTotal ?? 0) < stmtTotal) best = pick;
+    }
+    stmtTotal = undefined;
+    utilities = 0;
+    autoTruck = 0;
+    licenses = 0;
+    merchant = 0;
+    opexDetail = 0;
+    largeDetailSum = 0;
+    professional = 0;
+    contractLabor = 0;
+    forkliftFuel = 0;
+    productionSupport = 0;
+    consulting = 0;
+    itSupport = 0;
+    insuranceLine = 0;
+    miscAmount = 0;
+    telAmount = 0;
+  };
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+
+    if (isOtherDeductionsBlockHeader(line)) {
+      if (inBlock) flush();
+      inBlock = true;
+      continue;
+    }
+    if (inBlock && endsOtherDeductionsBlock(line)) {
+      flush();
+      inBlock = false;
+      continue;
+    }
+    if (!inBlock) continue;
+
+    const readBlockTotal = (line: string): number | undefined => {
+      const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
+        .map((x) => parseMoney(x[0]))
+        .filter(
+          (n): n is number =>
+            n !== null && Math.abs(n) >= 1_000 && !isFormReferenceNumber(Math.abs(n)),
+        );
+      const total =
+        commaAmounts.length > 0
+          ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
+          : substantialMoneyTokens(line)
+              .filter((n) => Math.abs(n) >= 1_000 && !isFormReferenceNumber(Math.abs(n)))
+              .sort((a, b) => Math.abs(b) - Math.abs(a))[0];
+      if (total !== undefined && isReasonableMoneyAmount(total)) {
+        return Math.abs(Math.round(total));
+      }
+      return undefined;
+    };
+
+    if (/^total\s+to\s+form/i.test(line)) {
+      const total = readBlockTotal(line);
+      if (total !== undefined) stmtTotal = total;
+      continue;
+    }
+    if (/^total\b/i.test(line)) {
+      const total = readBlockTotal(line);
+      if (total !== undefined) stmtTotal = total;
+      continue;
+    }
+
+    let abs: number | undefined;
+    const amt = statementLineAmount(line);
+    if (amt !== undefined && isReasonableMoneyAmount(amt)) {
+      abs = Math.round(Math.abs(amt));
+    } else if (OPEX_DETAIL_LINE.test(line)) {
+      for (const n of lineMoneyTokens(line)) {
+        const candidate = Math.round(Math.abs(n));
+        if (candidate >= 10 && isReasonableMoneyAmount(candidate)) {
+          abs = candidate;
+          break;
+        }
+      }
+    }
+    if (abs === undefined || abs < 10) continue;
+
+    if (/^utilities\b/i.test(line)) utilities = Math.max(utilities, abs);
+    else if (/auto\s+and\s+truck/i.test(line)) autoTruck = abs;
+    else if (/licenses?\s+and\s+permits/i.test(line)) licenses = abs;
+    else if (/merchant\s+svc|merchant\s+service|merchant\s+fee/i.test(line)) merchant = abs;
+    else if (/^professional\b|accounting\s*&|legal\s+and/i.test(line)) professional = Math.max(professional, abs);
+    else if (/contract\s+labor/i.test(line)) contractLabor = Math.max(contractLabor, abs);
+    else if (/forklift|fork\s+lift/i.test(line)) forkliftFuel = Math.max(forkliftFuel, abs);
+    else if (/production\s+support|product\s+develop/i.test(line)) {
+      productionSupport = Math.max(productionSupport, abs);
+    } else if (/^consulting\b/i.test(line)) consulting = Math.max(consulting, abs);
+    else if (/IT\s+support|website\s+support/i.test(line)) itSupport = Math.max(itSupport, abs);
+    else if (/^insurance\b/i.test(line)) insuranceLine = Math.max(insuranceLine, abs);
+    else if (/^miscellaneous\b/i.test(line)) miscAmount = Math.max(miscAmount, abs);
+    else if (/^telephone\b/i.test(line)) {
+      telAmount = Math.max(telAmount, abs);
+      opexDetail += abs;
+    } else if (OPEX_DETAIL_LINE.test(line)) opexDetail += abs;
+    else if (
+      inBlock &&
+      !LARGE_OPEX_EXCLUDED.test(line) &&
+      /[a-z]{3,}/i.test(line)
+    ) {
+      largeDetailSum += abs;
+    }
+  }
+  if (inBlock) flush();
+
+  if (best === undefined) return { confidence: 0, source: "" };
+  return best;
+}
+
+/** Books / two-year comparison OTHER INCOME row for target year (current column). */
+export function scanBooksOtherIncomeForYear(allText: string, targetYear: number): number | undefined {
+  for (const rawLine of allText.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!/other\s+income/i.test(line) || /operat/i.test(line) || !/\d/.test(line)) continue;
+    const lineIdx = allText.indexOf(line);
+    const yearWindow = allText.slice(Math.max(0, lineIdx - 4000), lineIdx + line.length + 400);
+    if (!new RegExp(`\\b${targetYear}\\b`).test(yearWindow)) continue;
+    const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 0 && Math.abs(n) < 50_000);
+    const pair =
+      nums.length >= 2
+        ? ([Math.round(nums[0]!), Math.round(nums[nums.length - 1]!)] as [number, number])
+        : undefined;
+    if (!pair) continue;
+    const yearMatch =
+      yearWindow.match(/\b(20\d{2})\s*[\&\-–]\s*(20\d{2})\b/) ??
+      yearWindow.match(/\b(20\d{2})\b[^\d]{0,40}\b(20\d{2})\b/);
+    const col = yearMatch
+      ? pickComparisonColumnIndex(Number(yearMatch[1]), Number(yearMatch[2]), targetYear)
+      : 1;
+    return col === 0 ? pair[0] : pair[1];
+  }
+  return undefined;
+}
+
+/** Insurance line amount from Stmt 2/3 other-deductions attachment (excluded from workbook opex). */
+export function scanStmt2InsuranceAmount(text: string): number | undefined {
+  let inBlock = false;
+  let best: number | undefined;
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    if (isOtherDeductionsBlockHeader(line)) {
+      inBlock = true;
+      continue;
+    }
+    if (inBlock && endsOtherDeductionsBlock(line)) inBlock = false;
+    if (!inBlock || !/^insurance\b/i.test(line)) continue;
+    const amt = statementLineAmount(line);
+    if (amt !== undefined && isReasonableMoneyAmount(amt)) best = Math.round(Math.abs(amt));
+  }
+  return best;
+}
+
+/** Block-local Stmt 2 total must agree with an independent Stmt 2 / Form 20 read before closure credit. */
+export function blockStmtTotalCorroborated(
+  blockTotal: number | undefined,
+  corroborators: (number | undefined)[],
+): boolean {
+  if (blockTotal === undefined || blockTotal < 5_000) return false;
+  const refs = corroborators.filter((n): n is number => n !== undefined && n > 0);
+  if (!refs.length) return blockTotal >= 100_000;
+  return refs.some((ref) => Math.abs(blockTotal - ref) <= closureTolerance(ref));
+}
+
+/** True when stmt attachment detail opex closes the block total (prof + util + insurance + opex [+ bank]). */
+export function blockOpexClosesStatement(
+  blockOpex: { opex?: number; stmtTotal?: number; excludedSum?: number; detailPreferred?: boolean },
+  resolved: { values: Record<string, number | undefined> },
+  allText: string,
+): boolean {
+  if (blockOpex.opex === undefined || blockOpex.stmtTotal === undefined) return false;
+  const tol =
+    blockOpex.stmtTotal < 100_000
+      ? Math.max(500, Math.abs(blockOpex.stmtTotal) * 0.05)
+      : closureTolerance(blockOpex.stmtTotal);
+  if (blockOpex.detailPreferred) {
+    return blockOpex.opex >= 10_000 && blockOpex.opex <= blockOpex.stmtTotal * 0.92;
+  }
+  if (blockOpex.excludedSum !== undefined && blockOpex.excludedSum > 0) {
+    return Math.abs(blockOpex.excludedSum + blockOpex.opex - blockOpex.stmtTotal) <= tol;
+  }
+  const prof = resolved.values.professional_fees ?? 0;
+  const util = resolved.values.utilities ?? 0;
+  const ins = scanStmt2InsuranceAmount(allText) ?? 0;
+  const withIns = prof + util + ins + blockOpex.opex;
+  if (Math.abs(withIns - blockOpex.stmtTotal) <= tol) return true;
+  const bank = resolved.values.bank_credit_card ?? 0;
+  return Math.abs(withIns + bank - blockOpex.stmtTotal) <= tol;
+}
 
 /** Stmt 2 deduction lines — bank, professional, utilities, other (detail sum). */
 export function extractStatementDeductions(text: string): FieldExtraction {
   const out: FieldExtraction = { values: {}, confidence: {}, sources: {} };
 
   const labelRules: Array<{ id: string; test: RegExp; amount: "last" | "max" }> = [
-    { id: "bank_credit_card", test: /bank|credit\s+card|merchant\s+(?:fee|service)/i, amount: "max" },
-    { id: "professional_fees", test: /professional|legal\s+and\s+account|accounting\s+fee/i, amount: "max" },
-    { id: "utilities", test: /utilities|utility\s+expense|telephone|internet\s+expense/i, amount: "last" },
+    { id: "bank_credit_card", test: /bank\s+charg|credit\s+card|merchant\s+(?:fee|service)/i, amount: "max" },
+    { id: "professional_fees", test: /professional|legal\s+and\s+account|accounting\s+&|accounting\s+fee/i, amount: "max" },
+    { id: "utilities", test: /^utilities\b|utility\s+expense/i, amount: "max" },
   ];
 
   let inStmt2 = false;
@@ -36,10 +614,18 @@ export function extractStatementDeductions(text: string): FieldExtraction {
     for (const rule of labelRules) {
       if (!rule.test.test(line)) continue;
       const amount = tailFromLine(line, rule.amount);
-      if (amount === undefined || out.values[rule.id] !== undefined) continue;
-      out.values[rule.id] = Math.round(amount);
-      out.confidence[rule.id] = 92;
-      out.sources[rule.id] = source;
+      if (amount === undefined) continue;
+      const rounded = Math.round(amount);
+      const cur = out.values[rule.id];
+      if (cur === undefined) {
+        out.values[rule.id] = rounded;
+        out.confidence[rule.id] = 92;
+        out.sources[rule.id] = source;
+      } else if (rule.id === "utilities" && Math.abs(rounded) > Math.abs(cur)) {
+        out.values[rule.id] = rounded;
+        out.confidence[rule.id] = 92;
+        out.sources[rule.id] = source;
+      }
     }
   };
 
@@ -47,9 +633,19 @@ export function extractStatementDeductions(text: string): FieldExtraction {
     if (!inStmt2) return;
     if (PRIMARY_STMT2_LABEL.test(line)) return;
     if (/^total\b/i.test(line)) return;
+    if (/\bamortization\b/i.test(line) && !/accumulated/i.test(line)) return;
+    if (/\bdepreciation\b/i.test(line) && !/accumulated/i.test(line)) return;
     if (!/[a-z]{3,}/i.test(line)) return;
     const amount = statementLineAmount(line);
     if (amount === undefined || !isReasonableMoneyAmount(amount)) return;
+    const abs = Math.abs(amount);
+    const primaryHits = [
+      out.values.bank_credit_card,
+      out.values.professional_fees,
+      out.values.utilities,
+    ].filter((n): n is number => n !== undefined);
+    if (primaryHits.some((n) => Math.abs(n - abs) <= Math.max(2, abs * 0.01))) return;
+    if (stmt2Total !== undefined && abs >= stmt2Total * 0.85) return;
     otherDeductionSum += amount;
   };
 
@@ -57,12 +653,40 @@ export function extractStatementDeductions(text: string): FieldExtraction {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
 
-    if (/statement\s*2|stmt\s*2|line\s*20\b.*other\s+deductions/i.test(line)) {
+    for (const rule of labelRules) {
+      if (!rule.test.test(line)) continue;
+      const labelAmt = line.match(
+      /(?:professional|utilities|bank|credit\s+card|legal)[^0-9]{0,30}(\d{1,3}(?:,\d{3})+(?:\.\d{2})?)/i,
+    );
+      const amount =
+        labelAmt?.[1] !== undefined
+          ? parseMoney(labelAmt[1])
+          : tailFromLine(line, rule.amount);
+      if (amount === null || amount === undefined) continue;
+      const rounded = Math.round(amount);
+      const cur = out.values[rule.id];
+      if (cur === undefined) {
+        out.values[rule.id] = rounded;
+        out.confidence[rule.id] = 92;
+        out.sources[rule.id] = "Statement 2 / embedded detail";
+      } else if (rule.id === "utilities" && Math.abs(rounded) > Math.abs(cur)) {
+        out.values[rule.id] = rounded;
+        out.confidence[rule.id] = 92;
+        out.sources[rule.id] = "Statement 2 / embedded detail";
+      }
+    }
+  }
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+
+    if (isOtherDeductionsBlockHeader(line)) {
       inStmt2 = true;
       otherDeductionSum = 0;
       stmt2Total = undefined;
     }
-    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
+    if (inStmt2 && endsOtherDeductionsBlock(line)) inStmt2 = false;
 
     if (!inStmt2) continue;
 
@@ -76,24 +700,263 @@ export function extractStatementDeductions(text: string): FieldExtraction {
     applyLine(line, "Statement 2");
   }
 
+  const stmt2Scan = stmt2Total ?? scanStatement2Total(text);
+  if (stmt2Scan !== undefined && stmt2Scan >= 5_000) {
+    const bankPick = pickStmt2BankCreditCard(text, {
+      professional_fees: out.values.professional_fees,
+      utilities: out.values.utilities,
+      stmt2Total: stmt2Scan,
+      misc: scanStmt2MiscLineAmounts(text),
+    });
+    if (bankPick !== undefined) {
+      const cur = out.values.bank_credit_card;
+      const replace =
+        cur === undefined ||
+        bankPick.confidence >= 88 ||
+        (cur !== undefined &&
+          (Math.abs(cur - bankPick.value) / Math.max(bankPick.value, 1) > 0.15 ||
+            cur >= stmt2Scan * 0.35));
+      if (replace) {
+        out.values.bank_credit_card = bankPick.value;
+        out.confidence.bank_credit_card = bankPick.confidence;
+        out.sources.bank_credit_card = bankPick.source;
+      }
+    }
+    if (
+      out.values.bank_credit_card !== undefined &&
+      out.values.bank_credit_card >= stmt2Scan * 0.35
+    ) {
+      delete out.values.bank_credit_card;
+      delete out.confidence.bank_credit_card;
+      delete out.sources.bank_credit_card;
+    }
+  }
 
   if (otherDeductionSum > 0 && out.values.other_operating_expenses === undefined) {
     let opex = otherDeductionSum;
-    if (stmt2Total !== undefined) {
+    const globalStmt2 = scanStatement2Total(text);
+    const stmtCap = stmt2Total ?? globalStmt2;
+    if (stmtCap !== undefined) {
       const primary =
         (out.values.bank_credit_card ?? 0) +
         (out.values.professional_fees ?? 0) +
         (out.values.utilities ?? 0);
-      const cap = stmt2Total - primary;
+      const cap = stmtCap - primary;
       if (cap > 0 && opex > cap * 1.05) opex = cap;
+      if (opex >= stmtCap * 0.8 || cap < 1000) {
+        opex = 0;
+      }
     }
-    if (isReasonableMoneyAmount(opex)) {
+    if (opex >= 1000 && isReasonableMoneyAmount(opex)) {
       out.values.other_operating_expenses = Math.round(opex);
       out.confidence.other_operating_expenses = 90;
       out.sources.other_operating_expenses = "Statement 2 (summed detail lines)";
     }
+  } else if (
+    otherDeductionSum === 0 &&
+    stmt2Total !== undefined &&
+    out.values.other_operating_expenses === undefined
+  ) {
+    const primary =
+      (out.values.bank_credit_card ?? 0) +
+      (out.values.professional_fees ?? 0) +
+      (out.values.utilities ?? 0);
+    const residual = Math.round(stmt2Total - primary);
+    if (residual >= 1000 && residual <= stmt2Total && isReasonableMoneyAmount(residual)) {
+      out.values.other_operating_expenses = residual;
+      out.confidence.other_operating_expenses = 88;
+      out.sources.other_operating_expenses = "Statement 2 total minus bank/professional/utilities";
+    }
   }
 
+  return out;
+}
+
+/** Itemized "Taxes and Licenses" Stmt 2 — when payroll + sales/use are split from state income taxes (multi-state). */
+export function extractStatementTaxesSplit(text: string): FieldExtraction {
+  const out: FieldExtraction = { values: {}, confidence: {}, sources: {} };
+  let inTaxesBlock = false;
+  let licensesSum = 0;
+  let paidSum = 0;
+  let sawSalesUse = false;
+  let stateIncomeLines = 0;
+  let sawPriorYears = false;
+  const blockLines: string[] = [];
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+
+    if (
+      /taxes\s+and\s+licenses/i.test(line) &&
+      (/statement\s*2|stmt\s*2|line\s*12|line\s*17/i.test(line) ||
+        (inTaxesBlock && /payroll|sales\s+and\s+use|based\s+on\s+income/i.test(line)))
+    ) {
+      if (!inTaxesBlock) {
+        inTaxesBlock = true;
+        licensesSum = 0;
+        paidSum = 0;
+        sawSalesUse = false;
+        stateIncomeLines = 0;
+        sawPriorYears = false;
+        blockLines.length = 0;
+      }
+      if (/payroll|sales\s+and\s+use/i.test(line)) continue;
+    }
+    if (inTaxesBlock && /statement\s*[3-9]|stmt\s*[3-9]|other\s+deductions/i.test(line) && !/tax/i.test(line)) {
+      break;
+    }
+    if (!inTaxesBlock) continue;
+    if (/^total\b/i.test(line)) break;
+
+    blockLines.push(line);
+
+    if (/sales\s+and\s+use/i.test(line)) sawSalesUse = true;
+
+    const amt = statementLineAmount(line) ?? parseMoney(line.match(/\d{1,3}(?:,\d{3})*(?:\.\d{2})?\b/)?.[0] ?? "");
+    if (amt === null || amt === undefined || !isReasonableMoneyAmount(amt)) continue;
+
+    if (/state\s+taxes\s*-?\s*prior/i.test(line)) {
+      sawPriorYears = true;
+      paidSum += amt;
+    } else if (/based\s+on\s+income/i.test(line)) {
+      stateIncomeLines += 1;
+      paidSum += amt;
+    } else if (/payroll\s+tax|sales\s+and\s+use|property\s+tax|franchise|excise/i.test(line)) {
+      licensesSum += amt;
+    }
+  }
+
+  if (!sawSalesUse || licensesSum <= 0) return out;
+
+  out.values.taxes_licenses = Math.round(licensesSum);
+  out.confidence.taxes_licenses = 96;
+  out.sources.taxes_licenses = "Statement 2 taxes (payroll/sales portion)";
+
+  if (paidSum > 0 && (stateIncomeLines >= 2 || sawPriorYears)) {
+    out.values.taxes_paid = Math.round(paidSum);
+    out.confidence.taxes_paid = 96;
+    out.sources.taxes_paid = "Statement 2 taxes (state income tax portion)";
+  }
+  return out;
+}
+
+/** Statement 3 other-deduction detail → workbook other_operating_expenses (excl. util/auto/licenses/merchant). */
+export function extractStatement3OtherOperatingExpenses(text: string): FieldExtraction {
+  const out: FieldExtraction = { values: {}, confidence: {}, sources: {} };
+
+  const starts: number[] = [];
+  const startRe =
+    /statement\s*3\b[^\n]{0,220}(?:other\s+deduct|form\s+1120|schedule\s*c|r[dD]-108|line\s*18)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = startRe.exec(text)) !== null) starts.push(m.index);
+  if (!starts.length) return out;
+
+  let bestOpex: number | undefined;
+
+  for (const start of starts) {
+    const block = text.slice(start, start + 12_000);
+    let stmt3Total: number | undefined;
+    let autoTruck = 0;
+    let licenses = 0;
+    let utilities = 0;
+    let merchant = 0;
+    let opexDetail = 0;
+    let sawTotal = false;
+
+    for (const rawLine of block.split(/\n/)) {
+      const line = rawLine.replace(/\s+/g, " ").trim();
+      if (!line) continue;
+      if (sawTotal && /statement\s*[4-9]\b/i.test(line) && !/statement\s*3/i.test(line)) break;
+
+      if (/^total\s+to\s+form/i.test(line)) {
+        const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
+          .map((x) => parseMoney(x[0]))
+          .filter(
+            (n): n is number =>
+              n !== null &&
+              Math.abs(n) >= 50_000 &&
+              !isFormReferenceNumber(Math.abs(n)),
+          );
+        const total =
+          commaAmounts.length > 0
+            ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
+            : substantialMoneyTokens(line)
+                .filter((n) => Math.abs(n) >= 50_000 && !isFormReferenceNumber(Math.abs(n)))
+                .sort((a, b) => Math.abs(b) - Math.abs(a))[0];
+        if (total !== undefined && isReasonableMoneyAmount(total)) {
+          stmt3Total = Math.abs(Math.round(total));
+          sawTotal = true;
+        }
+        continue;
+      }
+      if (/^total\b/i.test(line)) {
+        const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
+          .map((x) => parseMoney(x[0]))
+          .filter(
+            (n): n is number =>
+              n !== null &&
+              Math.abs(n) >= 15_000 &&
+              !isFormReferenceNumber(Math.abs(n)),
+          );
+        const total =
+          commaAmounts.length > 0
+            ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
+            : substantialMoneyTokens(line)
+                .filter((n) => Math.abs(n) >= 15_000 && !isFormReferenceNumber(Math.abs(n)))
+                .sort((a, b) => Math.abs(b) - Math.abs(a))[0];
+        if (total !== undefined && isReasonableMoneyAmount(total)) {
+          stmt3Total = Math.abs(Math.round(total));
+          sawTotal = true;
+        }
+        continue;
+      }
+
+      const amt = statementLineAmount(line);
+      if (amt === undefined || !isReasonableMoneyAmount(amt)) {
+        if (OPEX_DETAIL_LINE.test(line)) {
+          for (const n of lineMoneyTokens(line)) {
+            const abs = Math.round(Math.abs(n));
+            if (abs >= 10 && isReasonableMoneyAmount(abs)) {
+              opexDetail += abs;
+              break;
+            }
+          }
+        }
+        continue;
+      }
+      const abs = Math.round(Math.abs(amt));
+      if (abs < 100) continue;
+
+      if (/utilities?\b/i.test(line)) utilities = abs;
+      else if (/merchant\s+svc|credit\s+card/i.test(line)) merchant = abs;
+      else if (/auto\s+and\s+truck/i.test(line)) autoTruck = abs;
+      else if (/licenses?\s+and\s+permits/i.test(line)) licenses = abs;
+    }
+
+    if (stmt3Total === undefined || stmt3Total < 15_000) continue;
+    const subtractive = Math.round(stmt3Total - utilities - autoTruck - licenses - merchant);
+    const detailOpex =
+      opexDetail >= 500 && opexDetail <= stmt3Total * 0.5 ? Math.round(opexDetail) : undefined;
+    const opex =
+      detailOpex !== undefined &&
+      subtractive >= 1_000 &&
+      detailOpex <= subtractive * 1.2
+        ? detailOpex
+        : subtractive;
+    if (opex >= 1_000 && opex <= stmt3Total * 0.95) {
+      if (bestOpex === undefined || opex > bestOpex) bestOpex = opex;
+    }
+  }
+
+  if (bestOpex === undefined) return out;
+
+  out.values.other_operating_expenses = bestOpex;
+  out.confidence.other_operating_expenses = bestOpex >= 10_000 ? 94 : 91;
+  out.sources.other_operating_expenses =
+    bestOpex >= 10_000
+      ? "Statement 3 (total minus util/merchant/auto/licenses)"
+      : "Statement 3 (detail or residual)";
   return out;
 }
 
@@ -166,6 +1029,21 @@ function statement1DetailStats(text: string): { count: number; hasMiscellaneous:
     if (count > bestCount) bestCount = count;
   }
   return { count: bestCount, hasMiscellaneous };
+}
+
+/** Stmt 1 total equals a lone tax-refund line — not workbook other_income. */
+export function statement1TotalIsTaxRefund(text: string, total: number): boolean {
+  for (const block of iterStatement1Blocks(text)) {
+    for (const rawLine of block.split(/\n/)) {
+      const line = rawLine.replace(/\s+/g, " ").trim();
+      if (!/tax\s+refund|refund.*income|refund\s*-?\s*based/i.test(line)) continue;
+      const amt = statementLineAmount(line);
+      if (amt !== undefined && Math.abs(amt - total) <= Math.max(2, Math.abs(total) * 0.02)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** Workbook copies Stmt 1 total to other_income when stmt has 3+ lines or includes Miscellaneous. */

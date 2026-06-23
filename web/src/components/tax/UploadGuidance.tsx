@@ -1,6 +1,7 @@
 "use client";
 
 import { isVercelDeploy } from "@/lib/tax/ocr-modes";
+import { SUPPORTED_TAX_FORMS_LABEL } from "@/lib/tax/tax-form-copy";
 
 export function UploadGuidance() {
   const onVercel = isVercelDeploy();
@@ -8,7 +9,7 @@ export function UploadGuidance() {
     <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-600">
       <p className="font-medium text-stone-700">Upload tips</p>
       <ul className="mt-2 list-inside list-disc space-y-1">
-        <li>One complete Form 1120-S PDF per tax year works best (including statements).</li>
+        <li>One complete {SUPPORTED_TAX_FORMS_LABEL} PDF per tax year works best (including statements).</li>
         {onVercel ? (
           <li>On Vercel: one file is processed per request (~3–5 min). You can upload multiple years sequentially.</li>
         ) : (

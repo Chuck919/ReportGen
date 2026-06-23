@@ -20,13 +20,36 @@
     "benchmark:vercel-modes": "npx --yes tsx scripts/benchmark-vercel-modes.ts",
     "test:upload": "npx --yes tsx scripts/test-upload-edge-cases.ts && npx --yes tsx scripts/test-export-table.ts",
     "test:tax-ui": "npx --yes tsx scripts/test-tax-ui-flow.ts",
+    "test:reconcile": "npx --yes tsx scripts/test-reconcile-tax-year.ts",
+    "test:client-merge": "npx --yes tsx scripts/test-client-merge.ts",
+    "test:benchmark-excel": "npx --yes tsx scripts/test-benchmark-excel-paste.ts",
+    "test:income-dep-amort": "npx --yes tsx scripts/test-income-dep-amort.ts",
     "test:excel-paste": "npx --yes tsx scripts/test-excel-paste-alignment.ts",
     "test:pipeline": "npx --yes tsx scripts/test-pipeline-e2e.ts",
     "test:prod-api": "npx --yes tsx scripts/test-prod-api.ts",
     "benchmark:multipass": "npx --yes tsx scripts/benchmark-multipass-matrix.ts",
     "benchmark:prod-cold": "npx --yes tsx scripts/benchmark-prod-cold.ts",
+    "deploy:hetzner": "powershell -ExecutionPolicy Bypass -File deploy/hetzner/push-to-vm.ps1",
+    "deploy:oracle": "powershell -ExecutionPolicy Bypass -File deploy/oracle/push-to-vm.ps1",
     "test:ocr-targets": "npx --yes tsx scripts/test-ocr-targets.ts",
-    "eval:tax:fast": "npx --yes tsx scripts/eval-tax-cached.ts -- --mode fast"
+    "test:ocr-changwen": "npx --yes tsx scripts/test-ocr-changwen.ts",
+    "test:ocr-survey": "npx --yes tsx scripts/survey-all-clients-parse.ts",
+    "reparse:cached": "npx --yes tsx scripts/reparse-cached-ocr.ts",
+    "analyze:forms": "npx --yes tsx scripts/analyze-client-forms.ts",
+    "test:ocr-kcf": "npx --yes tsx scripts/test-ocr-targets.ts",
+    "test:ocr-kcf:run": "npx --yes tsx scripts/test-ocr-targets.ts -- --run",
+    "extract:changwen-fixtures": "python scripts/extract-integrator-fixtures.py",
+    "eval:tax:fast": "npx --yes tsx scripts/eval-tax-cached.ts -- --mode fast",
+    "benchmark:web-api": "npx --yes tsx scripts/benchmark-all-web-api.ts thorough",
+    "benchmark:web-api:balanced": "npx --yes tsx scripts/benchmark-all-web-api.ts balanced",
+    "benchmark:web-api:fast": "npx --yes tsx scripts/benchmark-all-web-api.ts fast",
+    "benchmark:diagnose": "npx --yes tsx scripts/benchmark-diagnose.ts thorough",
+    "benchmark:diagnose:direct": "npx --yes tsx scripts/benchmark-diagnose.ts thorough --direct --holdout=sssi",
+    "train:opex-ranker": "npx --yes tsx scripts/train-opex-ranker.ts thorough",
+    "test:user-corrections": "npx --yes tsx scripts/test-user-correction-pipeline.ts",
+    "benchmark:direct": "npx --yes tsx scripts/benchmark-direct-parse.ts thorough",
+    "benchmark:all-cached": "npx --yes tsx scripts/benchmark-all-cached.ts",
+    "score:embedded": "npx --yes tsx scripts/score-all-embedded.ts"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.0",
@@ -46,6 +69,7 @@
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
     "tsx": "^4.19.4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "undici": "^6.27.0"
   }
 }

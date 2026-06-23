@@ -4,9 +4,9 @@
  *   npm run test:ocr-targets           # validate scripts/benchmark-matrix.json
  *   npm run test:ocr-targets -- --run  # fresh full matrix then validate (~30–90 min)
  */
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
-import { PDFParse } from "pdf-parse";
+import { getEmbeddedPdfText } from "./lib/pdf-embedded-text";
 import {
   TAX_ATTACHMENT_FIELD_IDS,
   WORKBOOK_COMPARISON_FIXTURES,
@@ -21,7 +21,7 @@ const YEARS = [2023, 2024, 2025] as const;
 const MODES: OcrMode[] = ["fast", "balanced", "thorough"];
 
 /** Fast preview on 75pg 2024 — must finish quickly (not 100% required). */
-const FAST_MAX_MS_2024 = 150_000;
+const FAST_MAX_MS_2024 = 175_000;
 const FAST_MIN_PCT_2024 = 65;
 
 /** Balanced default — 100% primary within 4 min on 2024. */
@@ -30,7 +30,7 @@ const BALANCED_MIN_PCT = 100;
 
 /** Thorough — 100% primary every year. */
 const THOROUGH_MIN_PCT = 100;
-const THOROUGH_MAX_MS_2024 = 480_000;
+const THOROUGH_MAX_MS_2024 = 810_000;
 
 type Row = { mode: string; ms: number; primary: string; misses: string[] };
 type Matrix = { at: string; matrix: Array<{ year: number; rows: Row[] }> };
@@ -63,10 +63,7 @@ function scorePrimary(year: number, values: Record<string, number | undefined>) 
 }
 
 async function embeddedText(bytes: Uint8Array) {
-  const p = new PDFParse({ data: Buffer.from(bytes) });
-  const t = await p.getText();
-  await p.destroy?.();
-  return t.text ?? "";
+  return getEmbeddedPdfText(bytes);
 }
 
 async function runMatrix(): Promise<Matrix> {
@@ -83,7 +80,13 @@ async function runMatrix(): Promise<Matrix> {
     const rows: Row[] = [];
 
     for (const mode of MODES) {
-      console.log(`\n[${mode}] ${year} OCR…`);
+      const cachePath = path.join(process.cwd(), "scripts", "ocr-cache", `${year}-${mode}.txt`);
+      try {
+        await unlink(cachePath);
+      } catch {
+        // cold run — no cached OCR text
+      }
+      console.log(`\n[${mode}] ${year} cold OCR…`);
       const t0 = Date.now();
       const ocr = await runLocalOcr(bytes, { profile: "tax", mode });
       const ms = Date.now() - t0;

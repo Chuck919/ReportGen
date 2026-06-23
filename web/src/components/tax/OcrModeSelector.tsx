@@ -34,7 +34,9 @@ export function OcrModeSelector({
             ].join(" ")}
           >
             {mode.label}
-            <span className={selected ? "text-stone-400" : "text-stone-400"}> · {mode.hint}</span>
+            {mode.hint ? (
+              <span className={selected ? "text-stone-400" : "text-stone-400"}> · {mode.hint}</span>
+            ) : null}
           </button>
         );
       })}

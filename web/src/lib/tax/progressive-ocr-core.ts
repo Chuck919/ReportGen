@@ -6,6 +6,9 @@ import { runLocalOcrPages, runOcrPlan } from "@/lib/tax-return/local-ocr";
 import type { TaxYearValues } from "@/lib/tax-workbook";
 
 export const PROGRESSIVE_TIERS: Partial<Record<OcrMode, OcrMode[]>> = {
+  fast: ["fast"],
+  balanced: ["fast", "balanced"],
+  thorough: ["balanced", "thorough"],
   "vercel-fast": ["vercel-fast"],
   "vercel-balanced": ["vercel-fast", "vercel-balanced"],
   "vercel-thorough": ["vercel-fast", "vercel-balanced", "vercel-thorough"],

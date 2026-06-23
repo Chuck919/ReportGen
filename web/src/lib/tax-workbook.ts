@@ -1,3 +1,5 @@
+import type { FieldTrustTier } from "@/lib/tax/field-trust-tier";
+
 export type TaxWorkbookRow = {
   row: number;
   id: string;
@@ -6,17 +8,53 @@ export type TaxWorkbookRow = {
   excelBehavior: "input" | "formula";
 };
 
+export type FieldReviewStatus = "verified" | "review" | "missing";
+
 export type TaxYearValues = {
   year: number;
   values: Record<string, number>;
+  /** Detected taxpayer — prevents merging unrelated companies by year. */
+  clientName?: string;
+  clientKey?: string;
   confidence?: Record<string, number>;
   /** Where each value was extracted (e.g. "Form 1120-S line 7", "Statement 2"). */
   fieldSources?: Record<string, string>;
+  /** UI-safe confidence — capped unless multiple sources agree. */
+  displayConfidence?: Record<string, number>;
+  /** Independent source families agreeing with the final value. */
+  sourceAgreement?: Record<string, number>;
+  /** Human-review reasons (reconciliation failures, single source, etc.). */
+  fieldFlags?: Record<string, string[]>;
+  fieldStatus?: Record<string, FieldReviewStatus>;
+  /** Visual trust tier for table coloring. */
+  fieldTrustTier?: Record<string, FieldTrustTier>;
+  /** Other source reads when independent extractions disagreed (chosen value is highest confidence). */
+  fieldAlternates?: Record<string, Array<{ family: string; value: number; confidence?: number; sourceLabel?: string }>>;
+  /** Parser output before any user edits — used for ML training. */
+  parserBaseline?: Record<string, number>;
+  /** Fields the user corrected in the UI — protected from re-upload overwrite. */
+  userEditedFields?: Record<string, boolean>;
+  /** Ranked extraction options shown in the edit picker (OPEX candidates + alternates). */
+  fieldCandidateOptions?: Record<
+    string,
+    Array<{
+      value: number;
+      source: string;
+      kind?: "alternate" | "opex" | "manual";
+      confidence?: number;
+      closureScore?: number;
+      totalScore?: number;
+      valid?: boolean;
+    }>
+  >;
+  /** When a two-year comparison block includes the prior tax year, values from that column. */
+  comparisonPriorYear?: number;
+  comparisonPriorValues?: Record<string, number>;
   warnings?: string[];
   source: string;
 };
 
-export const TAX_YEARS = [2025, 2024, 2023] as const;
+export const TAX_YEARS = [2023, 2024, 2025] as const;
 
 export const TAX_WORKBOOK_ROWS: TaxWorkbookRow[] = [
   { row: 5, id: "sales", label: "Sales (Income)", section: "Income Statement Data", excelBehavior: "input" },
@@ -111,15 +149,87 @@ export const TAX_WORKBOOK_ROWS: TaxWorkbookRow[] = [
 
 export function formatExcelNumber(value: number | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
-  return String(Math.round(value));
+  return Math.round(value).toFixed(2);
 }
 
-export function buildPasteTsv(columns: TaxYearValues[], includeLabels = false): string {
+/** Table display — whole dollars with grouping. */
+export function formatTableNumber(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  return Math.round(value).toLocaleString();
+}
+
+const CONFIRMED_SAFE_TIERS = new Set<FieldTrustTier>([
+  "multi-source",
+  "authoritative",
+  "comparison",
+  "single-good",
+  "user-confirmed",
+]);
+
+export type WorkbookSection = "Income Statement Data" | "Balance Sheet Data";
+
+export type PasteTsvOptions = {
+  includeLabels?: boolean;
+  confirmedOnly?: boolean;
+  section?: WorkbookSection;
+  /** One Excel column per row (latest year). Default true in UI when only one year. */
+  singleColumn?: boolean;
+  /** Fixed 2023 / 2024 / 2025 columns for full workbook alignment. */
+  workbookLayout?: boolean;
+  /** Insert blank TSV lines for gaps in Excel row numbers (e.g. rows 33–35 between I/S and B/S). */
+  padExcelRows?: boolean;
+};
+
+function pasteYearColumns(columns: TaxYearValues[], options?: PasteTsvOptions): number[] {
+  const present = [...columns].map((c) => c.year).sort((a, b) => a - b);
+  if (!present.length) return [];
+  if (options?.workbookLayout) {
+    return [...TAX_YEARS];
+  }
+  if (options?.singleColumn !== false) {
+    return [present[present.length - 1]!];
+  }
+  return present;
+}
+
+export function buildPasteTsv(
+  columns: TaxYearValues[],
+  options?: PasteTsvOptions,
+): string {
+  const includeLabels = options?.includeLabels ?? false;
+  const confirmedOnly = options?.confirmedOnly ?? false;
+  const singleColumn = options?.singleColumn !== false;
+  const padExcelRows = options?.padExcelRows ?? false;
   const byYear = new Map(columns.map((col) => [col.year, col]));
-  return TAX_WORKBOOK_ROWS.map((row) => {
-    const cells = TAX_YEARS.map((year) =>
-      row.excelBehavior === "formula" ? "" : formatExcelNumber(byYear.get(year)?.values[row.id]),
-    );
-    return includeLabels ? [row.label, ...cells].join("\t") : cells.join("\t");
-  }).join("\n");
+  const years = pasteYearColumns(columns, { ...options, singleColumn });
+  const rows = options?.section
+    ? TAX_WORKBOOK_ROWS.filter((row) => row.section === options.section)
+    : TAX_WORKBOOK_ROWS;
+
+  const lines: string[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    if (padExcelRows && i > 0) {
+      const prev = rows[i - 1]!.row;
+      for (let gap = prev + 1; gap < row.row; gap++) {
+        lines.push("");
+      }
+    }
+    const cells = years.map((year) => {
+      if (row.excelBehavior === "formula") return "";
+      const col = byYear.get(year);
+      if (!col) return "";
+      if (confirmedOnly) {
+        const tier = col.fieldTrustTier?.[row.id];
+        if (tier) {
+          if (!CONFIRMED_SAFE_TIERS.has(tier)) return "";
+        } else if (col.fieldStatus?.[row.id] !== "verified") {
+          return "";
+        }
+      }
+      return formatExcelNumber(col.values[row.id]);
+    });
+    lines.push(includeLabels ? [row.label, ...cells].join("\t") : cells.join("\t"));
+  }
+  return lines.join("\n");
 }

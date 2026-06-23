@@ -1,7 +1,8 @@
 import Link from "next/link";
+import { SUPPORTED_TAX_FORMS_LABEL } from "@/lib/tax/tax-form-copy";
 
 const TOOLS = [
-  { href: "/tax", title: "Tax returns", subtitle: "1120-S and attachments", description: "Extract income statement and balance sheet lines for paste into your tax entry table.", cta: "Open tax tool" },
+  { href: "/tax", title: "Tax returns", subtitle: SUPPORTED_TAX_FORMS_LABEL, description: "Extract income statement and balance sheet lines for paste into your tax entry table.", cta: "Open tax tool" },
   { href: "/benchmark", title: "Benchmark PDF", subtitle: "Industry reports", description: "Pull financial ratios and common-size percentages from IBIS-style narrative PDFs.", cta: "Open benchmark tool" },
 ];
 

@@ -1,5 +1,5 @@
 import type { OcrMode, ParseTaxReturnResponse, ParsedTaxYear, ParseFileError } from "./types";
-import { defaultOcrMode, isVercelDeploy } from "@/lib/tax/ocr-modes";
+import { defaultOcrMode, estimateOcrDurationMs, isVercelDeploy, OCR_PROGRESS_CAP } from "@/lib/tax/ocr-modes";
 import { VERCEL_OCR_BUDGET_MS } from "@/lib/tax/resolve-ocr-mode";
 import { validateClientFileList } from "@/lib/tax/validate-upload";
 
@@ -12,7 +12,7 @@ async function postParseTaxReturn(body: FormData): Promise<Response> {
   } catch (e) {
     if (e instanceof Error && e.name === "AbortError") {
       throw new Error(
-        "Request timed out (~5 min on Vercel). If other years finished, they are already saved. Retry with Fast mode.",
+        "Request timed out. If other years finished, they are already saved. Try Balanced mode or process one file at a time.",
       );
     }
     throw e;
@@ -25,7 +25,7 @@ function parseApiError(res: Response, json: ParseTaxReturnResponse): string {
   if (json.error) return json.error;
   if (json.fileErrors?.length) return json.fileErrors.map((f) => `${f.filename}: ${f.message}`).join(" ");
   if (res.status === 504 || res.status === 502) {
-    return "OCR timed out on the server (~5 min limit per request on Vercel Hobby). Try Balanced mode or one file at a time.";
+    return "Processing timed out on the server. Try Balanced mode or one file at a time.";
   }
   return "Could not parse the uploaded tax return.";
 }
@@ -35,7 +35,48 @@ export type ParseTaxReturnProgress = {
   fileCount: number;
   label: string;
   percent?: number;
+  hint?: string;
 };
+
+async function postParseTaxReturnWithProgress(
+  body: FormData,
+  meta: { fileIndex: number; fileCount: number; filename: string; ocrMode: OcrMode },
+  onProgress?: (progress: ParseTaxReturnProgress) => void,
+): Promise<Response> {
+  const perFileMs = estimateOcrDurationMs(meta.ocrMode, 1);
+  const fileSpan = 100 / Math.max(meta.fileCount, 1);
+  const basePercent = (meta.fileIndex / meta.fileCount) * 100;
+  const start = Date.now();
+
+  const tick = () => {
+    const elapsed = Date.now() - start;
+    const slice = Math.min(OCR_PROGRESS_CAP, elapsed / perFileMs);
+    const modeLabel =
+      meta.ocrMode === "fast" || meta.ocrMode === "vercel-fast"
+        ? "Fast"
+        : meta.ocrMode === "thorough" || meta.ocrMode === "vercel-thorough"
+          ? "Thorough"
+          : "Balanced";
+    onProgress?.({
+      fileIndex: meta.fileIndex,
+      fileCount: meta.fileCount,
+      label: `OCR (${modeLabel}): ${meta.filename} (${meta.fileIndex + 1}/${meta.fileCount})`,
+      percent: basePercent + slice * fileSpan,
+      hint:
+        meta.fileCount > 1
+          ? `Processing ${meta.fileCount} files one at a time.`
+          : "Extracting values from your PDF…",
+    });
+  };
+
+  tick();
+  const timer = setInterval(tick, 400);
+  try {
+    return await postParseTaxReturn(body);
+  } finally {
+    clearInterval(timer);
+  }
+}
 
 export type ParseTaxReturnBatchResult = ParseTaxReturnResponse & {
   batchWarnings: string[];
@@ -64,8 +105,9 @@ export async function parseTaxReturnFiles(
     onProgress?.({
       fileIndex: i,
       fileCount: files.length,
-      label: `Processing ${file.name} (${i + 1}/${files.length})`,
+      label: `Starting ${file.name} (${i + 1}/${files.length})`,
       percent: (i / files.length) * 100,
+      hint: "Uploading PDF to server…",
     });
 
     try {
@@ -76,7 +118,11 @@ export async function parseTaxReturnFiles(
       }
       fd.append("ocrMode", ocrMode);
 
-      const res = await postParseTaxReturn(fd);
+      const res = await postParseTaxReturnWithProgress(
+        fd,
+        { fileIndex: i, fileCount: files.length, filename: file.name, ocrMode },
+        onProgress,
+      );
       const json = (await res.json()) as ParseTaxReturnResponse;
       if (!res.ok && !json.parsed?.length) {
         fileErrors.push({ filename: file.name, message: parseApiError(res, json) });
@@ -92,6 +138,13 @@ export async function parseTaxReturnFiles(
         allParsed.push(row);
         options?.onTierParsed?.(row);
       }
+
+      onProgress?.({
+        fileIndex: i,
+        fileCount: files.length,
+        label: `Finished ${file.name}`,
+        percent: ((i + 1) / files.length) * 100,
+      });
     } catch (e) {
       const message = e instanceof Error ? e.message : "Upload failed";
       fileErrors.push({ filename: file.name, message });

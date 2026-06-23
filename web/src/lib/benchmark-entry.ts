@@ -8,7 +8,61 @@ export type BenchmarkEntryRow = {
   value: string;
   source: "computed" | "scorecard" | "industry-common-size" | "na";
   formula?: string;
+  /** Blank separator row before this group in Excel paste. */
+  excelGroupStart?: boolean;
 };
+
+/**
+ * Benchmark Entry workbook row order (values column only when pasted).
+ * Matches the Excel template: section headers + blank rows between blocks.
+ */
+export const BENCHMARK_EXCEL_GROUPS: Array<{
+  section: BenchmarkEntryRow["section"];
+  labels: string[];
+}> = [
+  {
+    section: "Income Statement",
+    labels: ["COGS", "G&A Wages", "Rent Expenses", "EBITDA", "Net Income"],
+  },
+  {
+    section: "Balance Sheet",
+    labels: ["Cash", "Receivables", "Inventory", "Current Assets"],
+  },
+  {
+    section: "Balance Sheet",
+    labels: ["Gross", "Accumulated Depreciation", "Current Liabilities", "Long-term Liabilities"],
+  },
+  {
+    section: "Metrics",
+    labels: ["Current Ratio", "Quick Ratio", "Return on Equity", "Return on Assets"],
+  },
+  {
+    section: "Income Statement",
+    labels: [
+      "Depreciation",
+      "Amortization",
+      "Overhead or SG&A",
+      "Advertising",
+      "Other Operating Expenses",
+      "Operating Profit",
+      "Interest",
+    ],
+  },
+  {
+    section: "Balance Sheet",
+    labels: [
+      "Gross intangible",
+      "Less amortization",
+      "Accounts Payable",
+      "Short Term Debt",
+      "Current Portion",
+      "Other Current",
+      "Total Current",
+      "Long Term Liabilities",
+      "Equity",
+    ],
+  },
+];
 
 function pctRatio(num: number, den: number): string {
   if (!den) return "";
@@ -19,7 +73,6 @@ function latest<T extends readonly [number, number, number]>(t: T | undefined): 
   return t?.[2] ?? 0;
 }
 
-/** Map `industryCommonSize` fact keys → Benchmark Entry row (exact label). */
 const INDUSTRY_CS_FACT_TO_LABEL: Record<string, { section: BenchmarkEntryRow["section"]; label: string }> = {
   cogs: { section: "Income Statement", label: "COGS" },
   cogs_detail_total: { section: "Income Statement", label: "COGS" },
@@ -31,9 +84,10 @@ const INDUSTRY_CS_FACT_TO_LABEL: Record<string, { section: BenchmarkEntryRow["se
   ar: { section: "Balance Sheet", label: "Receivables" },
   inventory: { section: "Balance Sheet", label: "Inventory" },
   tca: { section: "Balance Sheet", label: "Current Assets" },
-  net_fixed: { section: "Balance Sheet", label: "Fixed Assets" },
   gross_fixed: { section: "Balance Sheet", label: "Gross" },
   acc_dep: { section: "Balance Sheet", label: "Accumulated Depreciation" },
+  tcl: { section: "Balance Sheet", label: "Current Liabilities" },
+  tltl: { section: "Balance Sheet", label: "Long-term Liabilities" },
   depreciation_is: { section: "Income Statement", label: "Depreciation" },
   amortization_is: { section: "Income Statement", label: "Amortization" },
   overhead_sga: { section: "Income Statement", label: "Overhead or SG&A" },
@@ -50,39 +104,49 @@ const INDUSTRY_CS_FACT_TO_LABEL: Record<string, { section: BenchmarkEntryRow["se
   total_equity: { section: "Balance Sheet", label: "Equity" },
 };
 
-function applyIndustryCommonSize(rows: BenchmarkEntryRow[], ics: Record<string, number> | undefined): void {
+function applyIndustryCommonSize(rowMap: Map<string, BenchmarkEntryRow>, ics: Record<string, number> | undefined): void {
   if (!ics || !Object.keys(ics).length) return;
-
-  const paint = (section: BenchmarkEntryRow["section"], labels: string[], ratio: number) => {
-    for (const row of rows) {
-      if (row.section === section && labels.includes(row.label)) {
-        row.value = formatPercentDisplay(ratio);
-        row.source = "industry-common-size";
-        row.formula = "Industry column (common-size % from PDF)";
-      }
-    }
-  };
 
   for (const [rawKey, ratio] of Object.entries(ics)) {
     const baseKey = rawKey.replace(/_pctdup$/, "").replace(/_il$/, "");
-    if (baseKey === "tltl") {
-      paint("Balance Sheet", ["Long-term Liabilities", "Long Term Liabilities"], ratio);
+    if (baseKey === "tcl") {
+      for (const label of ["Current Liabilities", "Total Current"]) {
+        const row = rowMap.get(`Balance Sheet|${label}`);
+        if (row) {
+          row.value = formatPercentDisplay(ratio);
+          row.source = "industry-common-size";
+          row.formula = "Industry column (common-size % from PDF)";
+        }
+      }
       continue;
     }
-    if (baseKey === "tcl") {
-      paint("Balance Sheet", ["Current Liabilities", "Total Current"], ratio);
+    if (baseKey === "tltl") {
+      for (const label of ["Long-term Liabilities", "Long Term Liabilities"]) {
+        const row = rowMap.get(`Balance Sheet|${label}`);
+        if (row) {
+          row.value = formatPercentDisplay(ratio);
+          row.source = "industry-common-size";
+          row.formula = "Industry column (common-size % from PDF)";
+        }
+      }
       continue;
     }
     const hit = INDUSTRY_CS_FACT_TO_LABEL[baseKey];
     if (!hit) continue;
-    paint(hit.section, [hit.label], ratio);
+    const row = rowMap.get(`${hit.section}|${hit.label}`);
+    if (row) {
+      row.value = formatPercentDisplay(ratio);
+      row.source = "industry-common-size";
+      row.formula = "Industry column (common-size % from PDF)";
+    }
   }
 }
 
-/**
- * Benchmark Entry rows: dollar-based common-size as %, metrics as ratios / %,
- * overridden by **industry** column from common-size % tables when present.
- */
+function rowKey(section: string, label: string): string {
+  return `${section}|${label}`;
+}
+
+/** All Benchmark Entry rows in Excel workbook order. */
 export function buildBenchmarkEntryRows(p: ParsedFinancialPdf): BenchmarkEntryRow[] {
   const f = p.facts;
   const sales = latest(f.sales) || 0;
@@ -92,13 +156,11 @@ export function buildBenchmarkEntryRows(p: ParsedFinancialPdf): BenchmarkEntryRo
   const cash = latest(f.cash) || 0;
   const ar = latest(f.ar) || 0;
   const inv = latest(f.inventory) || 0;
-  const ni = latest(f.net_income) || latest(f.net_profit_before_tax) || 0;
-  const eq =
-    latest(f.total_equity) || latest(f.unclassified_equity) || latest(f.equity_other) || 0;
-  const ebitda = latest(f.ebitda) || 0;
+  const cogs = latest(f.cogs) || 0;
   const ga = latest(f.ga_payroll) || 0;
   const rent = latest(f.rent) || 0;
-  const cogs = latest(f.cogs) || 0;
+  const ebitda = latest(f.ebitda) || 0;
+  const ni = latest(f.net_income) || latest(f.net_profit_before_tax) || 0;
   const depIs = latest(f.depreciation_is) || 0;
   const amort = latest(f.amortization_is) || 0;
   const oh = latest(f.overhead_sga) || 0;
@@ -116,157 +178,237 @@ export function buildBenchmarkEntryRows(p: ParsedFinancialPdf): BenchmarkEntryRo
   const accDep = latest(f.acc_dep) || 0;
   const grossInt = latest(f.gross_intangible) || 0;
   const accAmort = latest(f.acc_amortization) || 0;
-
-  const rows: BenchmarkEntryRow[] = [];
-
-  rows.push(
-    { section: "Income Statement", label: "COGS", value: pctRatio(cogs, sales), source: "computed", formula: "Cost of Sales / Sales" },
-    { section: "Income Statement", label: "G&A Wages", value: pctRatio(ga, sales), source: "computed", formula: "G&A Payroll / Sales" },
-    { section: "Income Statement", label: "Rent Expenses", value: pctRatio(rent, sales), source: "computed", formula: "Rent / Sales" },
-    { section: "Income Statement", label: "EBITDA", value: pctRatio(ebitda, sales), source: "computed", formula: "EBITDA / Sales" },
-    { section: "Income Statement", label: "Net Income", value: pctRatio(ni, sales), source: "computed", formula: "Net Income / Sales" },
-  );
-
-  rows.push(
-    { section: "Balance Sheet", label: "Cash", value: pctRatio(cash, ta), source: "computed", formula: "Cash / Total Assets" },
-    { section: "Balance Sheet", label: "Receivables", value: pctRatio(ar, ta), source: "computed", formula: "A/R / Total Assets" },
-    { section: "Balance Sheet", label: "Inventory", value: pctRatio(inv, ta), source: "computed", formula: "Inventory / Total Assets" },
-    { section: "Balance Sheet", label: "Current Assets", value: pctRatio(tca, ta), source: "computed", formula: "Total Current Assets / Total Assets" },
-    { section: "Balance Sheet", label: "Fixed Assets", value: pctRatio(latest(f.net_fixed), ta), source: "computed", formula: "Net Fixed Assets / Total Assets" },
-    { section: "Balance Sheet", label: "Gross", value: pctRatio(grossFixed, ta), source: "computed", formula: "Gross Fixed Assets / Total Assets" },
-    { section: "Balance Sheet", label: "Accumulated Depreciation", value: pctRatio(accDep, ta), source: "computed", formula: "Accumulated Depreciation / Total Assets" },
-    { section: "Balance Sheet", label: "Current Liabilities", value: pctRatio(latest(f.tcl), ta), source: "computed", formula: "Total Current Liabilities / Total Assets" },
-    { section: "Balance Sheet", label: "Long-term Liabilities", value: pctRatio(tltl, ta), source: "computed", formula: "Total LT Liabilities / Total Assets" },
-  );
+  const eq =
+    latest(f.total_equity) || latest(f.unclassified_equity) || latest(f.equity_other) || 0;
 
   const sc = p.scorecard;
 
-  const crIndustry = sc.currentRatioIndustryMid;
   const crCompany = tclTotal && tca ? tca / tclTotal : undefined;
-  const crScorecardCompany = sc.currentRatio;
-  const crDisplay =
-    crIndustry !== undefined ? crIndustry : crCompany !== undefined ? crCompany : crScorecardCompany;
+  const crScorecard = sc.currentRatio;
+  const crDisplay = crScorecard ?? crCompany;
   const crSource: BenchmarkEntryRow["source"] =
-    crIndustry !== undefined ? "scorecard" : crCompany !== undefined ? "computed" : "scorecard";
-  const crFormula =
-    crIndustry !== undefined
-      ? "Industry Scorecard — benchmark ratio (second figure) or midpoint of low–high range"
-      : "Total Current Assets / Total Current Liabilities";
+    crScorecard !== undefined ? "scorecard" : crCompany !== undefined ? "computed" : "na";
 
-  const qrIndustry = sc.quickRatioIndustryMid;
   const qrCompany = tclTotal && cash + ar ? (cash + ar) / tclTotal : undefined;
-  const qrScorecardCompany = sc.quickRatio;
-  const qrDisplay =
-    qrIndustry !== undefined ? qrIndustry : qrCompany !== undefined ? qrCompany : qrScorecardCompany;
+  const qrScorecard = sc.quickRatio;
+  const qrDisplay = qrScorecard ?? qrCompany;
   const qrSource: BenchmarkEntryRow["source"] =
-    qrIndustry !== undefined ? "scorecard" : qrCompany !== undefined ? "computed" : "scorecard";
-  const qrFormula =
-    qrIndustry !== undefined
-      ? "Industry Scorecard — benchmark ratio (second figure) or midpoint of low–high range"
-      : "(Cash + A/R) / Total Current Liabilities";
+    qrScorecard !== undefined ? "scorecard" : qrCompany !== undefined ? "computed" : "na";
 
-  const roeIndustryPct = sc.returnOnEquityIndustryPct;
   const roeRatio = eq && ni ? ni / eq : undefined;
-  const roeScorecardOne = sc.returnOnEquityPct;
+  const roeScorecard = sc.returnOnEquityPct;
   const roeDisplay =
-    roeIndustryPct !== undefined
-      ? `${roeIndustryPct}%`
+    roeScorecard !== undefined
+      ? `${roeScorecard}%`
       : roeRatio !== undefined
         ? formatPercentDisplay(roeRatio)
-        : roeScorecardOne !== undefined
-          ? `${roeScorecardOne}%`
-          : "";
+        : "";
   const roeSource: BenchmarkEntryRow["source"] =
-    roeIndustryPct !== undefined ? "scorecard" : roeRatio !== undefined ? "computed" : "scorecard";
-  const roeFormula =
-    roeIndustryPct !== undefined
-      ? "Industry Scorecard — second % (industry) when two values appear"
-      : "Net Income / Total Equity";
+    roeScorecard !== undefined ? "scorecard" : roeRatio !== undefined ? "computed" : "na";
 
-  const roaIndustryPct = sc.returnOnAssetsIndustryPct;
   const roaRatio = ta && ni ? ni / ta : undefined;
-  const roaScorecardOne = sc.returnOnAssetsPct;
+  const roaScorecard = sc.returnOnAssetsPct;
   const roaDisplay =
-    roaIndustryPct !== undefined
-      ? `${roaIndustryPct}%`
+    roaScorecard !== undefined
+      ? `${roaScorecard}%`
       : roaRatio !== undefined
         ? formatPercentDisplay(roaRatio)
-        : roaScorecardOne !== undefined
-          ? `${roaScorecardOne}%`
-          : "";
+        : "";
   const roaSource: BenchmarkEntryRow["source"] =
-    roaIndustryPct !== undefined ? "scorecard" : roaRatio !== undefined ? "computed" : "scorecard";
-  const roaFormula =
-    roaIndustryPct !== undefined
-      ? "Industry Scorecard — second % (industry) when two values appear"
-      : "Net Income / Total Assets";
+    roaScorecard !== undefined ? "scorecard" : roaRatio !== undefined ? "computed" : "na";
 
-  rows.push(
-    {
-      section: "Metrics",
-      label: "Current Ratio",
+  const computed: Record<string, Omit<BenchmarkEntryRow, "section" | "label">> = {
+    [rowKey("Income Statement", "COGS")]: {
+      value: pctRatio(cogs, sales),
+      source: "computed",
+      formula: "Cost of Sales / Sales",
+    },
+    [rowKey("Income Statement", "G&A Wages")]: {
+      value: pctRatio(ga, sales),
+      source: "computed",
+      formula: "G&A Payroll / Sales",
+    },
+    [rowKey("Income Statement", "Rent Expenses")]: {
+      value: pctRatio(rent, sales),
+      source: "computed",
+      formula: "Rent / Sales",
+    },
+    [rowKey("Income Statement", "EBITDA")]: {
+      value: pctRatio(ebitda, sales),
+      source: "computed",
+      formula: "EBITDA / Sales",
+    },
+    [rowKey("Income Statement", "Net Income")]: {
+      value: pctRatio(ni, sales),
+      source: "computed",
+      formula: "Net Income / Sales",
+    },
+    [rowKey("Balance Sheet", "Cash")]: {
+      value: pctRatio(cash, ta),
+      source: "computed",
+      formula: "Cash / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Receivables")]: {
+      value: pctRatio(ar, ta),
+      source: "computed",
+      formula: "A/R / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Inventory")]: {
+      value: pctRatio(inv, ta),
+      source: "computed",
+      formula: "Inventory / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Current Assets")]: {
+      value: pctRatio(tca, ta),
+      source: "computed",
+      formula: "Total Current Assets / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Gross")]: {
+      value: pctRatio(grossFixed, ta),
+      source: "computed",
+      formula: "Gross Fixed Assets / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Accumulated Depreciation")]: {
+      value: pctRatio(accDep, ta),
+      source: "computed",
+      formula: "Accumulated Depreciation / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Current Liabilities")]: {
+      value: pctRatio(tcl, ta),
+      source: "computed",
+      formula: "Total Current Liabilities / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Long-term Liabilities")]: {
+      value: pctRatio(tltl, ta),
+      source: "computed",
+      formula: "Total LT Liabilities / Total Assets",
+    },
+    [rowKey("Metrics", "Current Ratio")]: {
       value: crDisplay !== undefined ? r2(crDisplay) : "",
       source: crSource,
-      formula: crFormula,
+      formula: "Industry Scorecard (company ratio from report)",
     },
-    {
-      section: "Metrics",
-      label: "Quick Ratio",
+    [rowKey("Metrics", "Quick Ratio")]: {
       value: qrDisplay !== undefined ? r2(qrDisplay) : "",
       source: qrSource,
-      formula: qrFormula,
+      formula: "Industry Scorecard (company ratio from report)",
     },
-    {
-      section: "Metrics",
-      label: "Return on Equity",
+    [rowKey("Metrics", "Return on Equity")]: {
       value: roeDisplay,
       source: roeSource,
-      formula: roeFormula,
+      formula: "Industry Scorecard (company % from report)",
     },
-    {
-      section: "Metrics",
-      label: "Return on Assets",
+    [rowKey("Metrics", "Return on Assets")]: {
       value: roaDisplay,
       source: roaSource,
-      formula: roaFormula,
+      formula: "Industry Scorecard (company % from report)",
     },
-  );
-
-  rows.push(
-    { section: "Income Statement", label: "Depreciation", value: pctRatio(depIs, sales), source: "computed", formula: "Depreciation (I/S) / Sales" },
-    { section: "Income Statement", label: "Amortization", value: pctRatio(amort, sales), source: "computed", formula: "Amortization / Sales" },
-    { section: "Income Statement", label: "Overhead or SG&A", value: pctRatio(oh, sales), source: "computed", formula: "Overhead / Sales" },
-    { section: "Income Statement", label: "Advertising", value: pctRatio(adv, sales), source: "computed", formula: "Advertising / Sales" },
-    { section: "Income Statement", label: "Other Operating Expenses", value: pctRatio(ooe, sales), source: "computed", formula: "Other OpEx / Sales" },
-    { section: "Income Statement", label: "Operating Profit", value: pctRatio(op, sales), source: "computed", formula: "Operating Profit / Sales" },
-    { section: "Income Statement", label: "Interest", value: pctRatio(interest, sales), source: "computed", formula: "Interest / Sales" },
-  );
-
-  rows.push(
-    { section: "Balance Sheet", label: "Gross intangible", value: pctRatio(grossInt, ta), source: "computed", formula: "Gross Intangibles / Total Assets" },
-    { section: "Balance Sheet", label: "Less amortization", value: pctRatio(accAmort, ta), source: "computed", formula: "Accumulated Amortization / Total Assets" },
-    { section: "Balance Sheet", label: "Accounts Payable", value: pctRatio(ap, ta), source: "computed", formula: "A/P / Total Assets" },
-    { section: "Balance Sheet", label: "Short Term Debt", value: pctRatio(std, ta), source: "computed", formula: "STD / Total Assets" },
-    { section: "Balance Sheet", label: "Current Portion", value: pctRatio(cpltd, ta), source: "computed", formula: "CPLTD / Total Assets" },
-    { section: "Balance Sheet", label: "Other Current", value: pctRatio(ocl, ta), source: "computed", formula: "Other Current Liabilities / Total Assets" },
-    {
-      section: "Balance Sheet",
-      label: "Total Current",
+    [rowKey("Income Statement", "Depreciation")]: {
+      value: pctRatio(depIs, sales),
+      source: "computed",
+      formula: "Depreciation (I/S) / Sales",
+    },
+    [rowKey("Income Statement", "Amortization")]: {
+      value: pctRatio(amort, sales),
+      source: "computed",
+      formula: "Amortization / Sales",
+    },
+    [rowKey("Income Statement", "Overhead or SG&A")]: {
+      value: pctRatio(oh, sales),
+      source: "computed",
+      formula: "Overhead / Sales",
+    },
+    [rowKey("Income Statement", "Advertising")]: {
+      value: pctRatio(adv, sales),
+      source: "computed",
+      formula: "Advertising / Sales",
+    },
+    [rowKey("Income Statement", "Other Operating Expenses")]: {
+      value: pctRatio(ooe, sales),
+      source: "computed",
+      formula: "Other OpEx / Sales",
+    },
+    [rowKey("Income Statement", "Operating Profit")]: {
+      value: pctRatio(op, sales),
+      source: "computed",
+      formula: "Operating Profit / Sales",
+    },
+    [rowKey("Income Statement", "Interest")]: {
+      value: pctRatio(interest, sales),
+      source: "computed",
+      formula: "Interest / Sales",
+    },
+    [rowKey("Balance Sheet", "Gross intangible")]: {
+      value: pctRatio(grossInt, ta),
+      source: "computed",
+      formula: "Gross Intangibles / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Less amortization")]: {
+      value: pctRatio(accAmort, ta),
+      source: "computed",
+      formula: "Accumulated Amortization / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Accounts Payable")]: {
+      value: pctRatio(ap, ta),
+      source: "computed",
+      formula: "A/P / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Short Term Debt")]: {
+      value: pctRatio(std, ta),
+      source: "computed",
+      formula: "STD / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Current Portion")]: {
+      value: pctRatio(cpltd, ta),
+      source: "computed",
+      formula: "CPLTD / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Other Current")]: {
+      value: pctRatio(ocl, ta),
+      source: "computed",
+      formula: "Other Current Liabilities / Total Assets",
+    },
+    [rowKey("Balance Sheet", "Total Current")]: {
       value: pctRatio(tclTotal, ta),
       source: "computed",
       formula: "Total Current Liabilities / Total Assets",
     },
-    {
-      section: "Balance Sheet",
-      label: "Long Term Liabilities",
+    [rowKey("Balance Sheet", "Long Term Liabilities")]: {
       value: pctRatio(tltl, ta),
       source: "computed",
-      formula: "Total LT Liabilities / Total Assets (duplicate row label in template)",
+      formula: "Total LT Liabilities / Total Assets",
     },
-    { section: "Balance Sheet", label: "Equity", value: pctRatio(eq, ta), source: "computed", formula: "Equity / Total Assets" },
-  );
+    [rowKey("Balance Sheet", "Equity")]: {
+      value: pctRatio(eq, ta),
+      source: "computed",
+      formula: "Equity / Total Assets",
+    },
+  };
 
-  applyIndustryCommonSize(rows, p.industryCommonSize);
+  const rowMap = new Map<string, BenchmarkEntryRow>();
+  for (const [key, data] of Object.entries(computed)) {
+    const [section, label] = key.split("|") as [BenchmarkEntryRow["section"], string];
+    rowMap.set(key, { section, label, ...data });
+  }
+
+  applyIndustryCommonSize(rowMap, p.industryCommonSize);
+
+  const rows: BenchmarkEntryRow[] = [];
+  for (const group of BENCHMARK_EXCEL_GROUPS) {
+    group.labels.forEach((label, labelIdx) => {
+      const key = rowKey(group.section, label);
+      const row = rowMap.get(key) ?? {
+        section: group.section,
+        label,
+        value: "",
+        source: "na" as const,
+      };
+      rows.push({
+        ...row,
+        excelGroupStart: labelIdx === 0 && rows.length > 0,
+      });
+    });
+  }
 
   return rows;
 }

@@ -27,7 +27,7 @@ function fixtureToColumn(year: number): TaxYearValues {
 }
 
 const columns = [2025, 2024, 2023].map(fixtureToColumn);
-const tsv = buildPasteTsv(columns);
+const tsv = buildPasteTsv(columns, { workbookLayout: true, singleColumn: false });
 const lines = tsv.split("\n");
 
 assert(lines.length === TAX_WORKBOOK_ROWS.length, `TSV line count ${lines.length} = workbook rows ${TAX_WORKBOOK_ROWS.length}`);
@@ -42,22 +42,40 @@ for (const row of TAX_WORKBOOK_ROWS) {
   lineIdx++;
 }
 
-// Year column order: 2025, 2024, 2023 — 2024 values in column index 1
+// Year column order: 2023, 2024, 2025 — newest on the right
 const salesLine = lines[TAX_WORKBOOK_ROWS.findIndex((r) => r.id === "sales")];
 const salesCells = salesLine!.split("\t");
-assert(salesCells[0] === "1027658", "2025 sales in column 1");
-assert(salesCells[1] === "1066455", "2024 sales in column 2");
-assert(salesCells[2] === "1086475", "2023 sales in column 3");
+assert(salesCells[0] === "1086475.00", "2023 sales in column 1 (left)");
+assert(salesCells[1] === "1066455.00", "2024 sales in column 2");
+assert(salesCells[2] === "1027658.00", "2025 sales in column 3 (right)");
 
 const cogsLine = lines[TAX_WORKBOOK_ROWS.findIndex((r) => r.id === "cogs")];
-assert(cogsLine!.split("\t")[1] === "313334", "2024 cogs in column 2");
+assert(cogsLine!.split("\t")[1] === "313334.00", "2024 cogs in column 2");
 
-// Partial year upload: only 2024 — other year columns blank
-const partial = buildPasteTsv([fixtureToColumn(2024)]);
+const depLine = lines[TAX_WORKBOOK_ROWS.findIndex((r) => r.id === "depreciation")];
+const depCells = depLine!.split("\t");
+assert(depCells[0] === "0.00", "2023 depreciation");
+assert(depCells[1] === "0.00", "2024 depreciation");
+assert(depCells[2] === "12860.00", "2025 depreciation");
+
+const amortLine = lines[TAX_WORKBOOK_ROWS.findIndex((r) => r.id === "amortization")];
+const amortCells = amortLine!.split("\t");
+assert(amortCells[0] === "14174.00", "2023 amortization");
+assert(amortCells[1] === "0.00", "2024 amortization");
+assert(amortCells[2] === "0.00", "2025 amortization");
+
+// Partial year upload: only 2024 — other year columns blank (workbook layout)
+const partial = buildPasteTsv([fixtureToColumn(2024)], { workbookLayout: true, singleColumn: false });
 const partialSales = partial.split("\n")[TAX_WORKBOOK_ROWS.findIndex((r) => r.id === "sales")]!.split("\t");
 assert(partialSales[0] === "", "missing 2025 is blank");
-assert(partialSales[1] === "1066455", "2024 still in column 2");
+assert(partialSales[1] === "1066455.00", "2024 still in column 2");
 assert(partialSales[2] === "", "missing 2023 is blank");
+
+// Single-column paste (UI default): one value per row for latest year
+const singleCol = buildPasteTsv([fixtureToColumn(2024)], { section: "Income Statement Data" });
+const singleLines = singleCol.split("\n");
+assert(singleLines[0]!.split("\t").length === 1, "single-column income paste is one cell wide");
+assert(singleLines[0] === "1066455.00", "single-column sales with cents");
 
 console.log(`\n=== excel paste alignment: ${passed} passed, ${failed} failed ===`);
 process.exit(failed > 0 ? 1 : 0);

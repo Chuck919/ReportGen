@@ -1,11 +1,9 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
-import { parseBenchmarkFile } from "@/lib/api/parse-benchmark";
-import type { ParseBenchmarkResponse } from "@/lib/api/types";
+import { useMemo } from "react";
+import { useAppSession } from "@/components/providers/AppSessionProvider";
 import {
-  buildBenchmarkHeaderAndValuesTsv,
-  buildBenchmarkTableTsv,
+  buildBenchmarkExcelPaste,
   buildBenchmarkValuesColumn,
 } from "@/lib/benchmark-excel";
 import { useElapsedTimer } from "@/hooks/use-elapsed-timer";
@@ -16,45 +14,34 @@ import { BenchmarkMetaCard } from "./BenchmarkMetaCard";
 import { BenchmarkTable } from "./BenchmarkTable";
 
 export function BenchmarkPage() {
-  const [data, setData] = useState<ParseBenchmarkResponse | null>(null);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const { benchmark } = useAppSession();
+  const { data, error, busy, progressLabel, progressPercent, onFile } = benchmark;
 
   const elapsedMs = useElapsedTimer(busy);
 
   const clipboardPayloads = useMemo(() => {
     if (!data?.benchmarkRows.length) return null;
     return {
-      fullTable: buildBenchmarkTableTsv(data.benchmarkRows),
       valuesColumn: buildBenchmarkValuesColumn(data.benchmarkRows),
-      headerValueCol: buildBenchmarkHeaderAndValuesTsv(data.benchmarkRows),
+      withHeaders: buildBenchmarkExcelPaste(data.benchmarkRows),
     };
   }, [data]);
-
-  const onFile = useCallback(async (file: File | null) => {
-    if (!file) return;
-    setError("");
-    setData(null);
-    setBusy(true);
-    try {
-      const json = await parseBenchmarkFile(file);
-      setData(json);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error");
-      setData(null);
-    } finally {
-      setBusy(false);
-    }
-  }, []);
 
   return (
     <Container className="py-10">
       <PageHeader
         title="Benchmark PDF"
-        description="Upload IBIS-style industry reports. Extract financial ratios and common-size percentages for your Benchmark Entry sheet."
+        description="Upload IBIS-style industry reports. Paste layout matches the full Benchmark Entry workbook (all rows, blank lines between sections)."
       />
 
-      <BenchmarkUploadPanel onFile={onFile} busy={busy} elapsedMs={elapsedMs} error={error} />
+      <BenchmarkUploadPanel
+        onFile={onFile}
+        busy={busy}
+        elapsedMs={elapsedMs}
+        error={error}
+        progressLabel={progressLabel}
+        progressPercent={progressPercent}
+      />
 
       {data && (
         <div className="mt-6 space-y-4">

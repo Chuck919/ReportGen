@@ -5,6 +5,7 @@ import {
   WARN_PAGE_COUNT_VERCEL,
   maxFilesPerApiRequest,
 } from "./upload-policy";
+import { SUPPORTED_TAX_FORMS_LABEL } from "./tax-form-copy";
 
 export type UploadFileCheck = {
   filename: string;
@@ -77,7 +78,9 @@ export type PdfInspectHints = {
 export function hintsFromPdfInspect(inspect: PdfInspectHints, isVercel?: boolean): string[] {
   const warnings: string[] = [];
   if (!inspect.likelyTaxReturn) {
-    warnings.push("This PDF may not be a Form 1120-S tax return (no 1120-S / Schedule L signals in embedded text).");
+    warnings.push(
+      `This PDF may not be a business tax return (no ${SUPPORTED_TAX_FORMS_LABEL} or Schedule L signals in embedded text).`,
+    );
   }
   if (inspect.likelyScanned) {
     warnings.push(
@@ -97,5 +100,7 @@ export function isLikelyScannedPdf(embeddedTextLen: number): boolean {
 }
 
 export function isLikelyTaxReturnText(text: string): boolean {
-  return /1120|schedule\s*l|balance\s*sheet|gross\s*receipt|form\s*1120/i.test(text);
+  return /1120|1065|1041|schedule\s*l|balance\s*sheet|gross\s*receipt|form\s*1120|partnership\s+income|estates?\s+and\s+trusts/i.test(
+    text,
+  );
 }

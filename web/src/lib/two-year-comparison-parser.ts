@@ -25,29 +25,46 @@ export function stripEinNoise(line: string): string {
     .replace(/\b-?\d{7}\b/g, " ");
 }
 
+/** OCR often drops the leading letter (e.g. `ROSS RECEIPTS`, `OST OF GOODS`). */
+function isGrossReceiptsLabel(line: string): boolean {
+  if (/8990|section\s+448|3\s+tax\s+years|aggregate\s+average/i.test(line)) return false;
+  return /(?:\bg\s*)?ross\s+rece|gross\s*rece|gross\s*receipt|net\s*sale/i.test(line);
+}
+
 export function classifyComparisonLine(line: string): string | null {
   const t = line.toLowerCase();
+  if (/\b20\b/i.test(line) && /other\s+deduct/i.test(line) && /attach|stmt\s*2|see\s+stmt|\[20\]/i.test(line)) {
+    return null;
+  }
   if (/ordinary\s+busin|net\s+income|total\s+inc/i.test(t) && !/cost/.test(t)) return null;
-  if (/net\s*rece|gross\s*rece|gross\s*receipt|net\s*sale/.test(t)) {
-    if (/8990|section\s+448|3\s+tax\s+years|aggregate\s+average/.test(t)) return null;
+  if (isGrossReceiptsLabel(line) || (/return.*allow/i.test(t) && /\d{1,3},\d{3}/.test(line))) {
     return "sales";
   }
-  if (/cost\s*of\s*(gos|good|sales)|c\.?\s*o\.?\s*g/.test(t)) return "cogs";
-  if (/compensat\w*.{0,24}off|compensat\w*\s+of\s+(ofc|afc|off)/i.test(t)) return "officer_compensation";
+  if (/cost\s*of\s*(gos|good|sales)|c\.?\s*o\.?\s*g|(?:\bc\s*)?ost\s+of\s*(gos|good|sales)/i.test(t)) return "cogs";
+  if (/compensat\w*.{0,24}off|ompensat\w*.{0,24}off|compensat\w*\s+of\s+(ofc|afc|off)/i.test(t)) return "officer_compensation";
   if (/sar\w*\s+and\s+wa|salari\w*\s+and\s+wag/.test(t)) return "salaries_wages";
   if (/advert|verteng/.test(t) && !/adjusted/i.test(t)) return "advertising";
-  if (/(^|[^a-z])rent[^a-z]/.test(t) && !/cur(r)?ent/i.test(t)) return "rent";
-  if (/tax(es)?\s+and\s+(lic|es)|totes\s+ond\s+es/.test(t)) return "taxes_licenses";
-  if (/interest\s+exp|interest\s*\(/.test(t)) return "interest_expense";
+  if (/(^|[^a-z])rents?\b|(?:\b|r)ents\b/.test(t) && !/cur(r)?ent/i.test(t)) return "rent";
+  if (/tax(es)?\s+and\s+(lic|es)|totes\s+ond\s+es|\baxes\s+and\s+lic/i.test(t)) return "taxes_licenses";
+  if (/interest\s+exp|interest\s*\(/.test(t) && !/interest\s+income/i.test(t)) return "interest_expense";
   if (/depreciation/.test(t) && !/accum/i.test(t)) return "depreciation";
   if (/amortization/.test(t) && !/accum/i.test(t)) return "amortization";
-  if (/other\s+operat.{0,6}exp|other\s+deduct|ober\s+desucon/.test(t)) return "other_operating_expenses";
-  if (/other\s+income/i.test(t) && !/operat/i.test(t)) return "other_income";
+  // Form line 20 "OTHER DEDUCTIONS" = Stmt 2 attachment total — not workbook opex residual.
+  if (/other\s+operat.{0,6}exp|ober\s+desucon|ther\s+operat|0ther\s+operat/i.test(t)) {
+    return "other_operating_expenses";
+  }
+  if (/\bother\b/i.test(t) && /\bexp/i.test(t) && !/other\s+income|operat.{0,6}income|other\s+deduct/i.test(t)) {
+    return "other_operating_expenses";
+  }
+  if (/other\s+income/i.test(t) && !/operat/i.test(t)) {
+    if (/subtraction|subtract|sch\.?\s*k|schedule\s*k|from federal/i.test(t)) return null;
+    return "other_income";
+  }
   if (/bank|credit\s+card/.test(t)) return "bank_credit_card";
   if (/professional|legal\s+and/.test(t)) return "professional_fees";
   if (/utilities|utilit/.test(t)) return "utilities";
   if (/taxes\s+paid/.test(t) && !/net income|per books|per return|ordinary business/i.test(t)) return "taxes_paid";
-  if (/cash/.test(t) && !/flow/.test(t)) return "cash";
+  if (/\bcash\b/.test(t) && !/charit|contribut|flow|over\/short|chartable|method/i.test(t)) return "cash";
   if (/receivable|trade receiv/i.test(t) && !/note|year|overpayment|balance at|beginning|ending/i.test(t)) return "accounts_receivable";
   if (/\binventory\b/.test(t)) return "inventory";
   if (/other\s+current\s+asset/.test(t)) return "other_current_assets";
@@ -94,11 +111,37 @@ function isStructurallyValid(id: string, value: number, line: string, headerYear
   if (isFormReferenceNumber(v)) return false;
   if (headerYears && (v === headerYears[0] || v === headerYears[1])) return false;
   if (id === "depreciation" && (value < 0 || /accumulated/i.test(line))) return false;
+  if ((id === "depreciation" || id === "amortization") && value >= 2020 && value <= 2030) return false;
   if (id === "accounts_receivable" && /balance at|beginning|ending|year/i.test(line)) return false;
-  if ((id === "other_income" || id === "taxes_paid" || id === "depreciation") && Math.abs(value) < 100) return false;
+  if ((id === "other_income" || id === "taxes_paid" || id === "depreciation" || id === "amortization") && Math.abs(value) < 100) return false;
+  if (id === "other_operating_expenses" && Math.abs(value) < 1000) return false;
+  if (id === "other_operating_expenses" && Math.abs(value) > 5_000_000) return false;
+  if ((id === "bank_credit_card" || id === "professional_fees" || id === "utilities") && Math.abs(value) < 500) return false;
+  if (id === "other_income" && /subtraction|subtract|sch\.?\s*k|schedule\s*k|from federal/i.test(line)) return false;
+  if (id === "cash" && Math.abs(value) < 5_000) return false;
+  if (id === "notes_minus_short_term" && Math.abs(value) < 100) return false;
+  if (id === "cogs" && Math.abs(value) < 10_000) return false;
   if (id === "taxes_licenses" && Math.abs(value) < 1000) return false;
+  if (
+    (id === "rent" || id === "taxes_licenses" || id === "cogs" || id === "sales") &&
+    value < 0
+  ) {
+    return false;
+  }
   return true;
 }
+
+const PENDING_COMPARISON_LABELS = new Set([
+  "rent",
+  "advertising",
+  "taxes_licenses",
+  "utilities",
+  "cogs",
+  "depreciation",
+  "bank_credit_card",
+  "professional_fees",
+  "interest_expense",
+]);
 
 export function parseTwoYearComparisonBlock(
   fullText: string,
@@ -110,13 +153,39 @@ export function parseTwoYearComparisonBlock(
   columnUsed?: 0 | 1;
   linesMatched: number;
 } | null {
-  const start = fullText.search(
-    /two\s*year\s*comparison|1120[-\s]?s.{0,40}worksheet|worksheet\s+page.{0,20}20\d{2}/i,
-  );
-  if (start < 0) return null;
+  const startRe =
+    /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|s\.?\s*,?\s*corp\w*[\s\S]{0,80}comparison|1120[-\s]?s.{0,40}worksheet|worksheet\s+page.{0,20}20\d{2}/gi;
+  const starts: number[] = [];
+  let sm: RegExpExecArray | null;
+  while ((sm = startRe.exec(fullText)) !== null) starts.push(sm.index);
+  const grossIdx = fullText.search(/(?:\bg\s*)?ross\s+receipts?\s+or\s+sales/i);
+  if (grossIdx >= 0) starts.push(Math.max(0, grossIdx - 300));
+  if (!starts.length) return null;
 
+  let best: ReturnType<typeof parseTwoYearComparisonAt> = null;
+  for (const start of starts) {
+    const parsed = parseTwoYearComparisonAt(fullText, targetYear, start);
+    if (!parsed) continue;
+    if (!best || parsed.linesMatched > best.linesMatched) best = parsed;
+  }
+  return best;
+}
+
+function parseTwoYearComparisonAt(
+  fullText: string,
+  targetYear: number,
+  start: number,
+): {
+  values: Record<string, number>;
+  confidence: Record<string, number>;
+  headerYears?: [number, number];
+  columnUsed?: 0 | 1;
+  linesMatched: number;
+} | null {
   const block = fullText.slice(start, start + 22000);
-  const headerM = block.match(/\b(20\d{2})\s*[\&\-–]\s*(20\d{2})\b/);
+  const headerM =
+    block.match(/\b(20\d{2})\s*[\&\-–]\s*(20\d{2})\b/) ??
+    block.match(/\b(20\d{2})\s+and\s+(20\d{2})\b/);
   let col: 0 | 1 = 1;
   let yL = 0;
   let yR = 0;
@@ -130,28 +199,139 @@ export function parseTwoYearComparisonBlock(
   const confidence: Record<string, number> = {};
   let linesMatched = 0;
 
-  for (const rawLine of block.split(/\r?\n/)) {
-    const line = stripEinNoise(rawLine.replace(/\s+/g, " ").trim());
-    const id = classifyComparisonLine(line);
-    if (!id || !INPUT_IDS.has(id)) continue;
+  let pendingSales = false;
+  let pendingLabelId: string | null = null;
+  let prevLine = "";
+  const blockLines = block.split(/\r?\n/);
 
+  const moneyFromLine = (line: string, id: string): number[] => {
     const matches = Array.from(line.matchAll(/\(?\$?\s*-?\d[\d,]*(?:\.\d{2})?\s*\)?/g));
-    const nums: number[] = [];
+    let nums: number[] = [];
     for (const m of matches) {
       const v = parseMoneyToken(m[0]);
       if (v !== null) nums.push(v);
     }
-    const pair = shrinkToYearColumns(nums);
-    if (!pair) continue;
+    if (id === "other_operating_expenses") {
+      nums = nums.filter((n) => Math.abs(n) >= 1000);
+    }
+    return nums;
+  };
 
-    const picked = col === 0 ? pair[0] : pair[1];
-    if (!Number.isFinite(picked)) continue;
-    if (!isStructurallyValid(id, picked, line, headerM ? [yL, yR] : undefined)) continue;
-    if (values[id] !== undefined) continue;
+  for (let li = 0; li < blockLines.length; li++) {
+    const rawLine = blockLines[li]!;
+    const line = stripEinNoise(rawLine.replace(/\s+/g, " ").trim());
+    if (!line) continue;
+
+    if (isGrossReceiptsLabel(line) && !/\d{1,3},\d{3}/.test(line)) {
+      pendingSales = true;
+      pendingLabelId = null;
+      prevLine = line;
+      continue;
+    }
+
+    let id = classifyComparisonLine(line);
+    if (!id && pendingSales && /\d{1,3},\d{3}/.test(line)) {
+      id = "sales";
+      pendingSales = false;
+    } else if (id) {
+      pendingSales = false;
+    }
+
+    if (id && !moneyFromLine(line, id).length && !/\d{1,3},\d{3}/.test(line)) {
+      pendingLabelId = PENDING_COMPARISON_LABELS.has(id) ? id : null;
+      prevLine = line;
+      continue;
+    }
+
+    if (!id && pendingLabelId && /\d{1,3},\d{3}/.test(line)) {
+      id = pendingLabelId;
+      pendingLabelId = null;
+    }
+    const context = `${prevLine} ${line}`;
+    if (
+      id === "other_income" &&
+      /subtraction|subtract|sch\.?\s*k|schedule\s*k-1|k_1\s*totals|shareholder/i.test(context)
+    ) {
+      prevLine = line;
+      continue;
+    }
+    if (id === "other_income" && /schedule\s*k-1\s+line|k-1\s+line\/item/i.test(context)) {
+      prevLine = line;
+      continue;
+    }
+    if (id === "interest_expense" && (!/interest/i.test(line) || /interest\s+income/i.test(line))) {
+      prevLine = line;
+      continue;
+    }
+    if (id === "cogs") {
+      const pair = shrinkToYearColumns(
+        Array.from(line.matchAll(/\(?\$?\s*-?\d[\d,]*(?:\.\d{2})?\s*\)?/g))
+          .map((m) => parseMoneyToken(m[0]))
+          .filter((n): n is number => n !== null),
+      );
+      if (pair && Math.abs(pair[0] - pair[1]) < 2 && Math.abs(pair[0]) < 500_000) {
+        prevLine = line;
+        continue;
+      }
+    }
+    if (!id || !INPUT_IDS.has(id)) {
+      prevLine = line;
+      continue;
+    }
+
+    let nums = moneyFromLine(line, id);
+    const pair = shrinkToYearColumns(nums);
+    if (!pair) {
+      prevLine = line;
+      continue;
+    }
+
+    let picked = col === 0 ? pair[0] : pair[1];
+    if (
+      picked < 0 &&
+      (id === "rent" || id === "taxes_licenses" || id === "cogs" || id === "sales")
+    ) {
+      const positive = nums.filter((n) => n > 1000);
+      if (!positive.length) {
+        prevLine = line;
+        continue;
+      }
+      picked = col === 0 ? positive[0]! : positive[positive.length - 1]!;
+    }
+    if (
+      id === "taxes_licenses" &&
+      nums.some((n) => Math.abs(n) >= 50_000) &&
+      Math.abs(picked) < 10_000
+    ) {
+      prevLine = line;
+      continue;
+    }
+    if (!Number.isFinite(picked)) {
+      prevLine = line;
+      continue;
+    }
+    if (!isStructurallyValid(id, picked, line, headerM ? [yL, yR] : undefined)) {
+      prevLine = line;
+      continue;
+    }
+    if (values[id] !== undefined) {
+      const prev = values[id]!;
+      if (
+        (id === "taxes_licenses" || id === "rent") &&
+        Math.abs(prev) < 10_000 &&
+        Math.abs(picked) >= 10_000
+      ) {
+        // Replace garbled first match with a stronger later row
+      } else {
+        prevLine = line;
+        continue;
+      }
+    }
 
     values[id] = Math.round(picked);
     confidence[id] = 86;
     linesMatched += 1;
+    prevLine = line;
   }
 
   if (linesMatched < 3) return null;

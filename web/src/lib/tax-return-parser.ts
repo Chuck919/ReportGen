@@ -3,8 +3,13 @@ import { TAX_WORKBOOK_ROWS, type TaxYearValues } from "@/lib/tax-workbook";
 import { inferTaxYear } from "@/lib/tax-return/infer-year";
 import { findHitsLineScoped } from "@/lib/tax-return/line-hits";
 import { runLocalOcr, type OcrMode } from "@/lib/tax-return/local-ocr";
+import { isOcrRecoveryEnabled, rescanMissingAttachmentsExperimental } from "@/lib/tax/ocr-recovery-experimental";
 import { parseTaxReturnFromText } from "@/lib/tax-return/parse-from-text";
+import { buildOcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
+import { detectTaxForm } from "@/lib/tax-return/detect-tax-form";
 import { isProcessTimeoutError, ocrTimeoutUserMessage } from "@/lib/tax/ocr-errors";
+import { clientIdentityFromText } from "@/lib/tax-return/extract-business-name";
+import { applyTaxYearVerification, buildVerificationSnapshots } from "@/lib/tax/reconcile-tax-year";
 
 export { extractForm1120Anchors } from "@/lib/tax-return/form-anchors";
 export { parseTaxReturnFromText } from "@/lib/tax-return/parse-from-text";
@@ -15,6 +20,10 @@ export { runLocalOcr } from "@/lib/tax-return/local-ocr";
 const INPUT_ROW_IDS = new Set(
   TAX_WORKBOOK_ROWS.filter((row) => row.excelBehavior === "input").map((row) => row.id),
 );
+
+function usesAttachmentGapRescan(mode: OcrMode): boolean {
+  return isOcrRecoveryEnabled() && (mode === "thorough" || mode === "vercel-thorough");
+}
 
 const FACT_TO_TAX_ID: Record<string, string> = {
   sales: "sales",
@@ -73,6 +82,9 @@ function tryStructuredTable(text: string) {
   return { values, confidence, sources };
 }
 
+import type { OpexCandidate } from "@/lib/tax-return/opex-candidate-ranking";
+import type { OcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
+
 export type ParseTaxReturnDebug = {
   embeddedTextLen: number;
   structuredTableFields?: number;
@@ -86,13 +98,18 @@ export type ParseTaxReturnDebug = {
   comparisonLinesMatched?: number;
   comparisonHeaderYears?: [number, number];
   comparisonColumnUsed?: 0 | 1;
+  coverage?: OcrCoverageDiagnostics;
+  opexCandidates?: OpexCandidate[];
+  opexChosenSource?: string;
 };
 
 function tryEmbeddedFullParse(
   filename: string,
   embeddedText: string,
   yearOverride?: number,
+  ocrMode?: OcrMode,
 ): (TaxYearValues & { fieldSources?: Record<string, string> }) | null {
+  if (ocrMode === "thorough" || ocrMode === "balanced") return null;
   if (embeddedText.trim().length < 600) return null;
   if (!/1120|schedule\s*l|balance\s*sheet|gross\s*receipt/i.test(embeddedText)) return null;
 
@@ -138,15 +155,26 @@ export async function parseTaxReturn(
         ? yearOverride
         : inferTaxYear(filename, embeddedText);
     if (!year) throw new Error("Could not determine tax year from document text.");
-    return {
-      year,
-      values: structured.values,
-      confidence: structured.confidence,
-      fieldSources: structured.sources,
-      warnings: [`Structured financial table extracted (${Object.keys(structured.values).length} fields).`],
-      source: "embedded-financial-table",
-      debug,
-    };
+    const identity = clientIdentityFromText(embeddedText, filename);
+    const verified = applyTaxYearVerification(
+      {
+        year,
+        values: structured.values,
+        confidence: structured.confidence,
+        fieldSources: structured.sources,
+        warnings: [`Structured financial table extracted (${Object.keys(structured.values).length} fields).`],
+        source: "embedded-financial-table",
+        ...identity,
+      },
+      buildVerificationSnapshots({
+        formAnchors: { values: {}, confidence: {}, sources: {} },
+        statements: { values: {}, confidence: {}, sources: {} },
+        fuzzy: { values: {}, confidence: {}, sources: {} },
+        embeddedScheduleL: { values: {}, confidence: {}, sources: {} },
+        structured,
+      }),
+    );
+    return { ...verified, debug };
   }
 
   const yearProbe =
@@ -155,7 +183,7 @@ export async function parseTaxReturn(
       : inferTaxYear(filename, embeddedText);
   debug.embeddedLineHits = findHitsLineScoped(embeddedText, 99, yearProbe).length;
 
-  const embeddedOnly = tryEmbeddedFullParse(filename, embeddedText, yearOverride);
+  const embeddedOnly = tryEmbeddedFullParse(filename, embeddedText, yearOverride, ocrMode);
   if (embeddedOnly) {
     debug.resolvedFieldCount = Object.keys(embeddedOnly.values).length;
     debug.combinedHitCount = findHitsLineScoped(embeddedText, 65, embeddedOnly.year).length;
@@ -182,11 +210,32 @@ export async function parseTaxReturn(
       ocrText = ocr.text;
       debug.ocrPageCount = ocr.pages;
       debug.ocrTimingMs = ocr.timingMs;
-      debug.ocrLogs = ocr.logs;
+      debug.ocrLogs = [...ocr.logs];
       ocrModeLabel = (ocr.ocrMode ?? ocrMode) as OcrMode;
+
+      if (usesAttachmentGapRescan(ocrMode)) {
+        const gap = await rescanMissingAttachmentsExperimental(
+          bytes,
+          embeddedText,
+          ocrText,
+          filename,
+          yearProbe ?? undefined,
+          ocrModeLabel === "thorough" ? "balanced" : "vercel-balanced",
+        );
+        if (gap.ran) {
+          ocrText = gap.ocrText;
+          debug.ocrPageCount = (ocrText.match(/--- OCR PAGE \d+/g) || []).length;
+          debug.ocrLogs!.push(
+            `Attachment gap rescan: ${gap.pages.length} pages (${gap.pages.join(",")}), ${gap.ms}ms`,
+          );
+          if (debug.ocrTimingMs?.total !== undefined) {
+            debug.ocrTimingMs.total += gap.ms;
+          }
+        }
+      }
     } catch (e) {
       if (isProcessTimeoutError(e)) {
-        const embeddedFallback = tryEmbeddedFullParse(filename, embeddedText, yearOverride);
+        const embeddedFallback = tryEmbeddedFullParse(filename, embeddedText, yearOverride, ocrMode);
         if (embeddedFallback) {
           debug.resolvedFieldCount = Object.keys(embeddedFallback.values).length;
           return {
@@ -217,9 +266,35 @@ export async function parseTaxReturn(
     }
   }
 
-  const parsed = parseTaxReturnFromText(filename, embeddedText, ocrText, yearOverride);
+  const parsed = parseTaxReturnFromText(filename, embeddedText, ocrText, yearOverride, {
+    ocrMode: ocrModeLabel,
+    parseDebug: {
+      onOpexReconcile: (d) => {
+        debug.opexCandidates = d.candidates;
+        debug.opexChosenSource = d.chosenSource;
+      },
+    },
+  });
   debug.resolvedFieldCount = Object.keys(parsed.values).length;
   debug.combinedHitCount = findHitsLineScoped(`${embeddedText}\n${ocrText}`, 65, parsed.year).length;
+
+  const allText = `${embeddedText}\n${ocrText}`;
+  const formKind = detectTaxForm(allText).kind;
+  const rescanMatch = debug.ocrLogs?.find((l) => /Attachment gap rescan:/.test(l));
+  const rescanPages = rescanMatch
+    ? rescanMatch.match(/\(([^)]+)\)/)?.[1]?.split(",").map(Number).filter(Boolean)
+    : undefined;
+  debug.coverage = buildOcrCoverageDiagnostics(
+    allText,
+    formKind,
+    { values: parsed.values, confidence: parsed.confidence ?? {}, sources: parsed.fieldSources ?? {}, warnings: [] },
+    {
+      targetYear: parsed.year,
+      opex: parsed.values.other_operating_expenses,
+      ocrPageCount: debug.ocrPageCount,
+      attachmentRescanPages: rescanPages,
+    },
+  );
 
   const warnings = [
     preOcrText !== undefined

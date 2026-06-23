@@ -34,7 +34,9 @@ set -e
 cd $RemoteDir
 tar -xzf reportgen-web.tar.gz
 rm reportgen-web.tar.gz
-chmod +x deploy/oracle/install-on-vm.sh
+chmod +x deploy/vps/install-on-vm.sh deploy/oracle/install-on-vm.sh
+export ENV_TEMPLATE=deploy/vps/.env.production.example
+export OPEN_UFW=0
 sudo bash deploy/oracle/install-on-vm.sh
 "@
 ssh @sshArgs $target $remote

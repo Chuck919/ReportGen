@@ -257,8 +257,18 @@ export type CandidatePlan = {
   plan?: MultipassRunPlan;
 };
 
-export const PROD_CANDIDATES: CandidatePlan[] = [
+export const VERCEL_CANDIDATES: CandidatePlan[] = [
   { id: "fast", kind: "single", ocrMode: "vercel-fast" },
   { id: "balanced", kind: "single", ocrMode: "vercel-balanced" },
   { id: "thorough", kind: "single", ocrMode: "vercel-thorough" },
 ];
+
+export const VPS_CANDIDATES: CandidatePlan[] = [
+  { id: "fast", kind: "single", ocrMode: "fast" },
+  { id: "balanced", kind: "single", ocrMode: "balanced" },
+  { id: "thorough", kind: "single", ocrMode: "thorough" },
+];
+
+/** Default: Vercel presets. Set OCR_DEPLOY=vps for Hetzner/Oracle. */
+export const PROD_CANDIDATES: CandidatePlan[] =
+  process.env.OCR_DEPLOY === "vps" ? VPS_CANDIDATES : VERCEL_CANDIDATES;

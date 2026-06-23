@@ -1,45 +1,100 @@
 import type { TaxYearValues } from "@/lib/tax-workbook";
 
-const STORAGE_KEY = "reportgen-tax-columns-v1";
+/** Session-only — closing the tab clears data (no cross-company bleed via localStorage). */
+const STORAGE_KEY = "reportgen-tax-session-v2";
+const LEGACY_KEY = "reportgen-tax-columns-v1";
 
-function readStore(): TaxYearValues[] {
-  if (typeof window === "undefined") return [];
+export type TaxWorkbookSession = {
+  clientKey?: string;
+  clientName?: string;
+  columns: TaxYearValues[];
+  busy?: boolean;
+  progressLabel?: string;
+  progressPercent?: number;
+  progressHint?: string;
+  error?: string;
+  batchWarnings?: string[];
+  fileErrors?: Array<{ filename: string; message: string }>;
+  partial?: boolean;
+};
+
+function readSession(): TaxWorkbookSession {
+  if (typeof window === "undefined") return { columns: [] };
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) ?? sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as TaxYearValues[];
-    return Array.isArray(parsed) ? parsed : [];
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as TaxWorkbookSession;
+      if (parsed && Array.isArray(parsed.columns)) return parsed;
+    }
+
+    // One-time migration from legacy localStorage (then discard legacy).
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy) {
+      localStorage.removeItem(LEGACY_KEY);
+      const cols = JSON.parse(legacy) as TaxYearValues[];
+      if (Array.isArray(cols) && cols.length) {
+        return {
+          clientKey: cols.find((c) => c.clientKey)?.clientKey,
+          clientName: cols.find((c) => c.clientName)?.clientName,
+          columns: cols,
+        };
+      }
+    }
   } catch {
-    return [];
+    // ignore
   }
+  return { columns: [] };
 }
 
-function writeStore(columns: TaxYearValues[]): void {
+function writeSession(session: TaxWorkbookSession): void {
   if (typeof window === "undefined") return;
   try {
-    if (!columns.length) {
-      localStorage.removeItem(STORAGE_KEY);
+    if (!session.columns.length && !session.busy) {
       sessionStorage.removeItem(STORAGE_KEY);
       return;
     }
-    const json = JSON.stringify(columns);
-    localStorage.setItem(STORAGE_KEY, json);
-    sessionStorage.setItem(STORAGE_KEY, json);
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(session));
   } catch {
-    // quota or private mode — ignore
+    // quota or private mode
   }
 }
 
+export function loadTaxSession(): TaxWorkbookSession {
+  return readSession();
+}
+
 export function loadTaxColumns(): TaxYearValues[] {
-  return readStore();
+  return readSession().columns;
+}
+
+export function saveTaxSession(session: TaxWorkbookSession): void {
+  writeSession(session);
 }
 
 export function saveTaxColumns(columns: TaxYearValues[]): void {
-  writeStore(columns);
+  const prev = readSession();
+  writeSession({
+    clientKey: columns[0]?.clientKey ?? prev.clientKey,
+    clientName: columns[0]?.clientName ?? prev.clientName,
+    columns,
+    busy: prev.busy,
+    progressLabel: prev.progressLabel,
+    progressPercent: prev.progressPercent,
+    progressHint: prev.progressHint,
+    error: prev.error,
+    batchWarnings: prev.batchWarnings,
+    fileErrors: prev.fileErrors,
+    partial: prev.partial,
+  });
+}
+
+export function saveTaxProgress(session: Partial<TaxWorkbookSession>): void {
+  const prev = readSession();
+  writeSession({ ...prev, ...session });
 }
 
 export function clearTaxColumnsStorage(): void {
   if (typeof window === "undefined") return;
-  localStorage.removeItem(STORAGE_KEY);
   sessionStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(LEGACY_KEY);
 }

@@ -20,7 +20,7 @@ export type TaxTableResponse = {
 
 /** Workbook table for API consumers and UI — all input rows, empty/null when not extracted. */
 export function buildTaxTable(columns: TaxYearValues[]): TaxTableResponse {
-  const years = Array.from(new Set(columns.map((c) => c.year))).sort((a, b) => b - a);
+  const years = Array.from(new Set(columns.map((c) => c.year))).sort((a, b) => a - b);
   const byYear = new Map(columns.map((c) => [c.year, c]));
 
   const rows: TaxTableRow[] = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((row) => {
@@ -35,7 +35,7 @@ export function buildTaxTable(columns: TaxYearValues[]): TaxTableResponse {
   return {
     columns: years,
     rows,
-    tsv: buildPasteTsv(columns),
+    tsv: buildPasteTsv(columns, { workbookLayout: true, singleColumn: false }),
   };
 }
 

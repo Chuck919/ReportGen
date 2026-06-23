@@ -4,10 +4,22 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { parseTaxReturnFiles } from "@/lib/api/parse-tax-return";
 import type { OcrMode } from "@/lib/api/types";
 import { defaultOcrMode } from "@/lib/tax/ocr-modes";
-import { mergeTaxYearsByYear } from "@/lib/tax/merge-years";
+import { mergeParsedTaxYears } from "@/lib/tax/client-merge";
+import { finalizeTaxColumns } from "@/lib/tax/merge-years";
 import { detectDuplicateYears, summarizeReupload } from "@/lib/tax/parse-quality";
-import { clearTaxColumnsStorage, loadTaxColumns, saveTaxColumns } from "@/lib/tax/session-storage";
+import { clearTaxColumnsStorage, loadTaxSession, saveTaxColumns, saveTaxProgress } from "@/lib/tax/session-storage";
+import { validateClientFileList } from "@/lib/tax/validate-upload";
+import { isVercelDeploy } from "@/lib/tax/ocr-modes";
+import { applyUserFieldCorrection } from "@/lib/tax/apply-user-correction";
 import type { TaxYearValues } from "@/lib/tax-workbook";
+
+function mergeQueuedFiles(existing: File[], incoming: File[]): File[] {
+  const byKey = new Map(existing.map((f) => [`${f.name}:${f.size}`, f]));
+  for (const file of incoming) {
+    byKey.set(`${file.name}:${file.size}`, file);
+  }
+  return Array.from(byKey.values());
+}
 
 export function useTaxUpload() {
   const [columns, setColumns] = useState<TaxYearValues[]>([]);
@@ -16,14 +28,29 @@ export function useTaxUpload() {
   const [busy, setBusy] = useState(false);
   const [progressLabel, setProgressLabel] = useState("");
   const [progressPercent, setProgressPercent] = useState<number | undefined>();
+  const [progressHint, setProgressHint] = useState<string | undefined>();
   const [ocrMode, setOcrMode] = useState<OcrMode>(defaultOcrMode());
   const [batchWarnings, setBatchWarnings] = useState<string[]>([]);
   const [fileErrors, setFileErrors] = useState<Array<{ filename: string; message: string }>>([]);
   const [partial, setPartial] = useState(false);
+  const [queuedFiles, setQueuedFiles] = useState<File[]>([]);
+  const [queueError, setQueueError] = useState("");
+  const [clientName, setClientName] = useState<string | undefined>();
 
   useEffect(() => {
-    const saved = loadTaxColumns();
-    if (saved.length) setColumns(saved);
+    const session = loadTaxSession();
+    if (session.columns.length) setColumns(finalizeTaxColumns(session.columns));
+    if (session.clientName) setClientName(session.clientName);
+    if (session.busy) {
+      setBusy(session.busy);
+      setProgressLabel(session.progressLabel ?? "");
+      setProgressPercent(session.progressPercent);
+      setProgressHint(session.progressHint);
+      setError(session.error ?? "");
+      if (session.batchWarnings?.length) setBatchWarnings(session.batchWarnings);
+      if (session.fileErrors?.length) setFileErrors(session.fileErrors);
+      if (session.partial) setPartial(session.partial);
+    }
     setHydrated(true);
   }, []);
 
@@ -32,53 +59,119 @@ export function useTaxUpload() {
     saveTaxColumns(columns);
   }, [columns, hydrated]);
 
-  const hasData = columns.length > 0;
+  useEffect(() => {
+    if (!hydrated) return;
+    saveTaxProgress({
+      busy,
+      progressLabel,
+      progressPercent,
+      progressHint,
+      error,
+      batchWarnings,
+      fileErrors,
+      partial,
+      columns,
+      clientName,
+    });
+  }, [
+    hydrated,
+    busy,
+    progressLabel,
+    progressPercent,
+    progressHint,
+    error,
+    batchWarnings,
+    fileErrors,
+    partial,
+    columns,
+    clientName,
+  ]);
 
-  const onFiles = useCallback(
-    async (files: FileList | null) => {
-      if (!files?.length) return;
+  const hasData = columns.length > 0;
+  const canStart = queuedFiles.length > 0 && !busy;
+
+  const addFiles = useCallback(
+    (files: FileList | null) => {
+      if (!files?.length || busy) return;
+      setQueueError("");
       setError("");
-      setBatchWarnings([]);
-      setFileErrors([]);
-      setPartial(false);
-      setBusy(true);
 
       const list = Array.from(files);
-      const existingYears = columns.map((c) => c.year);
-
-      try {
-        const json = await parseTaxReturnFiles(
-          list,
-          {
-            ocrMode,
-            onTierParsed: (row) => {
-              setColumns((prev) => mergeTaxYearsByYear(prev, [row]));
-            },
-          },
-          (progress) => {
-            setProgressLabel(progress.label);
-            setProgressPercent(progress.percent);
-          },
-        );
-
-        setColumns((prev) => mergeTaxYearsByYear(prev, json.parsed));
-        setFileErrors(json.fileErrors ?? []);
-        setPartial(Boolean(json.partial));
-
-        const dupWarnings = detectDuplicateYears(json.parsed);
-        const reuploadNotes = summarizeReupload(existingYears, json.parsed);
-        const notes = [...(json.batchWarnings ?? []), ...dupWarnings, ...reuploadNotes];
-        if (notes.length) setBatchWarnings(notes);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Upload failed");
-      } finally {
-        setBusy(false);
-        setProgressLabel("");
-        setProgressPercent(undefined);
+      const validation = validateClientFileList(list, { isVercel: isVercelDeploy() });
+      if (!validation.ok) {
+        const msg = validation.checks.flatMap((c) => c.errors.map((e) => `${c.filename}: ${e}`)).join(" ");
+        setQueueError(msg || "Invalid file");
+        return;
       }
+
+      setQueuedFiles((prev) => mergeQueuedFiles(prev, list));
     },
-    [columns, ocrMode],
+    [busy],
   );
+
+  const removeQueuedFile = useCallback((index: number) => {
+    setQueuedFiles((prev) => prev.filter((_, i) => i !== index));
+    setQueueError("");
+  }, []);
+
+  const clearQueue = useCallback(() => {
+    setQueuedFiles([]);
+    setQueueError("");
+  }, []);
+
+  const startParse = useCallback(async () => {
+    if (!queuedFiles.length || busy) return;
+    setError("");
+    setQueueError("");
+    setBatchWarnings([]);
+    setFileErrors([]);
+    setPartial(false);
+    setBusy(true);
+
+    const list = [...queuedFiles];
+    const existingYears = columns.map((c) => c.year);
+
+    try {
+      const json = await parseTaxReturnFiles(
+        list,
+        {
+          ocrMode,
+          onTierParsed: (row) => {
+            setColumns((prev) => {
+              const { columns: merged, warnings } = mergeParsedTaxYears(prev, [row]);
+              if (warnings.length) setBatchWarnings((w) => [...w, ...warnings]);
+              if (merged[0]?.clientName) setClientName(merged[0].clientName);
+              return merged;
+            });
+          },
+        },
+        (progress) => {
+          setProgressLabel(progress.label);
+          setProgressPercent(progress.percent);
+          setProgressHint(progress.hint);
+        },
+      );
+
+      const { columns: merged, warnings: clientWarnings } = mergeParsedTaxYears(columns, json.parsed);
+      setColumns(finalizeTaxColumns(merged));
+      if (merged[0]?.clientName) setClientName(merged[0].clientName);
+      setFileErrors(json.fileErrors ?? []);
+      setPartial(Boolean(json.partial));
+      setQueuedFiles([]);
+
+      const dupWarnings = detectDuplicateYears(json.parsed);
+      const reuploadNotes = summarizeReupload(existingYears, json.parsed);
+      const notes = [...clientWarnings, ...(json.batchWarnings ?? []), ...dupWarnings, ...reuploadNotes];
+      if (notes.length) setBatchWarnings(notes);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setBusy(false);
+      setProgressLabel("");
+      setProgressPercent(undefined);
+      setProgressHint(undefined);
+    }
+  }, [busy, columns, ocrMode, queuedFiles]);
 
   const clearAll = useCallback(() => {
     setColumns([]);
@@ -87,6 +180,19 @@ export function useTaxUpload() {
     setBatchWarnings([]);
     setFileErrors([]);
     setPartial(false);
+    setQueuedFiles([]);
+    setQueueError("");
+    setClientName(undefined);
+  }, []);
+
+  const updateField = useCallback((year: number, fieldId: string, value: number, source?: string) => {
+    setColumns((prev) =>
+      finalizeTaxColumns(
+        prev.map((col) =>
+          col.year === year ? applyUserFieldCorrection(col, fieldId, value, source) : col,
+        ),
+      ),
+    );
   }, []);
 
   return useMemo(
@@ -94,30 +200,48 @@ export function useTaxUpload() {
       columns,
       hasData,
       error,
+      queueError,
       busy,
       progressLabel,
       progressPercent,
+      progressHint,
       ocrMode,
       setOcrMode,
       batchWarnings,
       fileErrors,
       partial,
-      onFiles,
+      queuedFiles,
+      canStart,
+      clientName,
+      addFiles,
+      removeQueuedFile,
+      clearQueue,
+      startParse,
       clearAll,
+      updateField,
     }),
     [
       columns,
       hasData,
       error,
+      queueError,
       busy,
       progressLabel,
       progressPercent,
+      progressHint,
       ocrMode,
       batchWarnings,
       fileErrors,
       partial,
-      onFiles,
+      queuedFiles,
+      canStart,
+      clientName,
+      addFiles,
+      removeQueuedFile,
+      clearQueue,
+      startParse,
       clearAll,
+      updateField,
     ],
   );
 }

@@ -8,5 +8,5 @@ export function isProcessTimeoutError(err: unknown): boolean {
 }
 
 export function ocrTimeoutUserMessage(): string {
-  return "OCR exceeded the server time limit (~5 min on Vercel). Partial embedded-text results may be shown when available. Try Fast mode for a preview, Balanced for full coverage, or use a VPS for Thorough.";
+  return "Processing exceeded the server time limit. Partial results may be shown when available. Try Fast for a quick preview or Balanced for full coverage.";
 }

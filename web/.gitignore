@@ -28,6 +28,19 @@ yarn-error.log*
 # local OCR cache
 /eng.traineddata
 
+# generated benchmark / iteration artifacts (regenerate via npm run benchmark:web-api)
+/scripts/benchmark-output/*
+!/scripts/benchmark-output/.gitkeep
+/scripts/ocr-cache/
+/scripts/*.log
+/scripts/benchmark-prod-cold.json
+/scripts/benchmark-matrix.json
+/scripts/benchmark-changwen-matrix.json
+/scripts/benchmark-vercel-modes.json
+
+# user correction corpus for ML training (local dev)
+/data/tax-corrections.jsonl
+
 # local env files
 .env*.local
 

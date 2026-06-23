@@ -8,9 +8,8 @@ export function BenchmarkMetaCard({
 }: {
   data: ParseBenchmarkResponse;
   clipboardPayloads: {
-    fullTable: string;
     valuesColumn: string;
-    headerValueCol: string;
+    withHeaders: string;
   } | null;
 }) {
   return (
@@ -32,9 +31,8 @@ export function BenchmarkMetaCard({
       </p>
       {clipboardPayloads && (
         <div className="mt-4 flex flex-wrap gap-2">
-          <CopyButton label="Copy Excel table" text={clipboardPayloads.fullTable} />
-          <CopyButton label="Copy values column" text={clipboardPayloads.valuesColumn} />
-          <CopyButton label="Copy header + values" text={clipboardPayloads.headerValueCol} />
+          <CopyButton label="Copy with Headers" text={clipboardPayloads.withHeaders} />
+          <CopyButton label="Copy values only" text={clipboardPayloads.valuesColumn} />
         </div>
       )}
     </Card>

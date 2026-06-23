@@ -39,6 +39,7 @@ const LABEL_ALIASES: Record<string, string> = {
   "professional fees": "professional_fees",
   utilities: "utilities",
   "other operating expenses": "other_operating_expenses",
+  "other operating income": "other_operating_income",
   "interest expense": "interest_expense",
   "other income": "other_income",
   cash: "cash",
@@ -94,7 +95,16 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
     return true;
   }
   if (id === "other_income" && Math.abs(value) < 100) return true;
+  if (
+    id === "other_operating_income" &&
+    /other\s+income/i.test(line) &&
+    !/other\s+operat.{0,8}inc/i.test(line)
+  ) {
+    return true;
+  }
   if (id === "sales" && Math.abs(value) < 1000 && !/receipt|sales|1a|1c/i.test(line)) return true;
+  if (id === "cogs" && Math.abs(value) < 10_000) return true;
+  if ((id === "sales" || id === "cogs" || id === "rent") && Math.abs(value) <= 1) return true;
   if (lead !== undefined && Math.abs(value) === lead) return true;
   if (id === "taxes_licenses" && /(\b13\b|\[13\]).*interest/i.test(line)) return true;
   if (
@@ -173,8 +183,14 @@ function pickConsensus(hits: ParseHit[]): { value: number; matching: ParseHit[] 
     b.push(h);
     counts.set(h.value, b);
   }
-  const ranked = Array.from(counts.entries()).sort((a, b) => b[1].length - a[1].length || Math.abs(b[0]) - Math.abs(a[0]));
-  const [value, matching] = ranked[0];
+  const ranked = Array.from(counts.entries()).sort((a, b) => {
+    if (b[1].length !== a[1].length) return b[1].length - a[1].length;
+    const avgA = a[1].reduce((s, h) => s + h.confidence, 0) / a[1].length;
+    const avgB = b[1].reduce((s, h) => s + h.confidence, 0) / b[1].length;
+    return avgB - avgA;
+  });
+
+  const [value, matching] = ranked[0]!;
   return { value, matching };
 }
 

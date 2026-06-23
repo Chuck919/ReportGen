@@ -42,6 +42,9 @@ export type ParseTaxReturnDebug = {
   ocrLogs?: string[];
   resolvedFieldCount?: number;
   comparisonLinesMatched?: number;
+  opexCandidates?: import("@/lib/tax-return/opex-candidate-ranking").OpexCandidate[];
+  opexChosenSource?: string;
+  coverage?: import("@/lib/tax-return/ocr-coverage-diagnostics").OcrCoverageDiagnostics;
 };
 
 export type ParsedTaxYear = TaxYearValues & {

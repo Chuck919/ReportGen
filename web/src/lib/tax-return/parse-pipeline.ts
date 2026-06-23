@@ -28,6 +28,8 @@ export function assembleExtractions(
       mergeFieldExtraction(resolved, filtered, tier.minConfidence ?? 0);
     } else if (tier.name === "form-anchors") {
       applyAuthoritativeExtraction(resolved, tier.extraction);
+    } else if (tier.name === "embedded-schedule-l") {
+      applyAuthoritativeExtraction(resolved, tier.extraction);
     } else {
       mergeFieldExtraction(resolved, tier.extraction, tier.minConfidence ?? 0);
     }

@@ -8,11 +8,15 @@ export function BenchmarkUploadPanel({
   busy,
   elapsedMs,
   error,
+  progressLabel,
+  progressPercent,
 }: {
   onFile: (file: File | null) => void;
   busy: boolean;
   elapsedMs: number;
   error?: string;
+  progressLabel?: string;
+  progressPercent?: number;
 }) {
   return (
     <div className="rounded-2xl border border-stone-200 bg-white shadow-sm px-6 py-5">
@@ -25,8 +29,9 @@ export function BenchmarkUploadPanel({
       {busy && (
         <div className="mt-5">
           <ProgressBar
-            label="Uploading and parsing…"
+            label={progressLabel ?? "Uploading and parsing…"}
             elapsedMs={elapsedMs}
+            percent={progressPercent}
             hint="Benchmark OCR uses fewer pages than full tax packets."
           />
         </div>

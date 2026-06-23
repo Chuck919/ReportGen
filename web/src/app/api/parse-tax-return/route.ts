@@ -4,7 +4,7 @@ import { apiDocsJson, handleParseTaxReturnPost } from "@/lib/api/parse-tax-retur
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+export const maxDuration = 800;
 
 export async function GET() {
   return NextResponse.json(apiDocsJson());

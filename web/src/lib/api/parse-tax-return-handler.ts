@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { parseOcrMode, type ParseTaxReturnResponse } from "@/lib/api/types";
 import { buildTaxTable, formatTableAsMarkdown } from "@/lib/tax/export-table";
 import { enforceFileCountLimit, processTaxPdfFile } from "@/lib/tax/process-tax-upload";
+import { SUPPORTED_TAX_FORMS_LABEL } from "@/lib/tax/tax-form-copy";
 
 export type ParseFormat = "json" | "table" | "tsv" | "markdown";
 
@@ -129,7 +130,7 @@ export function apiDocsJson() {
   return {
     endpoint: "/api/parse-tax-return",
     methods: ["GET", "POST"],
-    description: "Upload a Form 1120-S PDF, run OCR, return extracted workbook values as JSON table.",
+    description: `Upload a ${SUPPORTED_TAX_FORMS_LABEL} PDF, run OCR, return extracted workbook values as JSON table.`,
     auth: process.env.PARSE_TAX_API_KEY
       ? "Required: Authorization: Bearer <PARSE_TAX_API_KEY> or X-API-Key header"
       : "Optional: set PARSE_TAX_API_KEY in Vercel env to require a key",

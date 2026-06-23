@@ -1,5 +1,5 @@
 /** IRS form numbers that OCR often misreads as dollar amounts — not company-specific. */
-const FORM_REFERENCE_NUMBERS = new Set([1120, 1125, 4562, 8990, 3800, 7004, 2220]);
+const FORM_REFERENCE_NUMBERS = new Set([1040, 1099, 1120, 1125, 4562, 8990, 3800, 7004, 2220]);
 
 /** OCR sometimes uses periods as thousands separators (e.g. `283.400`). */
 function normalizeOcrThousandsSeparator(s: string): string {
@@ -118,6 +118,21 @@ export function bracketLineAmount(line: string, tag: string): number | undefined
 /** Prefer bracket-tagged amount, then largest substantial token (typical form page-1 layout). */
 export function formLineAmount(line: string, tag: string): number | undefined {
   return bracketLineAmount(line, tag) ?? scheduleLineAmount(line) ?? lineTailAmount(line);
+}
+
+/** OCR often prefixes a spurious leading 1 on 7–8 digit amounts (e.g. 110,031,771 → 10,031,771). */
+export function derailOcrLeadingOne(n: number): number {
+  const abs = Math.abs(Math.round(n));
+  const s = String(abs);
+  if (s.length === 9 && s.startsWith("1")) {
+    const trimmed = Number(s.slice(1));
+    if (trimmed >= 1_000_000 && trimmed < 100_000_000) return Math.sign(n) * trimmed;
+  }
+  if (s.length === 8 && s.startsWith("1")) {
+    const trimmed = Number(s.slice(1));
+    if (trimmed >= 1_000_000 && trimmed < 10_000_000) return Math.sign(n) * trimmed;
+  }
+  return n;
 }
 
 /** Reject OCR-concatenated money (digit run length, not company size). */

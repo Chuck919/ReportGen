@@ -12,20 +12,20 @@ export const LOCAL_OCR_MODE_OPTIONS: OcrModeOption[] = [
   {
     id: "fast",
     label: "Fast",
-    hint: "~2 min",
-    detail: "14-page preview — quick sanity check, not for full Excel paste.",
+    hint: "",
+    detail: "Quick preview — scans the opening pages only. Use Balanced for a complete workbook.",
   },
   {
     id: "balanced",
     label: "Balanced",
-    hint: "~4 min",
-    detail: "Default. 26 pages + selective hi-DPI. Target 100% primary for Excel paste.",
+    hint: "",
+    detail: "Recommended. Full extraction for Excel paste.",
   },
   {
     id: "thorough",
     label: "Thorough",
-    hint: "~6–8 min",
-    detail: "Two balanced passes merged per page. Maximum reliability on hard scans (local/VPS).",
+    hint: "",
+    detail: "Maximum accuracy on difficult scans. Takes longer.",
   },
 ];
 
@@ -34,20 +34,20 @@ export const VERCEL_OCR_MODE_OPTIONS: OcrModeOption[] = [
   {
     id: "vercel-fast",
     label: "Fast",
-    hint: "~2 min",
-    detail: "Same as local Fast — 14 pages, preview only.",
+    hint: "",
+    detail: "Quick preview — opening pages only. Use Balanced for a complete workbook.",
   },
   {
     id: "vercel-balanced",
     label: "Balanced",
-    hint: "~4 min",
-    detail: "Same as local Balanced — 26 pages + selective hi-DPI. Default for Excel paste.",
+    hint: "",
+    detail: "Recommended default for Excel paste.",
   },
   {
     id: "vercel-thorough",
     label: "Thorough",
-    hint: "~5 min",
-    detail: "Same as local Thorough — full hi-DPI when Balanced misses fields.",
+    hint: "",
+    detail: "Maximum accuracy. Takes longer.",
   },
 ];
 
@@ -62,3 +62,17 @@ export function getOcrModeOptions(): OcrModeOption[] {
 export function defaultOcrMode(): OcrMode {
   return defaultOcrModeForDeploy();
 }
+
+/** Wall-clock estimate per PDF — progress bar reaches ~95% at this duration. */
+export function estimateOcrDurationMs(mode: OcrMode, fileCount = 1): number {
+  const perFile =
+    mode === "fast" || mode === "vercel-fast"
+      ? 2 * 60_000
+      : mode === "thorough" || mode === "vercel-thorough"
+        ? 9 * 60_000
+        : 4.5 * 60_000;
+  return perFile * Math.max(fileCount, 1);
+}
+
+/** Progress bar caps at this fraction until the server responds. */
+export const OCR_PROGRESS_CAP = 0.95;

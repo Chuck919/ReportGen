@@ -19,6 +19,9 @@ import {
 } from "./lib/prod-pipeline";
 
 const BASE = process.argv[2] ?? "https://reportgen-three.vercel.app";
+if (!process.env.OCR_DEPLOY && !BASE.includes("vercel.app")) {
+  process.env.OCR_DEPLOY = "vps";
+}
 const YEARS = [2023, 2024, 2025] as const;
 const LIMIT_MS = VERCEL_FUNCTION_MAX_MS - 5000;
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);
