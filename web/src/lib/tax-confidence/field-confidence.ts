@@ -8,7 +8,7 @@ import {
   mergeConfidenceFlags,
 } from "./confidence-flags";
 import { opexCandidateUncertainty } from "./candidate-uncertainty";
-import { isSuspiciousTaxValue, isAuthoritativeSource } from "@/lib/tax-return/confidence-gates";
+import { isSuspiciousTaxValue } from "@/lib/tax-return/confidence-gates";
 import {
   hasMaterialDisagreement,
   sourceDisagreementDetail,

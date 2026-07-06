@@ -18,6 +18,10 @@ import {
   isPlausibleOtherOperatingExpense,
   type OpexContext,
 } from "./opex-plausibility";
+import {
+  applyOrdinaryIncomeReverseOpex,
+  flagPnlIdentityMismatches,
+} from "./pnl-identity";
 
 export type { OpexCandidate } from "./opex-candidate-ranking";
 export type { OpexContext } from "./opex-plausibility";
@@ -78,7 +82,8 @@ export function reconcileOtherOperatingExpenses(
   },
 ): void {
   const candidates = generateOpexCandidates(resolved, ctx);
-  const { winner } = rankOpexCandidates(candidates);
+  const { winner: rankedWinner } = rankOpexCandidates(candidates);
+  let winner = rankedWinner;
 
   const debug: OpexReconcileDebug = {
     candidates,
@@ -102,16 +107,77 @@ export function reconcileOtherOperatingExpenses(
       delete resolved.confidence.other_operating_expenses;
       delete resolved.sources.other_operating_expenses;
     }
+    const fallback = candidates
+      .filter(
+        (c) =>
+          c.closureScore >= 0.75 &&
+          !c.plausibilityFlags.includes("pnl_collision") &&
+          !c.plausibilityFlags.includes("comparison_reject") &&
+          isPlausibleOtherOperatingExpense(c.value, plausibilityCtx) &&
+          !collidesWithResolvedPnl(c.value, resolved),
+      )
+      .sort((a, b) => b.totalScore - a.totalScore)[0];
+    if (fallback) {
+      resolved.values.other_operating_expenses = fallback.value;
+      resolved.confidence.other_operating_expenses = confidenceFromCandidate(fallback);
+      resolved.sources.other_operating_expenses = fallback.source;
+    } else {
+      const softFallback = candidates
+        .filter(
+          (c) =>
+            c.closureScore >= 0.35 &&
+            !c.plausibilityFlags.includes("pnl_collision") &&
+            !/misc detail sum/i.test(c.source) &&
+            isPlausibleOtherOperatingExpense(c.value, plausibilityCtx) &&
+            !collidesWithResolvedPnl(c.value, resolved),
+        )
+        .sort((a, b) => b.totalScore - a.totalScore)[0];
+      if (softFallback) {
+        resolved.values.other_operating_expenses = softFallback.value;
+        resolved.confidence.other_operating_expenses = confidenceFromCandidate(softFallback);
+        resolved.sources.other_operating_expenses = softFallback.source;
+      } else {
+        const stmtDed = candidates.find(
+          (c) =>
+            /summed detail lines|small attachment residual|total minus bank/i.test(c.source) &&
+            isPlausibleOtherOperatingExpense(c.value, plausibilityCtx) &&
+            !collidesWithResolvedPnl(c.value, resolved),
+        );
+        if (stmtDed) {
+          resolved.values.other_operating_expenses = stmtDed.value;
+          resolved.confidence.other_operating_expenses = confidenceFromCandidate(stmtDed);
+          resolved.sources.other_operating_expenses = stmtDed.source;
+        }
+      }
+    }
+    applyOrdinaryIncomeReverseOpex(resolved, ctx.allText, ctx.targetYear);
+    flagPnlIdentityMismatches(resolved, ctx.allText, ctx.targetYear);
     return;
   }
 
   const existing = resolved.values.other_operating_expenses;
   const existingSource = resolved.sources.other_operating_expenses ?? "";
+  const existingCandidate = candidates.find((c) => c.value === existing);
   const existingIsSubtractive = /comparison|residual|document-wide/i.test(existingSource);
   const winnerIsAuthoritativeDetail =
     /summed detail|misc detail closes|office\/supplies|telephone\/travel\/bank detail/i.test(
       winner.source,
     ) && winner.closureScore >= 0.85;
+
+  const valueDelta =
+    existing !== undefined
+      ? Math.abs(existing - winner.value) / Math.max(Math.abs(winner.value), 1)
+      : 1;
+  const winnerBeatsExistingScore =
+    existingCandidate !== undefined &&
+    winner.totalScore > existingCandidate.totalScore + 12 &&
+    winner.closureScore >= 0.88 &&
+    existingCandidate.closureScore < 0.75;
+
+  const existingIsWeakResidual = /comparison.*OTHER DEDUCTIONS residual|document-wide exclusion/i.test(
+    existingSource,
+  );
+  const winnerIsOfficeDetail = /other deductions \(office/i.test(winner.source);
 
   const replace =
     existing === undefined ||
@@ -122,13 +188,51 @@ export function reconcileOtherOperatingExpenses(
       knownStmt2Lines: knownStmt2AttachmentSum(resolved, ctx.allText),
     }) ||
     (existingIsSubtractive && winnerIsAuthoritativeDetail && winner.totalScore >= 75) ||
-    Math.abs(existing - winner.value) > Math.max(500, Math.abs(winner.value) * 0.12);
+    (existingIsWeakResidual && winnerIsOfficeDetail && winner.totalScore >= 75) ||
+    valueDelta > 0.12 ||
+    (winnerBeatsExistingScore && valueDelta > 0.02);
 
   if (replace) {
+    const plausibilityCtx: OpexContext = {
+      sales: resolved.values.sales,
+      knownStmt2Lines: knownStmt2AttachmentSum(resolved, ctx.allText),
+    };
+    if (!isPlausibleOtherOperatingExpense(winner.value, plausibilityCtx)) {
+      const fallback = candidates
+        .filter(
+          (c) =>
+            !c.plausibilityFlags.includes("pnl_collision") &&
+            !c.plausibilityFlags.includes("comparison_reject") &&
+            isPlausibleOtherOperatingExpense(c.value, plausibilityCtx) &&
+            !collidesWithResolvedPnl(c.value, resolved),
+        )
+        .sort((a, b) => b.totalScore - a.totalScore)[0];
+      if (fallback) {
+        winner = fallback;
+      } else {
+        const closureFallback = candidates
+          .filter(
+            (c) =>
+              c.closureScore >= 0.85 &&
+              !c.plausibilityFlags.includes("pnl_collision") &&
+              !collidesWithResolvedPnl(c.value, resolved),
+          )
+          .sort(
+            (a, b) =>
+              b.closureScore - a.closureScore || b.totalScore - a.totalScore,
+          )[0];
+        if (!closureFallback) return;
+        winner = closureFallback;
+      }
+    }
     resolved.values.other_operating_expenses = winner.value;
     resolved.confidence.other_operating_expenses = confidenceFromCandidate(winner);
     resolved.sources.other_operating_expenses = winner.source;
   }
+
+  // When top-8 is strong, Form ordinary income reverse-math is authoritative for other_opex.
+  applyOrdinaryIncomeReverseOpex(resolved, ctx.allText, ctx.targetYear);
+  flagPnlIdentityMismatches(resolved, ctx.allText, ctx.targetYear);
 }
 
 /** Post-verification block opex override for large corps — requires closure proof. */
@@ -141,8 +245,9 @@ export function applyLargeCorpBlockOpexOverride(
   },
 ): boolean {
   const compOtherDed = scanComparisonOtherDeductionsTotal(ctx.allText, ctx.targetYear);
-  if (compOtherDed === undefined || compOtherDed < 100_000) return false;
-  if (ctx.sales === undefined || ctx.sales <= 1_000_000) return false;
+  // Percentage of sales only — no fixed company-size dollar gates.
+  if (ctx.sales === undefined || ctx.sales <= 0) return false;
+  if (compOtherDed === undefined || compOtherDed < ctx.sales * 0.05) return false;
 
   const blockOpex = extractOtherDeductionsBlockOpex(ctx.allText);
   const plausibilityCtx: OpexContext = {
@@ -152,7 +257,6 @@ export function applyLargeCorpBlockOpexOverride(
   };
   if (
     blockOpex.opex === undefined ||
-    blockOpex.opex < 10_000 ||
     !blockOpexClosesStatement(blockOpex, resolved, ctx.allText) ||
     !isPlausibleOtherOperatingExpense(blockOpex.opex, plausibilityCtx)
   ) {

@@ -67,20 +67,27 @@ export function scanComparisonIsExpense(
   const compCtx =
     /(?:\bg\s*)?ross\s+receipts?\s+or\s+sales|two\s*year\s*comparison|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i;
 
+  const yearMatches = [...text.matchAll(/\b(20\d{2})\s*[\&\-–]\s*(20\d{2})\b/g)];
+  const docYears = yearMatches.length
+    ? { yL: Number(yearMatches[yearMatches.length - 1]![1]), yR: Number(yearMatches[yearMatches.length - 1]![2]) }
+    : undefined;
   let col: 0 | 1 = 1;
-  const headerM = text.match(/\b(20\d{2})\s*[\&\-–]\s*(20\d{2})\b/);
-  if (headerM) {
-    col = pickComparisonColumnIndex(Number(headerM[1]), Number(headerM[2]), targetYear);
+  if (docYears) {
+    col = pickComparisonColumnIndex(docYears.yL, docYears.yR, targetYear);
   }
 
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!labelRe.test(line) || /accumulated|adjustment|report|schedule\s*l/i.test(line)) continue;
-    if (!compCtx.test(text.slice(Math.max(0, text.indexOf(line) - 500), text.indexOf(line) + line.length))) {
-      continue;
-    }
+    if (!labelRe.test(line) || /accumulated|adjustment|report|schedule\s*l|post-1986/i.test(line)) continue;
+    const localWindow = text.slice(Math.max(0, text.indexOf(line) - 500), text.indexOf(line) + line.length);
+    const inCompCtx = compCtx.test(localWindow);
+    const inDeductionSummary =
+      /TOTAL DEDUCTIONS|ORDINARY BUSINESS INCOME/i.test(localWindow) && labelRe.test(line);
+    if (!inCompCtx && !inDeductionSummary) continue;
 
-    const pair = shrinkToYearColumns(parseMoneyFromLine(line).filter((n) => n < 2020 || n > 2035));
+    const pair = shrinkToYearColumns(
+      parseMoneyFromLine(line).filter((n) => (n < 2020 || n > 2035) && n !== 1986 && n !== 1987),
+    );
     if (!pair) {
       if (field === "depreciation" && /depreciation/i.test(line) && !substantialMoneyTokens(line).length) {
         return { value: 0, confidence: 90 };
@@ -88,7 +95,7 @@ export function scanComparisonIsExpense(
       continue;
     }
 
-    const picked = col === 0 ? pair[0] : pair[1];
+    const picked = col === 0 ? pair[0]! : pair[1]!;
     return { value: Math.round(picked), confidence: 90 };
   }
 
@@ -122,7 +129,8 @@ export function scanStatementAmortization(text: string): { value: number; confid
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) stmt2Blocks.push(m[0]);
 
-  const scanBlock = (block: string, conf: number, source: string): { value: number; confidence: number } | undefined => {
+  const scanBlock = (block: string, conf: number, _source: string): { value: number; confidence: number } | undefined => {
+    void _source;
     for (const rawLine of block.split(/\n/)) {
       const line = rawLine.replace(/\s+/g, " ").trim();
       if (!/\bamortization\b/i.test(line) || /accumulated|less\s+acc|gross\s+intang|schedule\s*l/i.test(line)) {
@@ -184,6 +192,7 @@ function isPlausibleComparisonCandidate(
 ): boolean {
   const abs = Math.abs(value);
   if (abs >= 2020 && abs <= 2035) return false;
+  if (abs === 1986 || abs === 1987) return false;
   if (abs <= 99 && value !== 0) return false;
   if (field === "amortization" && abs > 0 && abs < 500) return false;
   if (field === "amortization" && abs > 100_000) return false;

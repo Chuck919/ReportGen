@@ -1,5 +1,10 @@
 import { TAX_WORKBOOK_ROWS, type TaxYearValues } from "@/lib/tax-workbook";
-import { isAuthoritativeSource, isSuspiciousTaxValue, isWeakSource } from "@/lib/tax-return/confidence-gates";
+import {
+  isAuthoritativeSource,
+  isResidualOpexSource,
+  isSuspiciousTaxValue,
+  isWeakSource,
+} from "@/lib/tax-return/confidence-gates";
 import type { ResolvedFields } from "@/lib/tax-return/merge";
 import type { FieldExtraction } from "@/lib/tax-return/form-anchors";
 import type { FieldTrustTier } from "./field-trust-tier";
@@ -12,10 +17,8 @@ import {
   resolveValuesFromSnapshots,
   sourceDisagreementDetail,
   valuesExactlyEqual,
-  largestDisagreementPercent,
   type SourceFamily,
   type SourceSnapshot,
-  withinTolerance,
 } from "./source-agreement";
 
 export type { FieldTrustTier } from "./field-trust-tier";
@@ -31,6 +34,8 @@ export type ReconcileInput = {
   /** When snapshots are unavailable (e.g. localStorage reload), use stored counts. */
   persistedAgreement?: Record<string, number>;
   taxYear?: number;
+  /** Parser warnings (e.g. P&L identity gaps) — used for review flags. */
+  warnings?: string[];
 };
 
 export type ReconcileResult = {
@@ -62,11 +67,13 @@ const SCHEDULE_L_BS_IDS = new Set([
 const DISPLAY_CONF_CAP_SINGLE = 85;
 const DISPLAY_CONF_CAP_TRUSTED = 95;
 const DISPLAY_CONF_CAP_AGREED = 99;
+const DISPLAY_CONF_CAP_HIGH_PARSER = 92;
 const SUBTRACTIVE_CONF_CAP = 78;
+/** Residual / federal-table-minus-slots opex — keep below high-confidence green threshold. */
+const RESIDUAL_OPEX_CONF_CAP = 58;
 
 const STRUCTURAL_CLOSURE_SOURCE =
   /closes\s+stmt|detail\s+sum|misc\s+detail|summed\s+detail|residual.*closes|structural\s+closure/i;
-const SUBTRACTIVE_SOURCE = /total\s+minus|subtractive|verify\)/i;
 
 /** Hard failures — always force review. */
 function isHardFlag(msg: string): boolean {
@@ -109,8 +116,23 @@ function isTrustedSingleSource(source: string | undefined, parserConf: number): 
   return false;
 }
 
-function hasMaterialSourceDisagreement(snaps: SourceSnapshot[], chosen: number): boolean {
-  return hasMaterialDisagreement(chosen, snaps);
+function shouldFlagMaterialDisagreement(
+  snaps: SourceSnapshot[],
+  chosen: number,
+  source: string | undefined,
+  parserConf: number,
+): boolean {
+  if (!hasMaterialDisagreement(chosen, snaps)) return false;
+  if (isTrustedSingleSource(source, parserConf)) {
+    const credibleAgree = snaps.filter(
+      (s) =>
+        (s.family === "form" || s.family === "schedule-l" || s.family === "comparison") &&
+        valuesExactlyEqual(s.value, chosen) &&
+        s.confidence >= parserConf - 12,
+    );
+    if (credibleAgree.length >= 1) return false;
+  }
+  return true;
 }
 
 function addFlag(flags: Record<string, string[]>, id: string, msg: string): void {
@@ -121,7 +143,8 @@ function addFlag(flags: Record<string, string[]>, id: string, msg: string): void
 
 function roundSum(values: Record<string, number>, ids: string[]): number | undefined {
   const present = ids.filter((id) => values[id] !== undefined);
-  if (present.length < Math.ceil(ids.length * 0.75)) return undefined;
+  // One present bucket is enough — missing siblings count as 0 (KCF only fills a few lines).
+  if (present.length < 1) return undefined;
   return Math.round(present.reduce((s, id) => s + values[id]!, 0));
 }
 
@@ -175,6 +198,7 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     fieldSources = {},
     sourceSnapshots = {},
     persistedAgreement = {},
+    warnings = [],
   } = input;
   const fieldFlags: Record<string, string[]> = {};
   const fieldStatus: Record<string, FieldReviewStatus> = {};
@@ -193,8 +217,10 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
 
   const totalAssets = computeTotalAssets(values);
   const totalLE = computeTotalLiabilitiesEquity(values);
-  if (totalAssets !== undefined && totalLE !== undefined && !withinTolerance(totalAssets, totalLE)) {
-    const msg = `Balance sheet does not balance (assets ${totalAssets.toLocaleString()} vs liabilities+equity ${totalLE.toLocaleString()})`;
+  // Balance sheet identity must be exact (within $1). A $100 equity miss is a real error.
+  if (totalAssets !== undefined && totalLE !== undefined && Math.abs(totalAssets - totalLE) > 1) {
+    const gap = totalAssets - totalLE;
+    const msg = `Balance sheet does not balance (assets ${totalAssets.toLocaleString()} vs liabilities+equity ${totalLE.toLocaleString()}, gap ${gap.toLocaleString()})`;
     for (const id of [
       "cash",
       "accounts_receivable",
@@ -205,6 +231,8 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
       "accounts_payable",
       "other_current_liabilities",
       "notes_minus_short_term",
+      "common_stock",
+      "other_stock_equity",
       "unclassified_equity",
     ]) {
       if (values[id] !== undefined) addFlag(fieldFlags, id, msg);
@@ -284,7 +312,7 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
       } else if (
         isStatementLine18Source(source) &&
         snaps.length &&
-        hasMaterialSourceDisagreement(snaps, value)
+        shouldFlagMaterialDisagreement(snaps, value, source, parserConf)
       ) {
         addFlag(fieldFlags, id, "Statement Line 18 — corroborating source disagrees");
       } else if (!isTrustedSingleSource(source, parserConf) && !statementPassesStructuralClosure(source)) {
@@ -300,11 +328,22 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
       addFlag(fieldFlags, id, "formula-disagreement — subtractive vs detail lines may diverge");
     }
 
+    if (id === "other_operating_expenses" && isResidualOpexSource(source)) {
+      addFlag(fieldFlags, id, "Residual opex — verify against statement detail");
+    }
+
+    if (
+      id === "other_operating_expenses" &&
+      warnings.some((w) => /P&L does not close|other_operating_expenses may be wrong/i.test(w))
+    ) {
+      addFlag(fieldFlags, id, "P&L does not close to Form ordinary income — verify other opex");
+    }
+
     if (isSuspiciousTaxValue(id, value, source, input.taxYear)) {
       addFlag(fieldFlags, id, "Likely form line number or OCR noise — verify");
     }
 
-    const materialDisagree = hasMaterialSourceDisagreement(snaps, value);
+    const materialDisagree = shouldFlagMaterialDisagreement(snaps, value, source, parserConf);
     const disagreeMsg = materialDisagree ? sourceDisagreementDetail(snaps, value) : undefined;
     if (disagreeMsg) addFlag(fieldFlags, id, disagreeMsg);
 
@@ -313,15 +352,17 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
         ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
         : agreement >= 2
           ? Math.min(parserConf, DISPLAY_CONF_CAP_AGREED)
-          : materialDisagree
+          : materialDisagree && !isTrustedSingleSource(source, parserConf)
             ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
             : isTrustedSingleSource(source, parserConf)
-              ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
+              ? Math.min(parserConf, parserConf >= 92 ? DISPLAY_CONF_CAP_HIGH_PARSER : DISPLAY_CONF_CAP_TRUSTED)
               : statementPassesStructuralClosure(source)
                 ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
-                : isSubtractiveStatementSource(source)
-                  ? Math.min(parserConf, SUBTRACTIVE_CONF_CAP)
-                  : Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE);
+                : isResidualOpexSource(source)
+                  ? Math.min(parserConf, RESIDUAL_OPEX_CONF_CAP)
+                  : isSubtractiveStatementSource(source)
+                    ? Math.min(parserConf, SUBTRACTIVE_CONF_CAP)
+                    : Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE);
     displayConfidence[id] = capped;
 
     const hardFlags = (fieldFlags[id] ?? []).filter(isHardFlag);
@@ -330,9 +371,9 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     const needsReview =
       hardFlags.length > 0 ||
       suspicious ||
-      materialDisagree ||
+      (materialDisagree && !isTrustedSingleSource(source, parserConf)) ||
       parserConf < 65 ||
-      family === "ocr" ||
+      (family === "ocr" && agreement < 2) ||
       isWeakSource(source) ||
       line18Isolated ||
       (agreement < 2 &&
@@ -492,11 +533,9 @@ export function applyThoroughScheduleLAgreement(
         continue;
       }
 
-      const val = resolved.values[id];
-      delete resolved.values[id];
-      delete resolved.confidence[id];
-      delete resolved.sources[id];
-      resolved.warnings.push(`Thorough: cleared ${id} (${val}) — Schedule L sources disagree`);
+      // Do not blank balanced-path values when Schedule L sources disagree — that made
+      // thorough worse than balanced. Keep resolved and flag for review instead.
+      resolved.warnings.push(`Thorough: Schedule L sources disagree on ${id} — kept parser value`);
     }
   }
 }
@@ -518,6 +557,7 @@ export function applyTaxYearVerification(
     fieldSources: resolved.fieldSources,
     sourceSnapshots: snapshots,
     taxYear: parsed.year,
+    warnings: parsed.warnings,
   });
 
   const fieldAlternates = Object.fromEntries(

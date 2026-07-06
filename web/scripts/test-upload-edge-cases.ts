@@ -96,17 +96,16 @@ const localFast = resolveOcrMode("fast");
 const localBalanced = resolveOcrMode("balanced");
 const localThorough = resolveOcrMode("thorough");
 assert(vFast.maxPhase2Pages === localFast.maxPhase2Pages, "vercel-fast mirrors local fast pages");
-assert(vBalanced.maxPhase2Pages === localBalanced.maxPhase2Pages, "vercel-balanced scans same pages as local");
-assert(vBalanced.fullScale === localBalanced.fullScale, "vercel-balanced keeps local fullScale");
 assert(vBalanced.skipPhase1QuickScan === true, "vercel-balanced skips phase1 quick scan for Hobby budget");
 assert(!vBalanced.useFastHeuristicPages, "vercel-balanced must not skip pages via fast heuristic");
+assert(localBalanced.skipPhase1QuickScan === false, "local balanced keeps phase1 keyword scan for accuracy");
+assert(!localBalanced.useFastHeuristicPages, "local balanced must not use fast page subset");
 assert(vFast.maxPhase2Pages === 14, "fast caps at 14 pages");
 assert(vFast.maxHiDpiPages === 0, "fast skips hi-DPI");
-assert(vBalanced.maxPhase2Pages === 26, "balanced scans 26 pages");
-assert(vBalanced.maxHiDpiPages > 0, "balanced has selective hi-DPI");
-assert(vThorough.maxPhase2Pages === 26, "thorough scans 26 pages");
-assert(vThorough.maxPhase2Pages === vBalanced.maxPhase2Pages, "thorough scans same pages as balanced");
-assert(vThorough.maxHiDpiPages === vBalanced.maxHiDpiPages, "thorough preset matches balanced (local runs 2×)");
+assert(localFast.maxHiDpiPages === 0, "local fast skips hi-DPI");
+assert(localBalanced.maxPhase2Pages === 36, "balanced scans up to 36 pages");
+assert(localBalanced.maxHiDpiPages > 0, "balanced has selective hi-DPI");
+assert(localThorough.maxPhase2Pages >= localBalanced.maxPhase2Pages, "thorough scans at least as many pages as balanced");
 assert(
   localFast.workers === 1 && localBalanced.workers === 1 && localThorough.workers === 1,
   "local workers=1",

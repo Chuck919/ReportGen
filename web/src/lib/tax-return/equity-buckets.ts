@@ -44,7 +44,38 @@ export function normalizeEquityBuckets(resolved: ResolvedFields): void {
     delete resolved.sources.unclassified_equity;
     return;
   }
+  const nominalPar = new Set([100, 500, 1000, 5000, 10_000]);
+  const hasNominalCommon = cs !== undefined && nominalPar.has(Math.round(cs));
+  const csRound = cs !== undefined ? Math.round(cs) : undefined;
+
   if (uni !== undefined && uni > 0 && isScheduleLRetainedSource(uniSrc)) {
+    // KCF-style: $100 capital stock is rolled into unclassified equity (RE + capital),
+    // not shown as Common Stock. Always exactly $100 low if we omit it.
+    if (csRound === 100 && (ose === undefined || ose === 0)) {
+      resolved.values.unclassified_equity = Math.round(uni + csRound);
+      resolved.confidence.unclassified_equity = Math.max(
+        resolved.confidence.unclassified_equity ?? 90,
+        resolved.confidence.common_stock ?? 90,
+      );
+      resolved.sources.unclassified_equity =
+        (resolved.sources.unclassified_equity ?? "Schedule L equity") + " + capital stock";
+      delete resolved.values.common_stock;
+      delete resolved.confidence.common_stock;
+      delete resolved.sources.common_stock;
+      return;
+    }
+    // Integrator convention: nominal-par common stock → Other Stock/Equity (Carithers-style LLC).
+    // No common stock → keep unclassified (KCF / SSSI).
+    if (hasNominalCommon && (ose === undefined || ose === 0) && uni > 50_000) {
+      resolved.values.other_stock_equity = uni;
+      resolved.confidence.other_stock_equity = resolved.confidence.unclassified_equity ?? 90;
+      resolved.sources.other_stock_equity =
+        (resolved.sources.unclassified_equity ?? "Schedule L equity") + " (routed to other stock)";
+      delete resolved.values.unclassified_equity;
+      delete resolved.confidence.unclassified_equity;
+      delete resolved.sources.unclassified_equity;
+      return;
+    }
     if (
       ose !== undefined &&
       !isArizonaEmbeddedOseSource(oseSrc) &&
@@ -125,6 +156,18 @@ export function normalizeEquityBuckets(resolved: ResolvedFields): void {
     resolved.confidence.other_stock_equity = resolved.confidence.unclassified_equity ?? 90;
     resolved.sources.other_stock_equity =
       resolved.sources.unclassified_equity ?? "Schedule L equity (routed to other stock)";
+    delete resolved.values.unclassified_equity;
+    delete resolved.confidence.unclassified_equity;
+    delete resolved.sources.unclassified_equity;
+    return;
+  }
+
+  // Nominal-par common stock (LLC / S-corp style): integrator puts RE in Other Stock/Equity.
+  if (uni !== undefined && uni > 50_000 && (ose === undefined || ose === 0) && hasNominalCommon) {
+    resolved.values.other_stock_equity = uni;
+    resolved.confidence.other_stock_equity = resolved.confidence.unclassified_equity ?? 90;
+    resolved.sources.other_stock_equity =
+      (resolved.sources.unclassified_equity ?? "Schedule L equity") + " (routed to other stock)";
     delete resolved.values.unclassified_equity;
     delete resolved.confidence.unclassified_equity;
     delete resolved.sources.unclassified_equity;

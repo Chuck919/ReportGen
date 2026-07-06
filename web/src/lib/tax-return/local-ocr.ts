@@ -82,6 +82,26 @@ function ocrPageBlockScore(block: string): number {
   return score;
 }
 
+/** True when balanced (pass-1) page still needs hi-DPI help — only then may pass-2 replace it. */
+function pageIsWeakBaseline(block: string): boolean {
+  if (!block.trim()) return true;
+  const commaMoney = (block.match(/\d{1,3}(?:,\d{3})+/g) || []).length;
+  const isSchedL = /schedule\s+l|balance\s*sheets?\s*per\s*books/i.test(block);
+  const isForm1 = /caution:\s*include\s+only\s+trade|gross receipts or sales/i.test(block);
+  // Non-critical pages: never replace balanced baseline (avoids thorough < balanced regressions).
+  if (!isSchedL && !isForm1) return false;
+  if (isScheduleLContaminated(block)) return true;
+  const missingRent = isForm1 && !/\brents?\b|\brens\b/i.test(block);
+  const sparseSchedL = isSchedL && commaMoney < 4;
+  const l24 = scheduleLRetainLine(block);
+  const weakL24 = Boolean(l24 && !/\d{1,3}(?:,\d{3})+/.test(l24));
+  return missingRent || sparseSchedL || weakL24;
+}
+
+/**
+ * Merge thorough hi-DPI pages (b) onto balanced baseline (a).
+ * Default is always pass-1 (balanced) so thorough cannot be worse than balanced.
+ */
 function mergeOcrPageTexts(a: string, b: string): { text: string; picks: number; pages: number } {
   const pagesA = extractOcrPages(a);
   const pagesB = extractOcrPages(b);
@@ -91,25 +111,39 @@ function mergeOcrPageTexts(a: string, b: string): { text: string; picks: number;
   for (const n of nums) {
     const blockA = pagesA.get(n) ?? "";
     const blockB = pagesB.get(n) ?? "";
-    const aUsable = scheduleLUsable(blockA);
-    const bUsable = scheduleLUsable(blockB);
-    if (aUsable && !bUsable) {
+    if (!blockB) {
       out.push(blockA);
       continue;
     }
+    if (!blockA) {
+      out.push(blockB);
+      picks++;
+      continue;
+    }
+    // Keep balanced unless that page is still weak and pass-2 is clearly better.
+    if (!pageIsWeakBaseline(blockA)) {
+      out.push(blockA);
+      continue;
+    }
+    if (isScheduleLContaminated(blockB) && !isScheduleLContaminated(blockA)) {
+      out.push(blockA);
+      continue;
+    }
+    const aUsable = scheduleLUsable(blockA);
+    const bUsable = scheduleLUsable(blockB);
     if (bUsable && !aUsable) {
       out.push(blockB);
       picks++;
       continue;
     }
-    if (isScheduleLContaminated(blockB) && !isScheduleLContaminated(blockA) && blockA) {
-      out.push(blockA);
-      continue;
-    }
     const scoreA = ocrPageBlockScore(blockA);
     const scoreB = ocrPageBlockScore(blockB);
-    if (blockB && scoreB > scoreA + 4) picks++;
-    out.push(scoreB > scoreA + 4 ? blockB : blockA);
+    if (scoreB > scoreA + 8) {
+      out.push(blockB);
+      picks++;
+      continue;
+    }
+    out.push(blockA);
   }
   return { text: out.join("\n"), picks, pages: nums.length };
 }
@@ -245,7 +279,7 @@ export async function runLocalOcrPages(
   ocrMode?: string;
   timingMs?: Record<string, number>;
 }> {
-  const env: NodeJS.ProcessEnv = { ...process.env, FREE_OCR_FORCE_PAGES: pages.join(",") };
+  const env: Record<string, string> = { FREE_OCR_FORCE_PAGES: pages.join(",") };
   if (options?.forcePhase3) env.FREE_OCR_FORCE_PHASE3 = "1";
   return runOcrScript(bytes, options, env);
 }
@@ -253,7 +287,7 @@ export async function runLocalOcrPages(
 async function runOcrScript(
   bytes: Uint8Array,
   options?: { profile?: LocalOcrProfile; mode?: OcrMode },
-  extraEnv?: NodeJS.ProcessEnv,
+  extraEnv?: Record<string, string>,
 ): Promise<{
   text: string;
   confidence: number;
@@ -267,7 +301,10 @@ async function runOcrScript(
   await writeFile(tempPath, Buffer.from(bytes));
   try {
     const scriptPath = path.join(process.cwd(), "scripts", "free-ocr.cjs");
-    const env = { ...process.env, ...extraEnv };
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const [k, v] of Object.entries(extraEnv ?? {})) {
+      env[k] = v;
+    }
     const nodeModules = path.join(process.cwd(), "node_modules");
     env.NODE_PATH = env.NODE_PATH ? `${nodeModules}${path.delimiter}${env.NODE_PATH}` : nodeModules;
     if (!env.FREE_OCR_WORKERS) {

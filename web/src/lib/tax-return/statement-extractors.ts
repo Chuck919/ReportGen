@@ -7,9 +7,13 @@ import {
   substantialMoneyTokens,
 } from "./money";
 import type { FieldExtraction } from "./form-anchors";
+import { scanFormLine20OtherDeductionsTotal } from "./form-anchors";
+import { detectTaxForm } from "./detect-tax-form";
 import { pickComparisonColumnIndex } from "@/lib/two-year-comparison-parser";
 import { pickStmt2BankCreditCard } from "./stmt2-bank-picker";
 import { closureTolerance, formulasDisagree } from "./structural-tolerance";
+import { isEinOrPaymentInstructionBleed, repairOcrLabel } from "./ocr-label-repair";
+import { isPlausibleOtherOperatingExpense } from "./opex-plausibility";
 
 function tailFromLine(line: string, mode: "last" | "max"): number | undefined {
   const nums = substantialMoneyTokens(line);
@@ -27,8 +31,15 @@ function isTaxesLicensesStmt2Line(line: string): boolean {
 export function scanStatement2Total(text: string): number | undefined {
   let best: number | undefined;
 
-  const considerTotal = (line: string, inOtherDedBlock: boolean, taxesOnlyBlock: boolean) => {
+  const considerTotal = (
+    line: string,
+    inOtherDedBlock: boolean,
+    taxesOnlyBlock: boolean,
+    recentContext?: string,
+  ) => {
     if (!/^total\b/i.test(line.replace(/\s+/g, " ").trim())) return;
+    if (/total\s+deductions/i.test(line)) return;
+    if (recentContext && isComparisonWorksheetContext(recentContext)) return;
     if (isTaxesLicensesStmt2Line(line)) return;
     if (taxesOnlyBlock) return;
     const total = statementLineAmount(line);
@@ -45,7 +56,7 @@ export function scanStatement2Total(text: string): number | undefined {
     const taxesOnly =
       /line\s*11\b.*tax|schedule\s*c.*line\s*11|taxes.*(?:statement|stmt)\s*2/i.test(header) &&
       !/other\s+deduct/i.test(header);
-    for (const rawLine of m[0].split(/\n/)) considerTotal(rawLine, true, taxesOnly);
+    for (const rawLine of m[0].split(/\n/)) considerTotal(rawLine, true, taxesOnly, undefined);
   }
 
   let inStmt2 = false;
@@ -55,11 +66,27 @@ export function scanStatement2Total(text: string): number | undefined {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
 
-    if (isOtherDeductionsBlockHeader(line)) {
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? text.slice(Math.max(0, lineIdx - 600), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : "";
+
+    if (isComparisonWorksheetContext(recentContext)) {
+      inStmt2 = false;
+      inOtherDed = false;
+      taxesOnlyBlock = false;
+    }
+    if (isOtherDeductionsBlockHeader(line, recentContext)) {
       inStmt2 = true;
       inOtherDed = true;
       taxesOnlyBlock = false;
-    } else if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+    } else if (
+      !isFormLineOtherDeductionsPointer(line, recentContext) &&
+      /statement\s*2|stmt\s*2|line\s*(?:19|20|26)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(
+        line,
+      )
+    ) {
       inStmt2 = true;
       taxesOnlyBlock =
         /line\s*11\b.*tax|schedule\s*c.*line\s*11|taxes.*(?:statement|stmt)\s*2/i.test(line) &&
@@ -72,7 +99,7 @@ export function scanStatement2Total(text: string): number | undefined {
     }
     if (isTaxesLicensesStmt2Line(line)) inOtherDed = false;
     if (!inStmt2) continue;
-    considerTotal(line, inOtherDed, taxesOnlyBlock);
+    considerTotal(line, inOtherDed, taxesOnlyBlock, recentContext);
   }
 
   return best;
@@ -97,6 +124,11 @@ export function scanDocumentWideStmt2Exclusions(text: string): number {
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line || /^total\b/i.test(line)) continue;
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 400), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+    if (isComparisonWorksheetContext(recentContext)) continue;
     if (isTaxesLicensesStmt2Line(line)) continue;
     for (const rule of rules) {
       if (!rule.re.test(line)) continue;
@@ -124,6 +156,11 @@ export function sumStmt2BlockLineItems(text: string): number | undefined {
     if (!line) continue;
 
     if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+      const lineIdx = text.indexOf(rawLine);
+      const recentContext = text
+        .slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length)
+        .replace(/\s+/g, " ");
+      if (isComparisonWorksheetContext(recentContext)) continue;
       inStmt2 = true;
       sum = 0;
       sawLine = false;
@@ -131,6 +168,11 @@ export function sumStmt2BlockLineItems(text: string): number | undefined {
     }
     if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
     if (!inStmt2) continue;
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 400), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+    if (isComparisonWorksheetContext(recentContext)) continue;
     if (/^total\b/i.test(line)) continue;
     if (PRIMARY_STMT2_LABEL.test(line)) {
       const amt = statementLineAmount(line);
@@ -164,6 +206,11 @@ export function scanStmt2MiscLineAmounts(text: string): number[] {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
     if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+      const lineIdx = text.indexOf(rawLine);
+      const recentContext = text
+        .slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length)
+        .replace(/\s+/g, " ");
+      if (isComparisonWorksheetContext(recentContext)) continue;
       inStmt2 = true;
       amounts.length = 0;
       primaryAmounts.clear();
@@ -171,6 +218,11 @@ export function scanStmt2MiscLineAmounts(text: string): number[] {
     }
     if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
     if (!inStmt2) continue;
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 400), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+    if (isComparisonWorksheetContext(recentContext)) continue;
     if (/^total\b/i.test(line)) continue;
     const amount = statementLineAmount(line);
     if (amount === undefined || !isReasonableMoneyAmount(amount)) continue;
@@ -197,11 +249,21 @@ export function scanStmt2AmountsInBand(text: string, low: number, high: number):
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
     if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
+      const lineIdx = text.indexOf(rawLine);
+      const recentContext = text
+        .slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length)
+        .replace(/\s+/g, " ");
+      if (isComparisonWorksheetContext(recentContext)) continue;
       inStmt2 = true;
       continue;
     }
     if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
     if (!inStmt2) continue;
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 400), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+    if (isComparisonWorksheetContext(recentContext)) continue;
     if (/^total\b/i.test(line)) continue;
     for (const token of substantialMoneyTokens(line)) {
       const abs = Math.round(Math.abs(token));
@@ -214,22 +276,136 @@ export function scanStmt2AmountsInBand(text: string, low: number, high: number):
 const PRIMARY_STMT2_LABEL =
   /bank|credit\s+card|professional|utilities?\b|utility\s+expense|description|statement\s*\d|amount\b/i;
 
+function shouldReplaceBlockBest(
+  best:
+    | {
+        opex: number;
+        stmtTotal?: number;
+        confidence: number;
+        source: string;
+      }
+    | undefined,
+  pick: { opex: number; stmtTotal?: number; confidence: number; source: string },
+): boolean {
+  if (!best) return true;
+  if ((best.stmtTotal ?? 0) < (pick.stmtTotal ?? 0)) return true;
+  if ((best.stmtTotal ?? 0) !== (pick.stmtTotal ?? 0)) return false;
+  if (pick.confidence > best.confidence) return true;
+  if (
+    /summed detail/i.test(pick.source) &&
+    /office\/supplies/i.test(best.source) &&
+    pick.opex > best.opex * 1.5
+  ) {
+    return true;
+  }
+  if (
+    /federal table minus slot/i.test(pick.source) &&
+    /office\/supplies/i.test(best.source) &&
+    pick.opex > best.opex * 1.15
+  ) {
+    return true;
+  }
+  if (
+    /federal table minus slot/i.test(pick.source) &&
+    /federal table minus slot/i.test(best.source) &&
+    Math.abs(pick.opex - best.opex) > Math.max(500, best.opex * 0.02)
+  ) {
+    return pick.opex > best.opex;
+  }
+  return false;
+}
+
 const OPEX_DETAIL_LINE =
   /office\s+exp|supplies\b|telephone\b|travel\b|bank\s+charg|computer\s+and\s+internet|internet\s+expense|miscellaneous\b/i;
 
 const LARGE_OPEX_EXCLUDED =
   /utilities\b|^auto\b|licenses?\s+and\s+permits|merchant\s+svc|merchant\s+service|professional|accounting\s+&|legal\s+and\s+prof|bank\s+charg|^insurance\b/i;
 
-function isOtherDeductionsBlockHeader(line: string): boolean {
-  if (!/other\s+deduct/i.test(line)) return false;
-  if (/statement\s*[23]\b|stmt\s*[23]\b/i.test(line)) return true;
-  return /line\s*(?:19|20)\b/i.test(line);
+function isComparisonWorksheetContext(ctx: string): boolean {
+  return /two\s*year\s*comparison|comparison\s+worksheet|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i.test(
+    ctx,
+  );
 }
 
-function endsOtherDeductionsBlock(line: string): boolean {
+/** Form page line reference ("line 26 other deductions … see stmt 2") — not an attachment block. */
+function isFormLineOtherDeductionsPointer(line: string, recentContext?: string): boolean {
+  const ctx = `${recentContext ?? ""} ${line}`;
+  if (/federal\s+statements/i.test(ctx)) return false;
+  if (!/other\s+deduct/i.test(line)) return false;
+  if (
+    /\b(?:19|20|26)\b/i.test(line) &&
+    /(?:attach\s+statement|see\s+stmt)/i.test(line) &&
+    !/^description\s+amount/i.test(line)
+  ) {
+    return true;
+  }
+  if (
+    /form\s+1120\s*\(\d{4}\)|u\.s\.\s+corporation\s+income\s+tax\s+return/i.test(ctx) &&
+    /\b(?:19|20|26)\b/i.test(line)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isOtherDeductionsBlockHeader(line: string, recentContext?: string): boolean {
+  const repaired = repairOcrLabel(line);
+  const ctx = `${recentContext ?? ""} ${repaired} ${line}`;
+  if (isFormLineOtherDeductionsPointer(line, recentContext)) return false;
+  if (isComparisonWorksheetContext(ctx)) return false;
+  if (/federal\s+statements/i.test(ctx) && /other\s+(?:deduct|ions|expense)/i.test(repaired + line)) {
+    return true;
+  }
+  if (
+    /federal\s+statements/i.test(ctx) &&
+    /other\s*(?:deduct|ions)/i.test(line) &&
+    /(?:form|stmt|statement|tatement)\s*[12]\b|line\s*(?:19|20|26)\b/i.test(line)
+  ) {
+    return true;
+  }
+  if (/other\s+(?:deduct|ions|expense)/i.test(repaired) || /other\s+deduct/i.test(line)) {
+    if (/statement\s*[23]\b|stmt\s*[23]\b|tatement\s*2/i.test(repaired + line)) return true;
+    if (
+      /line\s*(?:19|20)\b/i.test(repaired + line) &&
+      /other\s+deduct|see\s+stmt/i.test(repaired + line)
+    ) {
+      return true;
+    }
+  }
+  if (
+    /^description\s+amount\b/i.test(line) &&
+    /see\s+stmt\s*2|line\s*20/i.test(repaired + line)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isFederalStatementsExpenseTable(line: string, recentContext: string): boolean {
+  if (!/^description\s+amount\b/i.test(line.replace(/\s+/g, " ").trim())) return false;
+  if (/federal\s+statements/i.test(recentContext)) return true;
+  return /(?:statement|stmt|tatement)\s*2\b[\s\S]{0,120}other\s+deduct|line\s*20[\s\S]{0,80}other\s+deduct|other\s+deductions[\s\S]{0,80}line\s*20/i.test(
+    recentContext,
+  );
+}
+
+function endsOtherDeductionsBlock(line: string, recentContext?: string): boolean {
+  const ctx = `${recentContext ?? ""} ${line}`;
+  if (isComparisonWorksheetContext(ctx)) return true;
+  if (/form\s+1120\s+return\s+summary/i.test(line)) return true;
   if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line) && !/other\s+deduct/i.test(line)) return true;
   if (/statement\s*4|stmt\s*4/i.test(line)) return true;
   return false;
+}
+
+function scanFederalStmt1MiniTotal(text: string): number {
+  const m = text.match(
+    /federal\s+statements[\s\S]{0,1200}?description\s+amount[\s\S]{0,800}?total\s+\$?\s*([\d,]+)[\s\S]{0,200}statement\s*2\b[\s\S]{0,120}other\s+deduct/i,
+  );
+  if (!m) return 0;
+  const parsed = parseMoney(m[1]!);
+  if (parsed === null || !isReasonableMoneyAmount(parsed) || Math.abs(parsed) >= 50_000) return 0;
+  return Math.round(Math.abs(parsed));
 }
 
 /** Parse Stmt 2/3 other-deduction attachment blocks (Carithers stmt3, Arizona stmt2). */
@@ -269,8 +445,109 @@ export function extractOtherDeductionsBlockOpex(text: string): {
   let insuranceLine = 0;
   let miscAmount = 0;
   let telAmount = 0;
+  let bankInBlock = 0;
+  let federalStmt1Total = 0;
+  let federalStmt1Carried = scanFederalStmt1MiniTotal(text);
+  let sawFederalStmt2 = false;
+  let blockIsFederal = false;
+  let travelInBlock = 0;
+  let duesInBlock = 0;
+  let amortInBlock = 0;
+
+  const appendFederalTableOpex = () => {
+    if (!blockIsFederal || stmtTotal === undefined || stmtTotal < 1_000) return;
+    if (bankInBlock <= 0 || professional <= 0) return;
+
+    const slotExcluded = Math.round(
+      bankInBlock + utilities + professional + autoTruck + licenses + merchant + amortInBlock,
+    );
+    const federalSlotResidual =
+      slotExcluded > 0 ? Math.round(stmtTotal - slotExcluded) : undefined;
+    const federalWithoutUtil =
+      bankInBlock > 0 && professional > 0
+        ? Math.round(stmtTotal - bankInBlock - professional)
+        : undefined;
+    const federalWithoutUtilStmt1 =
+      federalWithoutUtil !== undefined && federalStmt1Carried > 0
+        ? Math.round(federalWithoutUtil + federalStmt1Carried)
+        : federalWithoutUtil;
+    const federalAdjusted =
+      federalWithoutUtilStmt1 !== undefined && utilities > 0 && travelInBlock > 0
+        ? Math.round(federalWithoutUtilStmt1 - utilities + travelInBlock + duesInBlock)
+        : undefined;
+
+    if (
+      federalAdjusted !== undefined &&
+      federalAdjusted >= 1_000 &&
+      federalAdjusted < stmtTotal * 0.45 &&
+      isReasonableMoneyAmount(federalAdjusted)
+    ) {
+      const officePlusStmt1 =
+        opexDetail >= 500 && federalStmt1Carried > 0
+          ? Math.round(opexDetail + federalStmt1Carried)
+          : undefined;
+      if (
+        officePlusStmt1 === undefined ||
+        federalAdjusted <= officePlusStmt1 * 1.05 ||
+        travelInBlock >= 500
+      ) {
+        const pick = {
+          opex: federalAdjusted,
+          stmtTotal,
+          excludedSum: bankInBlock + professional + utilities - travelInBlock - duesInBlock,
+          detailPreferred: true,
+          confidence: 94,
+          source: "Statement 2 (federal table minus slot lines)",
+        };
+        if (shouldReplaceBlockBest(best, pick)) best = pick;
+      }
+    }
+
+    if (
+      federalSlotResidual !== undefined &&
+      federalSlotResidual >= 1_000 &&
+      federalSlotResidual < stmtTotal * 0.45 &&
+      isReasonableMoneyAmount(federalSlotResidual)
+    ) {
+      const pick = {
+        opex: federalSlotResidual,
+        stmtTotal,
+        excludedSum: slotExcluded,
+        detailPreferred: true,
+        confidence: 94,
+        source: "Statement 2 (federal table minus slot lines)",
+      };
+      if (shouldReplaceBlockBest(best, pick)) best = pick;
+    }
+
+    if (opexDetail >= 500 && opexDetail < stmtTotal * 0.5) {
+      const officeBucket = Math.round(opexDetail);
+      const federalLineSum =
+        federalStmt1Carried > 0
+          ? Math.round(officeBucket + federalStmt1Carried)
+          : undefined;
+      if (
+        federalLineSum !== undefined &&
+        federalLineSum >= 1_000 &&
+        federalLineSum < stmtTotal * 0.45 &&
+        isReasonableMoneyAmount(federalLineSum)
+      ) {
+        const pick = {
+          opex: federalLineSum,
+          stmtTotal,
+          excludedSum: opexDetail,
+          detailPreferred: true,
+          confidence: 93,
+          source: "Statement 2 (federal table minus slot lines)",
+        };
+        if (shouldReplaceBlockBest(best, pick)) best = pick;
+      }
+    }
+  };
 
   const flush = () => {
+    appendFederalTableOpex();
+
     const hasLargeDetail =
       utilities > 0 ||
       insuranceLine > 0 ||
@@ -278,7 +555,9 @@ export function extractOtherDeductionsBlockOpex(text: string): {
       professional > 0 ||
       opexDetail > 0 ||
       largeDetailSum > 0;
-    if (stmtTotal !== undefined && stmtTotal >= 100_000 && hasLargeDetail) {
+    const skipLargeFederal =
+      blockIsFederal && bankInBlock > 0 && professional > 0 && best?.detailPreferred;
+    if (stmtTotal !== undefined && stmtTotal >= 100_000 && hasLargeDetail && !skipLargeFederal) {
       const tol = closureTolerance(stmtTotal);
       const classicExcluded = utilities + autoTruck + licenses;
       const classicOpex = Math.round(stmtTotal - classicExcluded);
@@ -344,10 +623,10 @@ export function extractOtherDeductionsBlockOpex(text: string): {
 
       const valid = candidates.filter((p) => {
         if (p.opex < 10_000) return false;
-        const closes = Math.abs(p.excludedSum + p.opex - stmtTotal) <= tol;
+        const closes = Math.abs(p.excludedSum + p.opex - stmtTotal!) <= tol;
         if (!closes) return false;
         // High-ratio opex is valid when the block formula structurally closes.
-        if (p.opex <= stmtTotal * 0.92) return true;
+        if (p.opex <= stmtTotal! * 0.92) return true;
         return p.detailPreferred && closes;
       });
 
@@ -384,26 +663,152 @@ export function extractOtherDeductionsBlockOpex(text: string): {
           confidence: chosen.confidence,
           source: chosen.source,
         };
-        if (
-          !best ||
-          (stmtTotal >= 100_000 && (best.stmtTotal ?? 0) < stmtTotal) ||
-          pick.confidence > best.confidence
-        ) {
+        if (shouldReplaceBlockBest(best, pick)) {
           best = pick;
         }
       }
-    } else if (
-      stmtTotal !== undefined &&
-      opexDetail >= 500 &&
-      opexDetail < stmtTotal * 0.5
-    ) {
-      const pick = {
-        opex: Math.round(opexDetail),
-        stmtTotal,
-        confidence: 93,
-        source: "Statement other deductions (office/supplies/telephone/travel/bank detail)",
-      };
-      if (!best || (best.stmtTotal ?? 0) < stmtTotal) best = pick;
+    } else if (stmtTotal !== undefined && stmtTotal >= 1_000) {
+      const slotExcluded = Math.round(
+        bankInBlock + utilities + professional + autoTruck + licenses + merchant,
+      );
+      const federalSlotResidual =
+        slotExcluded > 0 && bankInBlock > 0 && professional > 0
+          ? Math.round(stmtTotal - slotExcluded)
+          : undefined;
+      const federalWithoutUtil =
+        bankInBlock > 0 && professional > 0
+          ? Math.round(stmtTotal - bankInBlock - professional)
+          : undefined;
+      const federalWithStmt1 =
+        federalSlotResidual !== undefined && federalStmt1Carried > 0
+          ? Math.round(federalSlotResidual + federalStmt1Carried)
+          : federalSlotResidual;
+      const federalWithoutUtilStmt1 =
+        federalWithoutUtil !== undefined && federalStmt1Carried > 0
+          ? Math.round(federalWithoutUtil + federalStmt1Carried)
+          : federalWithoutUtil;
+
+      const excluded = Math.round(
+        utilities + autoTruck + licenses + merchant + professional + contractLabor,
+      );
+      const residual = Math.round(stmtTotal - excluded);
+      const tol = closureTolerance(stmtTotal);
+      const residualCloses =
+        residual >= 1_000 && Math.abs(excluded + residual - stmtTotal) <= tol;
+      const residualOk =
+        residualCloses && residual < stmtTotal * 0.65 && isReasonableMoneyAmount(residual);
+      const federalAdjusted =
+        federalWithoutUtilStmt1 !== undefined &&
+        utilities > 0 &&
+        travelInBlock > 0
+          ? Math.round(federalWithoutUtilStmt1 - utilities + travelInBlock + duesInBlock)
+          : undefined;
+
+      if (
+        federalAdjusted !== undefined &&
+        blockIsFederal &&
+        federalAdjusted >= 1_000 &&
+        federalAdjusted < stmtTotal * 0.45 &&
+        isReasonableMoneyAmount(federalAdjusted)
+      ) {
+        const officePlusStmt1 =
+          opexDetail >= 500 && federalStmt1Carried > 0
+            ? Math.round(opexDetail + federalStmt1Carried)
+            : undefined;
+        if (
+          officePlusStmt1 === undefined ||
+          federalAdjusted <= officePlusStmt1 * 1.05 ||
+          travelInBlock >= 500
+        ) {
+          const pick = {
+            opex: federalAdjusted,
+            stmtTotal,
+            excludedSum: bankInBlock + professional + utilities - travelInBlock - duesInBlock,
+            detailPreferred: true,
+            confidence: 94,
+            source: "Statement 2 (federal table minus slot lines)",
+          };
+          if (shouldReplaceBlockBest(best, pick)) best = pick;
+        }
+      } else if (
+        federalWithoutUtilStmt1 !== undefined &&
+        blockIsFederal &&
+        federalWithoutUtilStmt1 >= 1_000 &&
+        federalWithoutUtilStmt1 < stmtTotal * 0.45 &&
+        isReasonableMoneyAmount(federalWithoutUtilStmt1) &&
+        (federalWithStmt1 === undefined ||
+          Math.abs(federalWithoutUtilStmt1 - federalWithStmt1) > Math.max(500, stmtTotal * 0.01))
+      ) {
+        const pick = {
+          opex: federalWithoutUtilStmt1,
+          stmtTotal,
+          excludedSum: bankInBlock + professional,
+          detailPreferred: true,
+          confidence: 90,
+          source: "Statement 2 (federal table minus slot lines)",
+        };
+        if (shouldReplaceBlockBest(best, pick)) best = pick;
+      }
+      if (
+        federalWithStmt1 !== undefined &&
+        blockIsFederal &&
+        federalWithStmt1 >= 1_000 &&
+        federalWithStmt1 < stmtTotal * 0.45 &&
+        isReasonableMoneyAmount(federalWithStmt1) &&
+        (opexDetail < 500 || federalWithStmt1 > opexDetail * 1.15)
+      ) {
+        const pick = {
+          opex: federalWithStmt1,
+          stmtTotal,
+          excludedSum: slotExcluded,
+          detailPreferred: true,
+          confidence: 92,
+          source: "Statement 2 (federal table minus slot lines)",
+        };
+        if (shouldReplaceBlockBest(best, pick)) best = pick;
+      } else if (residualOk && opexDetail < 500) {
+        const pick = {
+          opex: residual,
+          stmtTotal,
+          excludedSum: excluded,
+          detailPreferred: true,
+          confidence: 90,
+          source: "Statement 2 (small attachment residual)",
+        };
+        if (shouldReplaceBlockBest(best, pick)) best = pick;
+      } else if (opexDetail >= 500 && opexDetail < stmtTotal * 0.5) {
+        const officeBucket = Math.round(
+          opexDetail + (!blockIsFederal && bankInBlock > 0 ? bankInBlock : 0),
+        );
+        const federalLineSum =
+          blockIsFederal && federalStmt1Carried > 0
+            ? Math.round(officeBucket + federalStmt1Carried)
+            : undefined;
+        if (
+          federalLineSum !== undefined &&
+          federalLineSum >= 1_000 &&
+          federalLineSum < stmtTotal * 0.45 &&
+          isReasonableMoneyAmount(federalLineSum)
+        ) {
+          const pick = {
+            opex: federalLineSum,
+            stmtTotal,
+            excludedSum: opexDetail,
+            detailPreferred: true,
+            confidence: 93,
+            source: "Statement 2 (federal table minus slot lines)",
+          };
+          if (shouldReplaceBlockBest(best, pick)) best = pick;
+        } else {
+          const pick = {
+            opex: officeBucket,
+            stmtTotal,
+            confidence: 93,
+            source: "Statement other deductions (office/supplies/telephone/travel/bank detail)",
+          };
+          if (shouldReplaceBlockBest(best, pick)) best = pick;
+        }
+      }
     }
     stmtTotal = undefined;
     utilities = 0;
@@ -421,23 +826,66 @@ export function extractOtherDeductionsBlockOpex(text: string): {
     insuranceLine = 0;
     miscAmount = 0;
     telAmount = 0;
+    bankInBlock = 0;
+    federalStmt1Total = 0;
+    sawFederalStmt2 = false;
+    blockIsFederal = false;
+    travelInBlock = 0;
+    duesInBlock = 0;
+    amortInBlock = 0;
   };
 
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
 
-    if (isOtherDeductionsBlockHeader(line)) {
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 600), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+
+    if (
+      isOtherDeductionsBlockHeader(line, recentContext) ||
+      isFederalStatementsExpenseTable(line, recentContext)
+    ) {
       if (inBlock) flush();
+      blockIsFederal = /federal\s+statements/i.test(recentContext);
       inBlock = true;
+      if (/statement\s*2\b|stmt\s*2\b/i.test(line)) sawFederalStmt2 = true;
       continue;
     }
-    if (inBlock && endsOtherDeductionsBlock(line)) {
+    if (inBlock && endsOtherDeductionsBlock(line, recentContext)) {
       flush();
       inBlock = false;
       continue;
     }
-    if (!inBlock) continue;
+    if (isComparisonWorksheetContext(recentContext)) {
+      if (inBlock) flush();
+      inBlock = false;
+      continue;
+    }
+    if (!inBlock) {
+      const lineIdx = text.indexOf(rawLine);
+      const ctxWindow = text.slice(Math.max(0, lineIdx - 250), lineIdx + rawLine.length + 80);
+      if (
+        /federal\s+statements/i.test(ctxWindow) &&
+        /^total\b/i.test(line) &&
+        !/statement\s*2\b.*other\s+deduct/i.test(ctxWindow) &&
+        !sawFederalStmt2
+      ) {
+        const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
+          .map((x) => parseMoney(x[0]))
+          .filter((n): n is number => n !== null && Math.abs(n) >= 100);
+        const miniTotal =
+          commaAmounts.length > 0
+            ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
+            : undefined;
+        if (miniTotal !== undefined && miniTotal < 50_000 && isReasonableMoneyAmount(miniTotal)) {
+          federalStmt1Carried = Math.max(federalStmt1Carried, Math.round(miniTotal));
+        }
+      }
+      continue;
+    }
 
     const readBlockTotal = (line: string): number | undefined => {
       const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
@@ -465,7 +913,14 @@ export function extractOtherDeductionsBlockOpex(text: string): {
     }
     if (/^total\b/i.test(line)) {
       const total = readBlockTotal(line);
-      if (total !== undefined) stmtTotal = total;
+      if (total !== undefined) {
+        const ctxBefore = text.slice(Math.max(0, text.indexOf(rawLine) - 400), text.indexOf(rawLine));
+        if (inBlock && !sawFederalStmt2 && /federal\s+statements/i.test(ctxBefore)) {
+          federalStmt1Carried = Math.max(federalStmt1Carried, total);
+        } else {
+          stmtTotal = total;
+        }
+      }
       continue;
     }
 
@@ -485,6 +940,9 @@ export function extractOtherDeductionsBlockOpex(text: string): {
     if (abs === undefined || abs < 10) continue;
 
     if (/^utilities\b/i.test(line)) utilities = Math.max(utilities, abs);
+    else if (/bank\s+&?\s*credit|bank\s+charg|credit\s+card\s+charg/i.test(line)) {
+      bankInBlock = Math.max(bankInBlock, abs);
+    }
     else if (/auto\s+and\s+truck/i.test(line)) autoTruck = abs;
     else if (/licenses?\s+and\s+permits/i.test(line)) licenses = abs;
     else if (/merchant\s+svc|merchant\s+service|merchant\s+fee/i.test(line)) merchant = abs;
@@ -495,13 +953,36 @@ export function extractOtherDeductionsBlockOpex(text: string): {
       productionSupport = Math.max(productionSupport, abs);
     } else if (/^consulting\b/i.test(line)) consulting = Math.max(consulting, abs);
     else if (/IT\s+support|website\s+support/i.test(line)) itSupport = Math.max(itSupport, abs);
-    else if (/^insurance\b/i.test(line)) insuranceLine = Math.max(insuranceLine, abs);
-    else if (/^miscellaneous\b/i.test(line)) miscAmount = Math.max(miscAmount, abs);
+    else if (/^insurance\b/i.test(line)) {
+      insuranceLine = Math.max(insuranceLine, abs);
+    } else if (/^amortization\b/i.test(line) && !/accumulated/i.test(line)) {
+      amortInBlock = Math.max(amortInBlock, abs);
+    } else if (blockIsFederal && /office\s+suppl/i.test(line)) {
+      opexDetail += abs;
+    } else if (blockIsFederal && /cash\s+over|over\/short/i.test(line)) {
+      opexDetail += abs;
+    } else if (blockIsFederal && /temporary\s+labor/i.test(line)) {
+      opexDetail += abs;
+    } else if (blockIsFederal && /^settlement\b|dues\s*&\s*subscription/i.test(line)) {
+      opexDetail += abs;
+      if (/dues\s*&\s*subscription/i.test(line)) duesInBlock = Math.max(duesInBlock, abs);
+    } else if (blockIsFederal && /staff\s+meetings?|store\s+suppl|50%\s+of\s+meals/i.test(line)) {
+      opexDetail += abs;
+    } else if (/travel\b/i.test(line) && !/mileage\s+reimb/i.test(line)) {
+      travelInBlock = Math.max(travelInBlock, abs);
+    } else if (/mileage\s+reimb|travel\s*&\s*mileage/i.test(line)) {
+      travelInBlock = Math.max(travelInBlock, abs);
+      if (blockIsFederal) opexDetail += abs;
+    } else if (/^miscellaneous\b/i.test(line)) miscAmount = Math.max(miscAmount, abs);
     else if (/^telephone\b/i.test(line)) {
       telAmount = Math.max(telAmount, abs);
       opexDetail += abs;
-    } else if (OPEX_DETAIL_LINE.test(line)) opexDetail += abs;
-    else if (
+    } else if (
+      OPEX_DETAIL_LINE.test(line) &&
+      !/bank\s+charg|credit\s+card\s+charg|professional|utilities\b|insurance\b/i.test(line)
+    ) {
+      opexDetail += abs;
+    } else if (
       inBlock &&
       !LARGE_OPEX_EXCLUDED.test(line) &&
       /[a-z]{3,}/i.test(line)
@@ -509,6 +990,8 @@ export function extractOtherDeductionsBlockOpex(text: string): {
       largeDetailSum += abs;
     }
   }
+
+  void merchant;
   if (inBlock) flush();
 
   if (best === undefined) return { confidence: 0, source: "" };
@@ -547,7 +1030,12 @@ export function scanStmt2InsuranceAmount(text: string): number | undefined {
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
-    if (isOtherDeductionsBlockHeader(line)) {
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? text.slice(Math.max(0, lineIdx - 600), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : "";
+    if (isOtherDeductionsBlockHeader(line, recentContext)) {
       inBlock = true;
       continue;
     }
@@ -604,30 +1092,53 @@ export function extractStatementDeductions(text: string): FieldExtraction {
     { id: "bank_credit_card", test: /bank\s+charg|credit\s+card|merchant\s+(?:fee|service)/i, amount: "max" },
     { id: "professional_fees", test: /professional|legal\s+and\s+account|accounting\s+&|accounting\s+fee/i, amount: "max" },
     { id: "utilities", test: /^utilities\b|utility\s+expense/i, amount: "max" },
+    { id: "rent", test: /\brents?\b/i, amount: "max" },
   ];
 
-  let inStmt2 = false;
-  let otherDeductionSum = 0;
-  let stmt2Total: number | undefined;
-
-  const applyLine = (line: string, source: string) => {
+  const tryLabelLine = (line: string, source: string, inStmt2: boolean) => {
+    const repaired = repairOcrLabel(line);
+    if (isEinOrPaymentInstructionBleed(line, 0) && /credit\s+card|fein|ein/i.test(line)) return;
     for (const rule of labelRules) {
-      if (!rule.test.test(line)) continue;
+      if (!rule.test.test(repaired) && !rule.test.test(line)) continue;
+      if (
+        rule.id === "professional_fees" &&
+        /staff\s+meetings?|pension|profit[\s-]*sharing|dues\s*&\s*subscriptions?/i.test(repaired)
+      ) {
+        continue;
+      }
+      if (rule.id === "rent" && /gross\s+rent|rental\s+real\s+estate|net\s+rental/i.test(repaired + line)) {
+        continue;
+      }
+      if (/payment|instruction|banking\s+information|apply for/i.test(line) && rule.id === "bank_credit_card") {
+        continue;
+      }
       const amount = tailFromLine(line, rule.amount);
       if (amount === undefined) continue;
+      if (isEinOrPaymentInstructionBleed(line, amount)) continue;
       const rounded = Math.round(amount);
+      if (!inStmt2 && (rounded >= 500_000 || rounded < 500)) continue;
       const cur = out.values[rule.id];
       if (cur === undefined) {
         out.values[rule.id] = rounded;
         out.confidence[rule.id] = 92;
         out.sources[rule.id] = source;
-      } else if (rule.id === "utilities" && Math.abs(rounded) > Math.abs(cur)) {
+      } else if (
+        (rule.id === "utilities" ||
+          rule.id === "professional_fees" ||
+          rule.id === "bank_credit_card") &&
+        Math.abs(rounded) > Math.abs(cur)
+      ) {
         out.values[rule.id] = rounded;
         out.confidence[rule.id] = 92;
         out.sources[rule.id] = source;
       }
     }
   };
+
+  let inStmt2 = false;
+  let inFederalExpenseTable = false;
+  let otherDeductionSum = 0;
+  let stmt2Total: number | undefined;
 
   const accumulateOther = (line: string) => {
     if (!inStmt2) return;
@@ -636,6 +1147,13 @@ export function extractStatementDeductions(text: string): FieldExtraction {
     if (/\bamortization\b/i.test(line) && !/accumulated/i.test(line)) return;
     if (/\bdepreciation\b/i.test(line) && !/accumulated/i.test(line)) return;
     if (!/[a-z]{3,}/i.test(line)) return;
+    if (
+      /\b(taxable business income|enterprise zone|bond credit|credit from form|indiana corporate|electronically filed|fein number|omb no|check the box for the tax return|officer's signature|reserved for future)\b/i.test(
+        line,
+      )
+    ) {
+      return;
+    }
     const amount = statementLineAmount(line);
     if (amount === undefined || !isReasonableMoneyAmount(amount)) return;
     const abs = Math.abs(amount);
@@ -653,26 +1171,44 @@ export function extractStatementDeductions(text: string): FieldExtraction {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
 
-    for (const rule of labelRules) {
-      if (!rule.test.test(line)) continue;
-      const labelAmt = line.match(
-      /(?:professional|utilities|bank|credit\s+card|legal)[^0-9]{0,30}(\d{1,3}(?:,\d{3})+(?:\.\d{2})?)/i,
-    );
-      const amount =
-        labelAmt?.[1] !== undefined
-          ? parseMoney(labelAmt[1])
-          : tailFromLine(line, rule.amount);
-      if (amount === null || amount === undefined) continue;
-      const rounded = Math.round(amount);
-      const cur = out.values[rule.id];
-      if (cur === undefined) {
-        out.values[rule.id] = rounded;
-        out.confidence[rule.id] = 92;
-        out.sources[rule.id] = "Statement 2 / embedded detail";
-      } else if (rule.id === "utilities" && Math.abs(rounded) > Math.abs(cur)) {
-        out.values[rule.id] = rounded;
-        out.confidence[rule.id] = 92;
-        out.sources[rule.id] = "Statement 2 / embedded detail";
+    const lineIdx = text.indexOf(rawLine);
+    if (lineIdx < 0) continue;
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 600), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+
+    if (isOtherDeductionsBlockHeader(line, recentContext)) {
+      inStmt2 = true;
+      inFederalExpenseTable = false;
+      otherDeductionSum = 0;
+      stmt2Total = undefined;
+    }
+    if (isFederalStatementsExpenseTable(line, recentContext)) {
+      inFederalExpenseTable = true;
+      inStmt2 = true;
+      otherDeductionSum = 0;
+      stmt2Total = undefined;
+    }
+    if (isComparisonWorksheetContext(recentContext)) {
+      inStmt2 = false;
+      inFederalExpenseTable = false;
+    }
+    if (inStmt2 && endsOtherDeductionsBlock(line, recentContext)) {
+      inStmt2 = false;
+      inFederalExpenseTable = false;
+    }
+
+    if (inStmt2) {
+      if (/^total\b/i.test(line)) {
+        const total = statementLineAmount(line);
+        if (total !== undefined && isReasonableMoneyAmount(total)) stmt2Total = total;
+      } else {
+        accumulateOther(line);
+        tryLabelLine(
+          line,
+          inFederalExpenseTable ? "Statement 2 (federal statements table)" : "Statement 2",
+          true,
+        );
       }
     }
   }
@@ -680,24 +1216,15 @@ export function extractStatementDeductions(text: string): FieldExtraction {
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
-
-    if (isOtherDeductionsBlockHeader(line)) {
-      inStmt2 = true;
-      otherDeductionSum = 0;
-      stmt2Total = undefined;
-    }
-    if (inStmt2 && endsOtherDeductionsBlock(line)) inStmt2 = false;
-
-    if (!inStmt2) continue;
-
-    if (/^total\b/i.test(line)) {
-      const total = statementLineAmount(line);
-      if (total !== undefined && isReasonableMoneyAmount(total)) stmt2Total = total;
+    const repaired = repairOcrLabel(line);
+    if (
+      !/(?:professional|utilities|bank\s+charg|credit\s+card\s+charg|merchant)/i.test(repaired) &&
+      !/(?:professional|utilities|bank\s+charg|credit\s+card\s+charg|merchant)/i.test(line)
+    ) {
       continue;
     }
-
-    accumulateOther(line);
-    applyLine(line, "Statement 2");
+    if (!statementLineAmount(line)) continue;
+    tryLabelLine(line, "Statement 2 (document-wide label scan)", false);
   }
 
   const stmt2Scan = stmt2Total ?? scanStatement2Total(text);
@@ -734,7 +1261,13 @@ export function extractStatementDeductions(text: string): FieldExtraction {
 
   if (otherDeductionSum > 0 && out.values.other_operating_expenses === undefined) {
     let opex = otherDeductionSum;
-    const globalStmt2 = scanStatement2Total(text);
+    const formKind = detectTaxForm(text).kind;
+    const globalStmt2 =
+      scanStatement2Total(text) ??
+      scanFormLine20OtherDeductionsTotal(text, formKind) ??
+      (/u\.s\.\s+corporation\s+income\s+tax\s+return/i.test(text)
+        ? scanFormLine20OtherDeductionsTotal(text, "1120")
+        : undefined);
     const stmtCap = stmt2Total ?? globalStmt2;
     if (stmtCap !== undefined) {
       const primary =
@@ -744,6 +1277,21 @@ export function extractStatementDeductions(text: string): FieldExtraction {
       const cap = stmtCap - primary;
       if (cap > 0 && opex > cap * 1.05) opex = cap;
       if (opex >= stmtCap * 0.8 || cap < 1000) {
+        opex = 0;
+      }
+    }
+    if (opex >= 1000 && isReasonableMoneyAmount(opex)) {
+      const plausibilityCtx = {
+        stmt2Total: stmtCap,
+        knownStmt2Lines:
+          (out.values.bank_credit_card ?? 0) +
+          (out.values.professional_fees ?? 0) +
+          (out.values.utilities ?? 0),
+      };
+      if (
+        stmtCap !== undefined &&
+        (opex >= stmtCap * 0.45 || !isPlausibleOtherOperatingExpense(Math.round(opex), plausibilityCtx))
+      ) {
         opex = 0;
       }
     }
@@ -789,7 +1337,7 @@ export function extractStatementTaxesSplit(text: string): FieldExtraction {
 
     if (
       /taxes\s+and\s+licenses/i.test(line) &&
-      (/statement\s*2|stmt\s*2|line\s*12|line\s*17/i.test(line) ||
+      (/statement\s*[12]|stmt\s*[12]|line\s*12|line\s*17/i.test(line) ||
         (inTaxesBlock && /payroll|sales\s+and\s+use|based\s+on\s+income/i.test(line)))
     ) {
       if (!inTaxesBlock) {
@@ -833,7 +1381,7 @@ export function extractStatementTaxesSplit(text: string): FieldExtraction {
   out.confidence.taxes_licenses = 96;
   out.sources.taxes_licenses = "Statement 2 taxes (payroll/sales portion)";
 
-  if (paidSum > 0 && (stateIncomeLines >= 2 || sawPriorYears)) {
+  if (paidSum > 0 && stateIncomeLines >= 1) {
     out.values.taxes_paid = Math.round(paidSum);
     out.confidence.taxes_paid = 96;
     out.sources.taxes_paid = "Statement 2 taxes (state income tax portion)";

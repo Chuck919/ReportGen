@@ -182,63 +182,76 @@ export function extractForm1120Anchors(text: string): FieldExtraction {
   return extractFormAnchors(text, "1120-s");
 }
 
+function isComparisonWorksheetLine(line: string, text: string, lineIdx: number): boolean {
+  const ctx = text.slice(Math.max(0, lineIdx - 800), lineIdx + line.length + 200);
+  return /two\s*year\s*comparison|comparison\s+worksheet|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i.test(
+    ctx,
+  );
+}
+
 function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): FieldExtraction {
   const out: FieldExtraction = { values: {}, confidence: {}, sources: {} };
   const inventoryCandidates: number[] = [];
 
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
+    const lineIdx = text.indexOf(rawLine);
     if (!line || isHistoricalGrossReceiptsLine(line)) continue;
+    if (isComparisonWorksheetLine(line, text, lineIdx >= 0 ? lineIdx : 0)) continue;
     if (/form 1120/i.test(line) && !/schedule\s*l|stmt\s*\d|statement\s*\d/i.test(line)) continue;
+
+    const salesSource =
+      formKind === "1120" ? "Form 1120 line 1c" : "Form 1120-S line 1c";
+    const cogsSource = formKind === "1120" ? "Form 1120 line 2" : "Form 1120-S line 2";
 
     if (
       /\[1c\b|\[1c[\]| ]|gross receipts or sales|\b1a\b.*gross|\bgoss\s+(rece|csr|receipts)|balance.*subtract.*line\s*1b.*line\s*1[ac]/i.test(
         line,
       )
     ) {
-      setField(out, "sales", salesFromLine(line), "Form 1120-S line 1c");
+      setField(out, "sales", salesFromLine(line), salesSource);
     }
     if ((isForm1120Line(line, 2) || /\[\s*2\s*\]/i.test(line)) && isCogsLine(line) && !/gross profit/i.test(line)) {
       const cogs = formLineAmount(line, "2");
-      if (cogs !== undefined) setField(out, "cogs", cogs, "Form 1120-S line 2");
+      if (cogs !== undefined) setField(out, "cogs", cogs, cogsSource);
     }
-    if (isForm1120Line(line, 7) && /compensation of officers/i.test(line)) {
-      const amt = scheduleLineAmount(line) ?? lineTailAmount(line);
-      if (amt !== undefined && substantialMoneyTokens(line).length > 0) {
-        setField(out, "officer_compensation", amt, "Form 1120-S line 7");
+    if (formKind === "1120-s" || formKind === "1065") {
+      if (isForm1120Line(line, 7) && /compensation of officers/i.test(line)) {
+        const amt = scheduleLineAmount(line) ?? lineTailAmount(line);
+        if (amt !== undefined && substantialMoneyTokens(line).length > 0) {
+          setField(out, "officer_compensation", amt, "Form 1120-S line 7");
+        }
       }
-    }
-    if (isForm1120Line(line, 8) && /salaries and wages/i.test(line)) {
-      setField(out, "salaries_wages", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 8");
-    }
-    if (
-      isForm1120Line(line, 11) &&
-      (/\brents?\b/i.test(line) || /\brens\b/i.test(line) || /\brent\b/i.test(line))
-    ) {
-      setField(out, "rent", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 11");
-    }
-    if (isForm1120Line(line, 12) && /taxes\s*and\s*lic/i.test(line)) {
-      setField(out, "taxes_licenses", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 12");
-    }
-    if (
-      isForm1120Line(line, 13) &&
-      /interest/i.test(line) &&
-      !/interest\s+income|investment|tax-exempt|business interest/i.test(line)
-    ) {
-      setField(out, "interest_expense", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 13");
-    }
-    if (isForm1120Line(line, 14) && /depreciation/i.test(line) && !/accum|schedule\s*l|post-1986/i.test(line)) {
-      const dep = scheduleLineAmount(line);
-      if (dep !== undefined && (Math.abs(dep) > 99 || substantialMoneyTokens(line).length)) {
-        setField(out, "depreciation", dep, "Form 1120-S line 14");
-      } else if (!substantialMoneyTokens(line).length) setField(out, "depreciation", 0, "Form 1120-S line 14", 96);
-    }
-    if (
-      (formKind === "1120-s" || formKind === "1065") &&
-      /(\b16\b|\[16\b)/i.test(line) &&
-      /advertis/i.test(line)
-    ) {
-      setField(out, "advertising", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 16");
+      if (isForm1120Line(line, 8) && /salaries and wages/i.test(line)) {
+        setField(out, "salaries_wages", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 8");
+      }
+      if (
+        isForm1120Line(line, 11) &&
+        (/\brents?\b/i.test(line) || /\brens\b/i.test(line) || /\brent\b/i.test(line))
+      ) {
+        setField(out, "rent", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 11");
+      }
+      if (isForm1120Line(line, 12) && /taxes\s*and\s*lic/i.test(line)) {
+        setField(out, "taxes_licenses", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 12");
+      }
+      if (
+        isForm1120Line(line, 13) &&
+        /interest/i.test(line) &&
+        !/interest\s+income|investment|tax-exempt|business interest/i.test(line)
+      ) {
+        setField(out, "interest_expense", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 13");
+      }
+      if (isForm1120Line(line, 14) && /depreciation/i.test(line) && !/accum|schedule\s*l|post-1986/i.test(line)) {
+        const dep = scheduleLineAmount(line);
+        if (dep !== undefined && (Math.abs(dep) > 99 || substantialMoneyTokens(line).length)) {
+          setField(out, "depreciation", dep, "Form 1120-S line 14");
+        } else if (!substantialMoneyTokens(line).length) {
+          setField(out, "depreciation", 0, "Form 1120-S line 14", 96);
+        }
+      }
+      if (/(\b16\b|\[16\b)/i.test(line) && /advertis/i.test(line)) {
+        setField(out, "advertising", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 16");
+      }
     }
     if (formKind === "1120" || formKind === "unknown") {
       if (isForm1120Line(line, 12) && /compensation of officers/i.test(line)) {
@@ -399,7 +412,7 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
       if (isForm1120Line(line, 17) && /taxes\s*and\s*lic/i.test(line)) {
         setField(out, "taxes_licenses", formLineAmount(line, "17") ?? scheduleLineAmount(line), "Form 1120 line 17 (page 1 block)", 99);
       }
-      if (isForm1120Line(line, 16) && /\brents?\b/i.test(line)) {
+      if (isForm1120Line(line, 16) && /\brents?\b/i.test(line) && !/gross\s+profit|total\s+income/i.test(line)) {
         setField(out, "rent", formLineAmount(line, "16") ?? scheduleLineAmount(line), "Form 1120 line 16 (page 1 block)", 99);
       }
       if (isForm1120Line(line, 18) && /interest/i.test(line) && !/investment/i.test(line)) {
@@ -625,15 +638,18 @@ function scanFormLine5OtherIncome(block: string): number | undefined {
   return undefined;
 }
 
-/** Form 1120-S line 19/20 — Stmt 2 attachment total (sum of all other deduction detail). */
+/** Form line Stmt 2 attachment total — 1120-S line 19/20, 1120 line 26. */
 export function scanFormLine20OtherDeductionsTotal(text: string, kind?: TaxFormKind): number | undefined {
   const formPage1 = extractFormPage1Block(text, kind);
-  const lineNums = kind === "1120-s" ? ["19", "20"] : ["20"];
+  const lineNums =
+    kind === "1120-s" ? [19, 20] : kind === "1120" ? [26] : [19, 20, 26];
+  const lineNumPattern =
+    kind === "1120-s" ? /\b(?:19|20)\b/i : kind === "1120" ? /\b(?:26)\b/i : /\b(?:19|20|26)\b/i;
   for (const rawLine of formPage1.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!/other\s+deduct/i.test(line)) continue;
     const matchesLine = lineNums.some((n) => isForm1120Line(line, n));
-    if (!matchesLine && !/\b(?:19|20)\b/i.test(line)) continue;
+    if (!matchesLine && !lineNumPattern.test(line)) continue;
     const tokens = substantialMoneyTokens(line).filter((n) => Math.abs(n) >= 5000);
     if (tokens.length) return Math.round(Math.max(...tokens.map(Math.abs)));
     const amt = scheduleLineAmount(line) ?? lineTailAmount(line);
@@ -641,11 +657,60 @@ export function scanFormLine20OtherDeductionsTotal(text: string, kind?: TaxFormK
   }
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!/\b(?:19|20)\b/i.test(line) || !/other\s+deduct/i.test(line) || !/stmt\s*2|statement\s*2|attach/i.test(line)) {
+    if (
+      !/\b(?:19|20|26)\b/i.test(line) ||
+      !/other\s+deduct/i.test(line) ||
+      !/stmt\s*2|statement\s*2|attach|see\s+stmt/i.test(line)
+    ) {
       continue;
     }
+    if (/two\s*year\s*comparison|comparison\s+worksheet/i.test(line)) continue;
     const tokens = substantialMoneyTokens(line).filter((n) => Math.abs(n) >= 5000);
     if (tokens.length) return Math.round(Math.max(...tokens.map(Math.abs)));
+  }
+  return undefined;
+}
+
+/** Best-effort Stmt 2 form-line total — tries detected kind and cross-kind fallbacks. */
+export function scanFormLineOtherDeductionsTotalBest(text: string, kind?: TaxFormKind): number | undefined {
+  const detected = kind ?? detectTaxForm(text).kind;
+  const candidates = [
+    scanFormLine20OtherDeductionsTotal(text, detected),
+    detected !== "1120" ? scanFormLine20OtherDeductionsTotal(text, "1120") : undefined,
+    detected !== "1120-s" ? scanFormLine20OtherDeductionsTotal(text, "1120-s") : undefined,
+  ].filter((n): n is number => n !== undefined);
+  if (!candidates.length) return undefined;
+  if (candidates.length === 1) return candidates[0];
+  if (/u\.s\.\s+corporation\s+income\s+tax\s+return/i.test(text)) {
+    const corp = scanFormLine20OtherDeductionsTotal(text, "1120");
+    if (corp !== undefined) return corp;
+  }
+  return Math.min(...candidates);
+}
+
+/** Form page 1 rents line — authoritative over inflated comparison worksheet rent. */
+export function scanFormPageRent(text: string, formKind?: TaxFormKind): number | undefined {
+  const detected = formKind ?? detectTaxForm(text).kind;
+  const kinds: TaxFormKind[] =
+    detected === "unknown"
+      ? ["1120", "1120-s", "1065"]
+      : detected === "1120"
+        ? ["1120", "1120-s"]
+        : [detected, "1120", "1120-s"];
+  for (const kind of kinds) {
+    const block = extractFormPage1Block(text, kind);
+    for (const rawLine of block.split(/\n/)) {
+      const line = rawLine.replace(/\s+/g, " ").trim();
+      if (!/\brents?\b/i.test(line) || /gross\s+rent/i.test(line)) continue;
+      if (kind === "1120" && isForm1120Line(line, 16)) {
+        const amt = formLineAmount(line, "16") ?? scheduleLineAmount(line) ?? lineTailAmount(line);
+        if (amt !== undefined && Math.abs(amt) >= 10_000) return Math.round(Math.abs(amt));
+      }
+      if ((kind === "1120-s" || kind === "1065") && isForm1120Line(line, 11)) {
+        const amt = formLineAmount(line, "11") ?? scheduleLineAmount(line) ?? lineTailAmount(line);
+        if (amt !== undefined && Math.abs(amt) >= 10_000) return Math.round(Math.abs(amt));
+      }
+    }
   }
   return undefined;
 }

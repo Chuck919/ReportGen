@@ -67,10 +67,10 @@ export function defaultOcrMode(): OcrMode {
 export function estimateOcrDurationMs(mode: OcrMode, fileCount = 1): number {
   const perFile =
     mode === "fast" || mode === "vercel-fast"
-      ? 2 * 60_000
+      ? 90_000
       : mode === "thorough" || mode === "vercel-thorough"
-        ? 9 * 60_000
-        : 4.5 * 60_000;
+        ? 8 * 60_000
+        : 5 * 60_000;
   return perFile * Math.max(fileCount, 1);
 }
 

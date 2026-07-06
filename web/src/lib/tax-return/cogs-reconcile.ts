@@ -42,18 +42,17 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
       }
     }
 
-    if (
-      formConfidence >= 96 &&
-      sales !== undefined &&
-      sales > 0 &&
-      comparisonCogs / sales > 0.5 &&
-      formCogs / sales < 0.45
-    ) {
-      return {
-        value: formCogs,
-        confidence: formConfidence,
-        source: formSource,
-      };
+    // Form line 2 can OCR to a tiny fraction of sales while comparison has the real COGS row.
+    if (sales !== undefined && sales > 0) {
+      const formRatio = formCogs / sales;
+      const compRatio = comparisonCogs / sales;
+      if (formRatio < 0.08 && compRatio >= 0.12 && compRatio <= 0.95) {
+        return {
+          value: comparisonCogs,
+          confidence: input.comparisonConfidence ?? 92,
+          source: "Two-year comparison (COGS row — form line 2 implausibly low)",
+        };
+      }
     }
 
     return {

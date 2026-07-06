@@ -25,6 +25,8 @@
     "test:benchmark-excel": "npx --yes tsx scripts/test-benchmark-excel-paste.ts",
     "test:income-dep-amort": "npx --yes tsx scripts/test-income-dep-amort.ts",
     "test:excel-paste": "npx --yes tsx scripts/test-excel-paste-alignment.ts",
+    "benchmark:ui-session": "npx --yes tsx scripts/benchmark-ui-session.ts",
+    "benchmark:ui-session:all": "npx --yes tsx scripts/benchmark-ui-session-all-modes.ts",
     "test:pipeline": "npx --yes tsx scripts/test-pipeline-e2e.ts",
     "test:prod-api": "npx --yes tsx scripts/test-prod-api.ts",
     "benchmark:multipass": "npx --yes tsx scripts/benchmark-multipass-matrix.ts",

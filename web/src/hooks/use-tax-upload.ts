@@ -10,7 +10,7 @@ import { detectDuplicateYears, summarizeReupload } from "@/lib/tax/parse-quality
 import { clearTaxColumnsStorage, loadTaxSession, saveTaxColumns, saveTaxProgress } from "@/lib/tax/session-storage";
 import { validateClientFileList } from "@/lib/tax/validate-upload";
 import { isVercelDeploy } from "@/lib/tax/ocr-modes";
-import { applyUserFieldCorrection } from "@/lib/tax/apply-user-correction";
+import { applyUserFieldCorrection, applyUserFieldVerification } from "@/lib/tax/apply-user-correction";
 import type { TaxYearValues } from "@/lib/tax-workbook";
 
 function mergeQueuedFiles(existing: File[], incoming: File[]): File[] {
@@ -41,16 +41,11 @@ export function useTaxUpload() {
     const session = loadTaxSession();
     if (session.columns.length) setColumns(finalizeTaxColumns(session.columns));
     if (session.clientName) setClientName(session.clientName);
-    if (session.busy) {
-      setBusy(session.busy);
-      setProgressLabel(session.progressLabel ?? "");
-      setProgressPercent(session.progressPercent);
-      setProgressHint(session.progressHint);
-      setError(session.error ?? "");
-      if (session.batchWarnings?.length) setBatchWarnings(session.batchWarnings);
-      if (session.fileErrors?.length) setFileErrors(session.fileErrors);
-      if (session.partial) setPartial(session.partial);
-    }
+    // Never restore busy — in-flight fetches do not survive reload/HMR.
+    if (session.batchWarnings?.length) setBatchWarnings(session.batchWarnings);
+    if (session.fileErrors?.length) setFileErrors(session.fileErrors);
+    if (session.partial) setPartial(session.partial);
+    if (session.error) setError(session.error);
     setHydrated(true);
   }, []);
 
@@ -127,9 +122,19 @@ export function useTaxUpload() {
     setFileErrors([]);
     setPartial(false);
     setBusy(true);
+    // Fresh timer for this run (survives tab switches via sessionStorage).
+    try {
+      sessionStorage.removeItem("reportgen-tax-parse-started-at");
+      sessionStorage.removeItem("reportgen-tax-parse-last-elapsed-ms");
+      sessionStorage.setItem("reportgen-tax-parse-started-at", String(Date.now()));
+    } catch {
+      /* ignore */
+    }
 
     const list = [...queuedFiles];
     const existingYears = columns.map((c) => c.year);
+    // Snapshot base columns so progressive merges do not race the final merge.
+    const baseColumns = columns;
 
     try {
       const json = await parseTaxReturnFiles(
@@ -137,6 +142,7 @@ export function useTaxUpload() {
         {
           ocrMode,
           onTierParsed: (row) => {
+            // Accumulate only — UI hides workbook until busy clears.
             setColumns((prev) => {
               const { columns: merged, warnings } = mergeParsedTaxYears(prev, [row]);
               if (warnings.length) setBatchWarnings((w) => [...w, ...warnings]);
@@ -152,7 +158,7 @@ export function useTaxUpload() {
         },
       );
 
-      const { columns: merged, warnings: clientWarnings } = mergeParsedTaxYears(columns, json.parsed);
+      const { columns: merged, warnings: clientWarnings } = mergeParsedTaxYears(baseColumns, json.parsed);
       setColumns(finalizeTaxColumns(merged));
       if (merged[0]?.clientName) setClientName(merged[0].clientName);
       setFileErrors(json.fileErrors ?? []);
@@ -195,6 +201,29 @@ export function useTaxUpload() {
     );
   }, []);
 
+  const verifyField = useCallback((year: number, fieldId: string, verified: boolean) => {
+    setColumns((prev) =>
+      finalizeTaxColumns(
+        prev.map((col) =>
+          col.year === year ? applyUserFieldVerification(col, fieldId, verified) : col,
+        ),
+      ),
+    );
+  }, []);
+
+  const updateOpexSlotLabel = useCallback((slotId: string, label: string) => {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    setColumns((prev) =>
+      finalizeTaxColumns(
+        prev.map((col) => ({
+          ...col,
+          userOpexSlotLabels: { ...(col.userOpexSlotLabels ?? {}), [slotId]: trimmed },
+        })),
+      ),
+    );
+  }, []);
+
   return useMemo(
     () => ({
       columns,
@@ -219,6 +248,8 @@ export function useTaxUpload() {
       startParse,
       clearAll,
       updateField,
+      verifyField,
+      updateOpexSlotLabel,
     }),
     [
       columns,
@@ -242,6 +273,8 @@ export function useTaxUpload() {
       startParse,
       clearAll,
       updateField,
+      verifyField,
+      updateOpexSlotLabel,
     ],
   );
 }

@@ -3,20 +3,30 @@ import { lineMoneyTokens, parseMoney, scheduleLineAmount, substantialMoneyTokens
 
 const STMT_AUTH_CONF = 99;
 
-/** Schedule L line 22 — prefer end column; skip garbled leading amounts before a small end column. */
+const NOMINAL_PAR_AMOUNTS = new Set([100, 500, 1000, 5000, 10_000]);
+
+/** Schedule L line 22 — prefer end-column nominal par ($100) over garbled begin-column OCR. */
 function scheduleLCapitalStockAmount(line: string): number | undefined {
+  // KCF OCR often ends with "100" (par value). Prefer that over "1 300 00]" junk.
+  const nums = lineMoneyTokens(line);
+  if (nums.length) {
+    const end = Math.round(Math.abs(nums[nums.length - 1]!));
+    if (NOMINAL_PAR_AMOUNTS.has(end)) return end;
+  }
+  const trail = line.match(/(?:^|[\s|\]}])(100|500|1,?000|5,?000|10,?000)\s*$/i);
+  if (trail) return Number(trail[1]!.replace(/,/g, ""));
+
   const pipeIdx = line.indexOf("|");
   if (pipeIdx >= 0) {
     const endPart = line.slice(pipeIdx + 1);
     const endNums = lineMoneyTokens(endPart);
     if (endNums.length) {
       const end = endNums[endNums.length - 1]!;
-      if (end < 1000) return undefined;
+      if (end < 100) return undefined;
       return end;
     }
   }
 
-  const nums = lineMoneyTokens(line);
   if (nums.length >= 2) {
     const end = nums[nums.length - 1]!;
     const maxOther = Math.max(...nums.slice(0, -1).map(Math.abs));
@@ -460,10 +470,19 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     if (!totalLine) continue;
     const nums = lineMoneyTokens(totalLine);
     const endTotal = nums.length >= 2 ? nums[nums.length - 1] : scheduleLineAmount(totalLine);
-    if (endTotal !== undefined) {
-      setStmtTotal(out, "other_current_liabilities", endTotal, "Statement (Line 18) total");
-      break;
+    if (endTotal === undefined) continue;
+    const schedLOcl = out.values.other_current_liabilities;
+    const schedSrc = out.sources.other_current_liabilities ?? "";
+    if (schedLOcl !== undefined && schedLOcl < 1_000 && endTotal < 40_000) continue;
+    if (
+      schedLOcl !== undefined &&
+      /schedule\s+l\s+line\s*18/i.test(schedSrc) &&
+      Math.abs(endTotal - schedLOcl) / Math.max(schedLOcl, 1) > 0.15
+    ) {
+      continue;
     }
+    setStmtTotal(out, "other_current_liabilities", endTotal, "Statement (Line 18) total");
+    break;
   }
 
   let best14: { value: number; score: number } | undefined;
@@ -522,7 +541,10 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       const nums = lineMoneyTokens(totalLine);
       const endTotal = nums.length >= 2 ? nums[nums.length - 1] : scheduleLineAmount(totalLine);
       if (endTotal !== undefined) {
-        setStmtTotal(out, "other_current_liabilities", endTotal, "Statement 5 total");
+        const schedLOcl = out.values.other_current_liabilities;
+        if (!(schedLOcl !== undefined && schedLOcl < 1_000 && endTotal < 40_000)) {
+          setStmtTotal(out, "other_current_liabilities", endTotal, "Statement 5 total");
+        }
       }
     }
   }
@@ -536,8 +558,13 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       if (totalLine) {
         const nums = lineMoneyTokens(totalLine);
         const endTotal = nums.length >= 2 ? nums[nums.length - 1] : scheduleLineAmount(totalLine);
-        if (endTotal !== undefined && endTotal >= 10_000) {
-          setStmtTotal(out, "other_current_liabilities", endTotal, "Statement (Line 18) total scan");
+        if (endTotal !== undefined) {
+          const schedLOcl = out.values.other_current_liabilities;
+          if (schedLOcl !== undefined && schedLOcl < 1_000 && endTotal < 40_000) {
+            // skip small statement bleed
+          } else if (endTotal >= 10_000) {
+            setStmtTotal(out, "other_current_liabilities", endTotal, "Statement (Line 18) total scan");
+          }
         }
       }
     }

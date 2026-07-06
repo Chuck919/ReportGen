@@ -65,11 +65,50 @@ function parseForcePages(raw) {
   );
 }
 
+function stmt2HintPagesFromEmbedded(embeddedText) {
+  if (!embeddedText) return [];
+  const pages = new Set();
+  const pageRe = /---\s*EMBEDDED\s+PAGE\s+(\d+)/gi;
+  const markers = [];
+  let m;
+  while ((m = pageRe.exec(embeddedText)) !== null) {
+    markers.push({ page: Number(m[1]), idx: m.index });
+  }
+  if (!markers.length) return [];
+  const findPage = (idx) => {
+    let p = markers[0].page;
+    for (const mk of markers) {
+      if (mk.idx <= idx) p = mk.page;
+      else break;
+    }
+    return p;
+  };
+  const hints = [
+    /federal\s+statements/i,
+    /statement\s*2\s*[-–].*form\s+1120/i,
+    /see\s+stmt\s*2/i,
+    /description\s+amount[\s\S]{0,200}other\s+deduct/i,
+  ];
+  for (const re of hints) {
+    let hit;
+    const r = new RegExp(re.source, re.flags.includes("i") ? re.flags : re.flags + "i");
+    while ((hit = r.exec(embeddedText)) !== null) {
+      const pg = findPage(hit.index);
+      if (pg > 0) {
+        pages.add(pg);
+        if (pg > 1) pages.add(pg - 1);
+        if (pg < markers[markers.length - 1].page) pages.add(pg + 1);
+      }
+    }
+  }
+  return uniqueSorted(Array.from(pages));
+}
+
 /**
  * @param {number} totalPages
  * @param {object} mode - resolved OCR mode preset
  * @param {'tax'|'benchmark'} profile
- * @param {{ full?: boolean }} options - full=true skips maxPhase2Pages cap (batched OCR plan)
+ * @param {{ full?: boolean, embeddedText?: string }} options
  */
 function planOcrTargets(totalPages, mode, profile, options = {}) {
   let targets;
@@ -77,6 +116,9 @@ function planOcrTargets(totalPages, mode, profile, options = {}) {
     targets = fastHeuristicPages(totalPages);
   } else {
     targets = heuristicPages(totalPages, profile);
+  }
+  if (options.embeddedText) {
+    targets = uniqueSorted([...targets, ...stmt2HintPagesFromEmbedded(options.embeddedText)]);
   }
   if (!options.full) {
     const cap = mode.maxPhase2Pages || 0;
@@ -209,4 +251,5 @@ module.exports = {
   chunkPages,
   pagesForMissingFields,
   planDeltaTargets,
+  stmt2HintPagesFromEmbedded,
 };

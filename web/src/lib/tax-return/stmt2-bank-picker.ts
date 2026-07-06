@@ -71,6 +71,7 @@ export function pickStmt2BankCreditCard(
   const misc = ctx.misc;
 
   const candidates = new Set<number>();
+  const expenseChargeBanks = new Set<number>();
   let inStmt2 = false;
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
@@ -79,22 +80,33 @@ export function pickStmt2BankCreditCard(
       inStmt2 = true;
       continue;
     }
+    if (/federal\s+statements/i.test(line) && /statement\s*2|stmt\s*2/i.test(line)) {
+      inStmt2 = true;
+      continue;
+    }
     if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
-    if (!inStmt2 || !BANK_LABEL.test(line)) continue;
+    if (!inStmt2 || !BANK_LABEL.test(line) || /payable/i.test(line)) continue;
+    const isExpenseCharge = /bank\s+&?\s*credit|bank\s+charg|credit\s+card\s+charg/i.test(line);
     for (const n of bankAmountsOnLine(line)) {
-      if (n < stmt2Total * 0.85) candidates.add(n);
+      if (n >= stmt2Total * 0.85) continue;
+      candidates.add(n);
+      if (isExpenseCharge) expenseChargeBanks.add(n);
     }
   }
 
-  for (const m of misc) {
-    if (m >= 500 && m <= stmt2Total * 0.25) candidates.add(m);
+  if (!expenseChargeBanks.size) {
+    for (const m of misc) {
+      if (m >= 500 && m <= stmt2Total * 0.25) candidates.add(m);
+    }
   }
 
   if (!candidates.size) return undefined;
 
   let best: { bank: number; score: number } | undefined;
   for (const bank of candidates) {
-    const score = scoreBankCandidate(bank, prof, util, stmt2Total, misc);
+    let score = scoreBankCandidate(bank, prof, util, stmt2Total, misc);
+    if (expenseChargeBanks.has(bank)) score += 30;
+    if (bank >= stmt2Total * 0.4 && bank <= stmt2Total * 0.55) score += 15;
     if (!best || score > best.score) best = { bank, score };
   }
   if (!best || best.score < 35) return undefined;

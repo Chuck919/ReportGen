@@ -11,6 +11,7 @@ import { WORKBOOK_COMPARISON_FIXTURES } from "../src/lib/workbook-comparison-fix
 
 const clientId = process.argv[2] ?? "arizona-sun";
 const year = Number(process.argv[3] ?? 2025);
+const ocrMode = (process.argv[4] ?? "balanced") as "balanced" | "thorough" | "fast";
 const client = TAX_BENCHMARK_CLIENTS.find((c) => c.id === clientId)!;
 
 const ALL_FIXTURES = {
@@ -19,13 +20,22 @@ const ALL_FIXTURES = {
 };
 
 async function main() {
-  const pdfPath = await resolveTaxReturnPdf(client.docsDir, year);
+  const pdfPath = await resolveTaxReturnPdf(path.resolve(process.cwd(), client.docsDir), year);
   const embedded = await getEmbeddedPdfText(await readFile(pdfPath));
-  const ocr = await readFile(`scripts/ocr-cache/${clientId}-${year}-thorough.txt`, "utf8").catch(() => "");
+  let ocr = "";
+  try {
+    ocr = await readFile(`scripts/ocr-cache/${clientId}-${year}-${ocrMode}.txt`, "utf8");
+  } catch {
+    try {
+      ocr = await readFile(`scripts/ocr-cache/${year}-${ocrMode}.txt`, "utf8");
+    } catch {
+      ocr = "";
+    }
+  }
 
   let opexDebug: unknown;
   const r = parseTaxReturnFromText(path.basename(pdfPath), embedded, ocr, year, {
-    ocrMode: "thorough",
+    ocrMode,
     parseDebug: { onOpexReconcile: (d) => { opexDebug = d; } },
   });
 

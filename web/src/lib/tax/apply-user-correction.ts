@@ -6,6 +6,8 @@ import {
   syncTaxCorrectionToServer,
 } from "@/lib/tax/correction-storage";
 import { refreshTaxYearVerification } from "@/lib/tax/reconcile-tax-year";
+import { OPERATING_EXPENSE_SLOT_IDS } from "@/lib/tax/operating-expenses";
+import { isFormulaFieldId, snapshotParserFormulaBaseline } from "@/lib/tax/workbook-display";
 import type { TaxYearValues } from "@/lib/tax-workbook";
 import type { OpexCandidate } from "@/lib/tax-return/opex-candidate-ranking";
 
@@ -44,22 +46,35 @@ export function enrichParsedTaxYear(row: ParsedTaxYear): TaxYearValues {
   }
 
   const { filename: _fn, debug: _dbg, parseStatus: _ps, ...col } = row;
+  const parserBaseline = { ...row.values };
   return {
     ...col,
-    parserBaseline: { ...row.values },
+    parserBaseline,
+    parserFormulaBaseline: snapshotParserFormulaBaseline(parserBaseline),
+    parserFieldSources: col.fieldSources ? { ...col.fieldSources } : undefined,
     fieldCandidateOptions: Object.keys(options).length ? options : undefined,
   };
 }
 
-function stampUserConfirmed(col: TaxYearValues, fieldId: string, source: string): TaxYearValues {
+function snapshotParserSources(col: TaxYearValues): Record<string, string> {
+  return { ...(col.parserFieldSources ?? col.fieldSources ?? {}) };
+}
+
+function restoreParserFieldSource(col: TaxYearValues, fieldId: string): TaxYearValues {
+  const parserFieldSources = snapshotParserSources(col);
+  const fieldSources = { ...(col.fieldSources ?? {}) };
+  const restored = parserFieldSources[fieldId];
+  if (restored) fieldSources[fieldId] = restored;
+  else delete fieldSources[fieldId];
+  return { ...col, parserFieldSources, fieldSources };
+}
+
+function withUserVerified(col: TaxYearValues, fieldId: string, source: string): TaxYearValues {
   return {
     ...col,
+    parserFieldSources: snapshotParserSources(col),
     fieldSources: { ...(col.fieldSources ?? {}), [fieldId]: source },
-    confidence: { ...(col.confidence ?? {}), [fieldId]: 100 },
-    displayConfidence: { ...(col.displayConfidence ?? {}), [fieldId]: 100 },
-    fieldStatus: { ...(col.fieldStatus ?? {}), [fieldId]: "verified" },
-    fieldTrustTier: { ...(col.fieldTrustTier ?? {}), [fieldId]: "user-confirmed" },
-    userEditedFields: { ...(col.userEditedFields ?? {}), [fieldId]: true },
+    userVerifiedFields: { ...(col.userVerifiedFields ?? {}), [fieldId]: true },
     fieldFlags: {
       ...(col.fieldFlags ?? {}),
       [fieldId]: (col.fieldFlags?.[fieldId] ?? []).filter(
@@ -78,16 +93,37 @@ export function applyUserFieldCorrection(
   const parserBaseline = col.parserBaseline ?? { ...col.values };
   const parserValue = parserBaseline[fieldId] ?? col.values[fieldId];
   const rounded = Math.round(correctedValue);
+  const formulaField = isFormulaFieldId(fieldId);
 
   let next: TaxYearValues = {
     ...col,
-    values: { ...col.values, [fieldId]: rounded },
     parserBaseline,
     userEditedFields: { ...(col.userEditedFields ?? {}), [fieldId]: true },
+    userVerifiedFields: { ...(col.userVerifiedFields ?? {}), [fieldId]: true },
   };
-  next = stampUserConfirmed(next, fieldId, sourceLabel);
+
+  if (formulaField) {
+    next = {
+      ...next,
+      formulaOverrides: { ...(col.formulaOverrides ?? {}), [fieldId]: rounded },
+    };
+  } else {
+    next = {
+      ...next,
+      values: { ...col.values, [fieldId]: rounded },
+    };
+    if (
+      OPERATING_EXPENSE_SLOT_IDS.includes(fieldId as (typeof OPERATING_EXPENSE_SLOT_IDS)[number]) ||
+      fieldId === "other_operating_expenses"
+    ) {
+      next = {
+        ...next,
+        workbookValues: { ...(col.workbookValues ?? col.values), [fieldId]: rounded },
+      };
+    }
+  }
+  next = withUserVerified(next, fieldId, sourceLabel);
   next = refreshTaxYearVerification(next);
-  next = preserveUserConfirmedFields(next, { ...(col.userEditedFields ?? {}), [fieldId]: true });
 
   const rejected = candidateOptionsForField(col, fieldId).filter((o) => o.value !== rounded);
 
@@ -121,25 +157,23 @@ export function applyUserFieldCorrection(
   return next;
 }
 
-export function preserveUserConfirmedFields(
+/** Mark a field as user-verified without changing its value (or clear verification). */
+export function applyUserFieldVerification(
   col: TaxYearValues,
-  edited?: Record<string, boolean>,
+  fieldId: string,
+  verified: boolean,
 ): TaxYearValues {
-  const flags = edited ?? col.userEditedFields ?? {};
-  if (!Object.keys(flags).length) return col;
-
-  const fieldTrustTier = { ...(col.fieldTrustTier ?? {}) };
-  const fieldStatus = { ...(col.fieldStatus ?? {}) };
-  const displayConfidence = { ...(col.displayConfidence ?? {}) };
-
-  for (const [id, isEdited] of Object.entries(flags)) {
-    if (!isEdited) continue;
-    fieldTrustTier[id] = "user-confirmed";
-    fieldStatus[id] = "verified";
-    displayConfidence[id] = 100;
+  const userVerifiedFields = { ...(col.userVerifiedFields ?? {}) };
+  if (verified) {
+    userVerifiedFields[fieldId] = true;
+    let next: TaxYearValues = { ...col, userVerifiedFields };
+    next = withUserVerified(next, fieldId, "User verified");
+    return refreshTaxYearVerification(next);
   }
 
-  return { ...col, fieldTrustTier, fieldStatus, displayConfidence };
+  userVerifiedFields[fieldId] = false;
+  const next = restoreParserFieldSource({ ...col, userVerifiedFields }, fieldId);
+  return refreshTaxYearVerification(next);
 }
 
 export function parseEditedNumber(raw: string): number | null {

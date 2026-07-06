@@ -5,6 +5,12 @@ import {
   stripEinNoise,
 } from "@/lib/two-year-comparison-parser";
 import {
+  isEinOrPaymentInstructionBleed,
+  lineMatchesLabelPattern,
+  repairOcrLabel,
+  stripOcrLinePrefix,
+} from "./ocr-label-repair";
+import {
   isFormReferenceNumber,
   isHistoricalGrossReceiptsLine,
   leadingScheduleLineNumber,
@@ -105,6 +111,7 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   if (id === "sales" && Math.abs(value) < 1000 && !/receipt|sales|1a|1c/i.test(line)) return true;
   if (id === "cogs" && Math.abs(value) < 10_000) return true;
   if ((id === "sales" || id === "cogs" || id === "rent") && Math.abs(value) <= 1) return true;
+  if (id === "rent" && /gross\s+profit|total\s+income|ordinary\s+income/i.test(line)) return true;
   if (lead !== undefined && Math.abs(value) === lead) return true;
   if (id === "taxes_licenses" && /(\b13\b|\[13\]).*interest/i.test(line)) return true;
   if (
@@ -145,14 +152,18 @@ export function findHitsLineScoped(text: string, baseConfidence: number, targetY
   const hits: ParseHit[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    const rawLine = lines[i]!;
+    const line = stripOcrLinePrefix(rawLine);
     if (isIbisNoise(line) || isHistoricalGrossReceiptsLine(line) || /\d\s*%/.test(line)) continue;
 
     const continuation = lines[i + 1] ?? "";
-    const chunk = continuation && !/\d\s*%/.test(continuation) ? `${line} ${continuation}`.slice(0, 520) : line.slice(0, 520);
+    const chunk =
+      continuation && !/\d\s*%/.test(continuation)
+        ? `${line} ${stripOcrLinePrefix(continuation)}`.slice(0, 520)
+        : line.slice(0, 520);
 
     for (const { id, pattern } of LABEL_PATTERNS) {
-      if (!INPUT_ROW_IDS.has(id) || !pattern.test(line)) continue;
+      if (!INPUT_ROW_IDS.has(id) || !lineMatchesLabelPattern(line, pattern)) continue;
       if (id === "cash" && /cash\s*flow/i.test(line)) continue;
 
       const nums: number[] = [];
@@ -169,7 +180,12 @@ export function findHitsLineScoped(text: string, baseConfidence: number, targetY
       const pair = shrinkToYearColumns(nums);
       const value = pair ? pair[col] : nums[nums.length - 1];
 
-      hits.push({ id, value, confidence: Math.max(1, Math.min(99, baseConfidence)), evidence: line.slice(0, 220) });
+      hits.push({
+        id,
+        value,
+        confidence: Math.max(1, Math.min(99, baseConfidence)),
+        evidence: repairOcrLabel(line).slice(0, 220) || line.slice(0, 220),
+      });
     }
   }
   return hits;
@@ -245,7 +261,17 @@ export function resolveHits(
       continue;
     }
 
-    const pick = pickConsensus(candidates);
+    const maxAmountFields = new Set(["professional_fees", "utilities", "bank_credit_card"]);
+    const pick =
+      maxAmountFields.has(row.id) && candidates.length > 1
+        ? (() => {
+            const best = candidates.reduce((a, b) => (Math.abs(b.value) > Math.abs(a.value) ? b : a));
+            const matching = candidates.filter(
+              (h) => Math.abs(h.value - best.value) <= Math.max(2, Math.abs(best.value) * 0.01),
+            );
+            return { value: best.value, matching: matching.length ? matching : [best] };
+          })()
+        : pickConsensus(candidates);
     if (!pick) continue;
 
     const avg = pick.matching.reduce((s, h) => s + h.confidence, 0) / pick.matching.length;

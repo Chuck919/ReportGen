@@ -12,6 +12,7 @@ import { FileDropzone } from "@/components/ui/FileDropzone";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { Button } from "@/components/ui/Button";
 import { OcrModeSelector } from "./OcrModeSelector";
+import { formatElapsed } from "@/lib/ui/format-elapsed";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -132,6 +133,15 @@ export function TaxUploadPanel({
         <div className="mt-5">
           <ProgressBar label={progressLabel} elapsedMs={elapsedMs} percent={progressPercent} hint={progressHint} />
         </div>
+      )}
+
+      {!busy && elapsedMs > 0 && (
+        <p className="mt-4 text-sm text-stone-600">
+          Last extraction finished in{" "}
+          <span className="font-medium tabular-nums text-stone-900">
+            {formatElapsed(elapsedMs)}
+          </span>
+        </p>
       )}
 
       {(queueError || error) && (

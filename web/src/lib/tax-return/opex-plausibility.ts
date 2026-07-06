@@ -43,18 +43,20 @@ function closesStmt2Total(value: number, ctx: OpexContext): boolean {
   return Math.abs(known + value - ctx.stmt2Total) <= closureTolerance(ctx.stmt2Total);
 }
 
-/** Structural plausibility — no company-specific dollar targets. */
+/** Structural plausibility — percentage-based only (no fixed dollar floors). */
 export function isPlausibleOtherOperatingExpense(value: number, ctx: OpexContext): boolean {
   const abs = Math.abs(Math.round(value));
-  if (abs < 1_000) return false;
-  if (ctx.sales !== undefined && ctx.sales > 0 && abs > ctx.sales * 0.45) return false;
+  if (abs < 0) return false;
+  // Zero other-opex is valid for some returns.
+  if (abs === 0) return true;
+  if (ctx.sales !== undefined && ctx.sales > 0 && abs > ctx.sales * 0.35) return false;
   if (ctx.stmt2Total !== undefined && ctx.stmt2Total > 0 && abs >= ctx.stmt2Total * 0.92) {
     return false;
   }
   // Large opex is valid when it closes Stmt 2 (Arizona-style attachments).
   if (
     ctx.stmt2Total !== undefined &&
-    ctx.stmt2Total >= 100_000 &&
+    ctx.stmt2Total > 0 &&
     abs >= ctx.stmt2Total * 0.4 &&
     !closesStmt2Total(abs, ctx)
   ) {

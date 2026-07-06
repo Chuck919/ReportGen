@@ -6,9 +6,9 @@
  */
 /**
  * Local/VPS tiers (workers=1 for Oracle/Hetzner CPU limits):
- *   fast     — quick preview ~2 min, fewer pages, no hi-DPI
- *   balanced — proven 100% KCF preset (~4 min), promoted from old fast
- *   thorough — max pages + hi-DPI on critical pages only (~6–12 min)
+ *   fast     — embedded text when possible; else few pages, no hi-DPI (~1–3 min)
+ *   balanced — phase1 keyword scan + selective hi-DPI (proven accuracy preset)
+ *   thorough — balanced baseline + hi-DPI only on weak Schedule L / form-1 pages
  */
 const BALANCED_PRESET = {
   label: "Balanced",
@@ -29,6 +29,9 @@ const BALANCED_PRESET = {
   minScoreGain: 1.75,
   skipHiDpiMinConf: 72,
   skipPhase3UnlessCritical: true,
+  // Keep phase1 keyword scan — skipping it regressed live KCF/Arizona accuracy.
+  skipPhase1QuickScan: false,
+  useFastHeuristicPages: false,
   workers: 1,
 };
 
@@ -66,25 +69,26 @@ const MODES = {
   fast: {
     label: "Fast",
     quickScale: 0.4,
-    fullScale: 1.9,
+    fullScale: 1.85,
     hiScale: 3.55,
-    maxPhase2Pages: 18,
-    maxHiDpiPages: 4,
+    maxPhase2Pages: 14,
+    maxHiDpiPages: 0,
     maxVariantsEasy: 0,
     maxVariantsNormal: 1,
-    maxVariantsHeavy: 3,
-    maxHiDpiVariants: 3,
+    maxVariantsHeavy: 2,
+    maxHiDpiVariants: 0,
     easyPageMinConf: 86,
     easyPageMinMoney: 8,
     baselineGoodConf: 74,
     baselineGoodMoney: 5,
     earlyExitStreak: 1,
     minScoreGain: 1.75,
-    skipHiDpiMinConf: 68,
+    skipHiDpiMinConf: 0,
     skipPhase3UnlessCritical: true,
     skipPhase1QuickScan: true,
     useFastHeuristicPages: true,
-    baselineOnly: false,
+    // Prefer baseline OCR; only heavy variants on Schedule L / weak pages.
+    baselineOnly: true,
     workers: 1,
   },
   balanced: { ...BALANCED_PRESET },

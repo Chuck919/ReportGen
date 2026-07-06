@@ -24,7 +24,10 @@ export function detectTaxForm(text: string): TaxFormAnalysis {
     countMatches(t, /form\s+1120-?s\b/g) +
     countMatches(t, /1120-?s\s*\(\d{4}\)/g) +
     (/\bschedule\s+k-?1\b/i.test(t) && /shareholder/i.test(t) ? 2 : 0);
-  if (/s\s+corporation/i.test(t)) s1120s += countMatches(t, /form\s+1120/i);
+  // Comparison worksheets mention 1120-S in passing — do not treat as the filed return type.
+  if (/s\s+corporation/i.test(t) && !/u\.s\.\s+corporation\s+income\s+tax\s+return/i.test(t)) {
+    s1120s += Math.min(1, countMatches(t, /form\s+1120-?s\b/gi));
+  }
   let s1120 =
     countMatches(t, /form\s+1120\b(?!-)/g) +
     countMatches(t, /u\.s\.\s+corporation\s+income\s+tax\s+return/g) +
@@ -74,11 +77,51 @@ export function detectTaxForm(text: string): TaxFormAnalysis {
     s1041 = Math.max(0, s1041 - 3);
   }
 
+  if (/form\s+1120\b/i.test(t) && !/form\s+1120-?s\b/i.test(t) && /u\.s\.\s+corporation\s+income\s+tax\s+return/i.test(t)) {
+    s1120 += 10;
+    s1120s = Math.max(0, s1120s - 8);
+  }
+  if (
+    /form\s+1120\s+return\s+summary/i.test(t) &&
+    /compensation of officers/i.test(t) &&
+    !/form\s+1120-?s\b/i.test(t)
+  ) {
+    s1120 += 8;
+    s1120s = Math.max(0, s1120s - 6);
+  }
+  if (countMatches(t, /form\s+1120\b(?!-)/g) >= 3 && countMatches(t, /form\s+1120-?s\b/g) === 0) {
+    s1120 += 6;
+    s1120s = Math.max(0, s1120s - 4);
+  }
+  if (
+    /two\s*year\s*comparison|comparison\s+worksheet/i.test(t) &&
+    /form\s+1120-?s\b/i.test(t) &&
+    /u\.s\.\s+corporation\s+income\s+tax\s+return/i.test(t)
+  ) {
+    s1120s = Math.max(0, s1120s - 6);
+    s1120 += 4;
+  }
+
+  if (
+    /\b26\b.*other\s+deductions[\s\S]{0,80}attach\s+statement/i.test(t) &&
+    /gross\s+receipts\s+or\s+sales/i.test(t) &&
+    /form\s+1120\b/i.test(t) &&
+    !/form\s+1120-?s\b/i.test(t)
+  ) {
+    s1120 += 12;
+    s1041 = Math.max(0, s1041 - 10);
+    s1120s = Math.max(0, s1120s - 6);
+  }
+  if (/form\s+1041\b/i.test(t) && /form\s+1120\b/i.test(t) && /two\s*year\s*comparison/i.test(t)) {
+    s1041 = Math.max(0, s1041 - 6);
+    s1120 += 5;
+  }
+
   const ranked: Array<{ kind: TaxFormKind; score: number }> = [
-    { kind: "1120-s", score: s1120s },
-    { kind: "1120", score: s1120 - (s1120s > 0 ? 3 : 0) },
-    { kind: "1065", score: s1065 },
-    { kind: "1041", score: s1041 },
+    { kind: "1120-s" as const, score: s1120s },
+    { kind: "1120" as const, score: s1120 - (s1120s > 0 ? 3 : 0) },
+    { kind: "1065" as const, score: s1065 },
+    { kind: "1041" as const, score: s1041 },
   ].sort((a, b) => b.score - a.score);
 
   const top = ranked[0]!;

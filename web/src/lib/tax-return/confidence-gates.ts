@@ -29,7 +29,15 @@ const WEAK_SOURCE =
   /OCR label match|fuzzy|label match/i;
 
 const AUTHORITATIVE_SOURCE =
-  /form 1120|schedule l|statement \d|stmt \d|two-year comparison|embedded schedule|page 1 block/i;
+  /form 1120|schedule l|statement \d|stmt \d|two-year comparison|embedded schedule|page 1 block|P&L reverse math|ordinary income/i;
+
+/** Derived / residual opex — must not paint as green "authoritative" form lines. */
+export function isResidualOpexSource(source?: string): boolean {
+  if (/P&L reverse math|ordinary income/i.test(source ?? "")) return false;
+  return /minus\s+slot|federal\s+table\s+minus|residual|sum\(all\)\s*−|sum\(all\)\s*-|top-8\)|operating expenses residual/i.test(
+    source ?? "",
+  );
+}
 
 export type ConfidenceGateOptions = {
   ocrMode?: OcrMode;
@@ -41,6 +49,7 @@ export function isWeakSource(source?: string): boolean {
 }
 
 export function isAuthoritativeSource(source?: string): boolean {
+  if (isResidualOpexSource(source)) return false;
   return AUTHORITATIVE_SOURCE.test(source ?? "");
 }
 
@@ -61,6 +70,20 @@ export function isSuspiciousTaxValue(
   if (id === "sales" && abs < 1_000) return true;
   if (id === "rent" && abs < 500) return true;
   if (id === "depreciation" && abs > 0 && abs < 100 && !isAuthoritativeSource(source)) return true;
+  /** Form line number misread as interest dollars (e.g. line 13 → $13, line 113 → $113). */
+  if (id === "interest_expense" && abs > 0 && abs <= 999) {
+    if (abs <= 50) return true;
+    const lineRef = source?.match(/\bline\s*(\d{1,3})\b/i);
+    if (lineRef && abs === Number(lineRef[1])) return true;
+    if (/^\s*\d{1,3}\s+interest/i.test(source ?? "")) return true;
+  }
+  /** "Post-1986 depreciation adjustment" OCR — year 1986 read as dollars. */
+  if (
+    (id === "depreciation" || id === "amortization") &&
+    (abs === 1986 || abs === 1987 || /post[-\s]?1986|1986\s+depreciation\s+adjustment/i.test(source ?? ""))
+  ) {
+    return true;
+  }
   if (id === "amortization" && abs > 0 && abs < 500) return true;
   if (id === "amortization" && abs > 100_000) return true;
   if (id === "depreciation" && abs > 500_000) return true;
@@ -135,11 +158,35 @@ export function applyConfidenceGates(resolved: ResolvedFields, options: Confiden
       continue;
     }
 
-    if (strict && (suspicious || weak) && !isAuthoritativeSource(source)) {
+    if (
+      (id === "depreciation" || id === "amortization") &&
+      suspicious &&
+      (Math.abs(Math.round(value)) === 1986 ||
+        Math.abs(Math.round(value)) === 1987 ||
+        /post[-\s]?1986/i.test(source ?? ""))
+    ) {
       delete resolved.values[id];
       delete resolved.confidence[id];
       delete resolved.sources[id];
-      resolved.warnings.push(`Thorough: cleared low-trust ${id} (${value})`);
+      resolved.warnings.push(`Cleared ${id}=${value} (Post-1986 adjustment OCR trap)`);
+      continue;
+    }
+
+    if (id === "interest_expense" && suspicious && Math.abs(Math.round(value)) <= 999) {
+      delete resolved.values[id];
+      delete resolved.confidence[id];
+      delete resolved.sources[id];
+      resolved.warnings.push(`Cleared ${id}=${value} (likely Form line number, not dollars)`);
+      continue;
+    }
+
+    if (strict && (suspicious || weak) && !isAuthoritativeSource(source)) {
+      // Cap confidence only — clearing made thorough worse than balanced on live OCR.
+      const cappedStrict = Math.min(conf, SUSPICIOUS_CONF_CAP);
+      if (cappedStrict < conf) {
+        resolved.confidence[id] = cappedStrict;
+        resolved.warnings.push(`Thorough: low-trust ${id}=${value} (confidence ${conf}→${cappedStrict})`);
+      }
       continue;
     }
 

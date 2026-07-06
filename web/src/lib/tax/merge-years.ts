@@ -2,6 +2,8 @@ import type { TaxYearValues } from "@/lib/tax-workbook";
 import { TAX_WORKBOOK_ROWS } from "@/lib/tax-workbook";
 import { applyCrossYearFlags } from "@/lib/tax/cross-year-reconcile";
 import { refreshTaxYearVerification } from "@/lib/tax/reconcile-tax-year";
+import { alignOperatingExpensesAcrossYears } from "@/lib/tax/operating-expenses";
+import { snapshotParserFormulaBaseline } from "@/lib/tax/workbook-display";
 
 const INPUT_IDS = new Set(
   TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id),
@@ -37,9 +39,17 @@ function applyCrossYearComparisonBackfill(columns: TaxYearValues[]): TaxYearValu
 }
 
 export function finalizeTaxColumns(columns: TaxYearValues[]): TaxYearValues[] {
-  return applyCrossYearFlags(
-    applyCrossYearComparisonBackfill(columns).map(refreshTaxYearVerification),
-  );
+  let cols: TaxYearValues[] = applyCrossYearComparisonBackfill(columns).map((col) => {
+    const refreshed = refreshTaxYearVerification(col);
+    return {
+      ...refreshed,
+      parserFormulaBaseline:
+        refreshed.parserFormulaBaseline ??
+        snapshotParserFormulaBaseline(refreshed.parserBaseline ?? refreshed.values),
+    };
+  });
+  cols = alignOperatingExpensesAcrossYears(cols).map(refreshTaxYearVerification);
+  return applyCrossYearFlags(cols);
 }
 
 export function mergeTaxYearRecords(existing: TaxYearValues, incoming: TaxYearValues): TaxYearValues {
@@ -77,7 +87,12 @@ export function mergeTaxYearRecords(existing: TaxYearValues, incoming: TaxYearVa
     clientKey: existing.clientKey ?? incoming.clientKey,
     clientName: existing.clientName ?? incoming.clientName,
     userEditedFields: existing.userEditedFields,
+    userVerifiedFields: existing.userVerifiedFields ?? incoming.userVerifiedFields,
+    userOpexSlotLabels: existing.userOpexSlotLabels ?? incoming.userOpexSlotLabels,
     parserBaseline: existing.parserBaseline ?? incoming.parserBaseline,
+    parserFormulaBaseline: existing.parserFormulaBaseline ?? incoming.parserFormulaBaseline,
+    formulaOverrides: existing.formulaOverrides ?? incoming.formulaOverrides,
+    workbookValues: existing.workbookValues ?? incoming.workbookValues,
     fieldCandidateOptions: {
       ...(incoming.fieldCandidateOptions ?? {}),
       ...(existing.fieldCandidateOptions ?? {}),

@@ -1,5 +1,10 @@
 import type { TaxYearValues } from "@/lib/tax-workbook";
-import { isAuthoritativeSource, isSuspiciousTaxValue, isWeakSource } from "@/lib/tax-return/confidence-gates";
+import {
+  isAuthoritativeSource,
+  isResidualOpexSource,
+  isSuspiciousTaxValue,
+  isWeakSource,
+} from "@/lib/tax-return/confidence-gates";
 import { classifySourceFamily } from "./source-agreement";
 
 export type FieldTrustTier =
@@ -155,8 +160,13 @@ export function resolveFieldTrustTier(input: TrustTierInput): FieldTrustTier {
     return parserConf >= 80 ? "moderate" : "low";
   }
 
-  if (/verify|residual|post-verification|inferred/i.test(source ?? "")) {
+  if (isResidualOpexSource(source) || /verify|residual|post-verification|inferred/i.test(source ?? "")) {
     return trust >= 80 ? "moderate" : "low";
+  }
+
+  // Categorized Stmt-2 line fills (repairs/insurance/etc.) — intentional, not low-trust OCR.
+  if (/^Operating expenses \(/i.test(source ?? "") && parserConf >= 70) {
+    return trust >= 75 ? "single-good" : "moderate";
   }
 
   const family = classifySourceFamily(source);

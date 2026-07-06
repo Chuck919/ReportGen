@@ -2,9 +2,12 @@ import type { ResolvedFields } from "./merge";
 import { lineMoneyTokens } from "./money";
 import { pickComparisonColumnIndex, shrinkToYearColumns } from "@/lib/two-year-comparison-parser";
 import { scanComparisonOtherDeductionsTotal, computeComparisonOpexResidual } from "./comparison-opex";
-import { extractOtherDeductionsBlockOpex, extractStatementDeductions, blockStmtTotalCorroborated, scanStatement2Total } from "./statement-extractors";
+import { extractOtherDeductionsBlockOpex, extractStatementDeductions, blockStmtTotalCorroborated, scanStatement2Total, extractStatementTaxesSplit } from "./statement-extractors";
+import { lineMatchesLabelPattern, repairOcrLabel } from "./ocr-label-repair";
 import { knownStmt2AttachmentSum } from "./stmt2-total-inference";
 import { closureTolerance } from "./structural-tolerance";
+import { scanFormPageRent } from "./form-anchors";
+import { detectTaxForm } from "./detect-tax-form";
 
 type RowRule = {
   id: string;
@@ -16,8 +19,9 @@ const COMPARISON_ROW_RULES: RowRule[] = [
   { id: "utilities", labelRe: /UTILIT|UTILITY|ELECTRIC/i, minAmount: 500 },
   { id: "bank_credit_card", labelRe: /BANK|CREDIT\s+CARD|MERCHANT/i, minAmount: 500 },
   { id: "professional_fees", labelRe: /PROFESSIONAL|LEGAL\s+AND|ACCOUNTING/i, minAmount: 500 },
-  { id: "taxes_licenses", labelRe: /TAXES\s+AND\s+LIC/i, minAmount: 1000 },
   { id: "taxes_paid", labelRe: /TAXES\s+PAID|STATE\s+INCOME\s+TAX/i, minAmount: 1000 },
+  { id: "rent", labelRe: /\bRENTS?\b/i, minAmount: 10_000 },
+  { id: "taxes_licenses", labelRe: /TAXES\s+AND\s+LIC/i, minAmount: 1000 },
   { id: "other_operating_income", labelRe: /OTHER\s+OPERATING\s+INCOME|OTHER\s+INCOME/i, minAmount: 100 },
   { id: "cogs", labelRe: /COST\s+OF\s+(?:GOODS|SALES)|COGS|\bC\.?\s*O\.?\s*G/i, minAmount: 10_000 },
   { id: "depreciation", labelRe: /DEPRECIATION/i, minAmount: 100 },
@@ -29,7 +33,7 @@ const STMT2_UTIL =
 function findComparisonBlock(allText: string): { text: string; start: number } | undefined {
   const start =
     allText.search(
-      /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|(?:\bg\s*)?ross\s+receipts?\s+or\s+sales/i,
+      /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|(?:\bg\s*|ross\s+)receipts?\s+or\s+sales|ross\s+receipts?\s+or\s+sales/i,
     ) ?? -1;
   if (start < 0) return undefined;
   return { text: allText.slice(start, start + 80_000), start };
@@ -93,6 +97,48 @@ function scanStmt2UtilitiesMax(allText: string): number | undefined {
   return best;
 }
 
+/** Max rent amount from Stmt 2 / Federal Statements detail (comparison often double-counts). */
+function scanStmt2RentMax(allText: string, formKind?: import("./detect-tax-form").TaxFormKind): number | undefined {
+  const formRent = scanFormPageRent(allText, formKind);
+  let inStmt2 = false;
+  const candidates: number[] = [];
+  const considerLine = (line: string) => {
+    if (/gross\s+rent|rental\s+real\s+estate|net\s+rental|total\s+inc|gross\s+profit/i.test(line)) return;
+    if (!/\brents?\b/i.test(line)) return;
+    for (const n of lineMoneyTokens(line)) {
+      const abs = Math.round(Math.abs(n));
+      if (abs < 10_000 || abs > 5_000_000) continue;
+      candidates.push(abs);
+    }
+  };
+  for (const rawLine of allText.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    if (/statement\s*2|stmt\s*2|federal\s+statements|line\s*(?:19|20|26)\b.*other\s+deduct/i.test(line)) {
+      inStmt2 = true;
+      continue;
+    }
+    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line) && !/other\s+deduct/i.test(line)) inStmt2 = false;
+    if (inStmt2) considerLine(line);
+  }
+  if (!candidates.length) {
+    for (const rawLine of allText.split(/\n/)) {
+      const line = rawLine.replace(/\s+/g, " ").trim();
+      if (!line || !/\brents?\b/i.test(line) || /gross\s+rent/i.test(line)) continue;
+      if (!/other\s+deduct|federal\s+statements|description\s+amount/i.test(line)) continue;
+      considerLine(line);
+    }
+  }
+  if (formRent !== undefined) {
+    const near = candidates.find((c) => Math.abs(c - formRent) <= Math.max(5000, formRent * 0.05));
+    if (near !== undefined) return near;
+    return formRent;
+  }
+  if (!candidates.length) return undefined;
+  candidates.sort((a, b) => a - b);
+  return candidates[Math.floor(candidates.length / 2)];
+}
+
 /** Refill attachment / P&L lines from labeled two-year comparison rows. */
 export function refillFromComparisonLabeledRows(
   allText: string,
@@ -114,6 +160,19 @@ export function refillFromComparisonLabeledRows(
     }
   }
 
+  const stmt2Rent = scanStmt2RentMax(allText, detectTaxForm(allText).kind);
+  const formRent = scanFormPageRent(allText);
+  const authoritativeRent = formRent ?? stmt2Rent;
+  if (authoritativeRent !== undefined) {
+    const cur = resolved.values.rent;
+    if (cur === undefined || Math.abs(cur) < authoritativeRent * 0.85 || Math.abs(cur) > authoritativeRent * 1.05) {
+      resolved.values.rent = authoritativeRent;
+      resolved.confidence.rent = formRent !== undefined ? 96 : 93;
+      resolved.sources.rent =
+        formRent !== undefined ? "Form page 1 (rents line)" : "Statement 2 (rent detail max)";
+    }
+  }
+
   if (!block) return;
 
   for (const rawLine of block.split(/\n/)) {
@@ -121,7 +180,8 @@ export function refillFromComparisonLabeledRows(
     if (!line || !/\d/.test(line)) continue;
 
     for (const rule of COMPARISON_ROW_RULES) {
-      if (!rule.labelRe.test(line)) continue;
+      const labelLine = repairOcrLabel(line);
+      if (!lineMatchesLabelPattern(line, rule.labelRe) && !rule.labelRe.test(labelLine)) continue;
       if (rule.id === "other_operating_income" && /other\s+income/i.test(line) && !/operat/i.test(line)) {
         const lineIdx = allText.indexOf(line);
         const yearWindow = allText.slice(Math.max(0, lineIdx - 4000), lineIdx + line.length + 400);
@@ -156,7 +216,15 @@ export function refillFromComparisonLabeledRows(
       ) {
         continue;
       }
-      const weak = !src || /OCR label|fuzzy|label match|Statement 2|stmt 2|embedded detail|tail scan/i.test(src);
+      if (
+        rule.id === "rent" &&
+        cur !== undefined &&
+        /statement\s*2|federal\s+statements|form\s+1120/i.test(src) &&
+        Math.abs(picked) > Math.abs(cur) * 1.05
+      ) {
+        continue;
+      }
+      const weak = !src || /OCR label|fuzzy|label match|embedded detail|tail scan/i.test(src);
       const bigDiff =
         cur !== undefined &&
         Math.abs(cur - picked) / Math.max(Math.abs(picked), 1) > 0.15;
@@ -164,8 +232,13 @@ export function refillFromComparisonLabeledRows(
       const replace =
         cur === undefined ||
         weak ||
-        (bigDiff && (rule.id === "utilities" || rule.id === "taxes_licenses" || rule.id === "cogs")) ||
+        (bigDiff && (rule.id === "utilities" || rule.id === "taxes_licenses" || rule.id === "cogs" || rule.id === "rent")) ||
         (rule.id === "utilities" && cur !== undefined && Math.abs(cur) < Math.abs(picked) * 0.5) ||
+        (rule.id === "rent" &&
+          cur !== undefined &&
+          picked >= 50_000 &&
+          Math.abs(cur) < Math.abs(picked) * 0.6 &&
+          !/statement\s*2|federal\s+statements/i.test(src)) ||
         (rule.id === "taxes_licenses" &&
           cur !== undefined &&
           picked >= 10_000 &&
@@ -179,7 +252,23 @@ export function refillFromComparisonLabeledRows(
   }
 
   const compTaxes = resolved.values.taxes_licenses;
-  const paid = resolved.values.taxes_paid;
+  let paid = resolved.values.taxes_paid;
+  if (paid === undefined || paid <= 0) {
+    paid = extractStatementTaxesSplit(allText).values.taxes_paid;
+  }
+  const compBlock = findComparisonBlock(allText);
+  if ((paid === undefined || paid <= 0) && compBlock) {
+    for (const rawLine of compBlock.text.split(/\n/)) {
+      const line = rawLine.replace(/\s+/g, " ").trim();
+      if (!/TAXES\s+PAID|STATE\s+INCOME\s+TAX/i.test(line)) continue;
+      const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 1000);
+      const picked = pickColumn(nums, targetYear, years);
+      if (picked !== undefined && picked > 0) {
+        paid = Math.round(picked);
+        break;
+      }
+    }
+  }
   if (
     compTaxes !== undefined &&
     compTaxes >= 50_000 &&
@@ -207,6 +296,7 @@ export function refillFromComparisonLabeledRows(
       stmt2Total,
     },
     resolved,
+    undefined,
   );
 
   const cur = resolved.values.other_operating_expenses;
@@ -239,34 +329,10 @@ export function refillFromComparisonLabeledRows(
       (cur === undefined ||
         Math.abs(cur - blockOfficeDetail.opex!) / Math.max(blockOfficeDetail.opex!, 1) > 0.12)
     ) {
-      resolved.values.other_operating_expenses = blockOfficeDetail.opex;
+      resolved.values.other_operating_expenses = blockOfficeDetail.opex!;
       resolved.confidence.other_operating_expenses = blockOfficeDetail.confidence;
       resolved.sources.other_operating_expenses = blockOfficeDetail.source;
     }
-  } else if (opexResidual !== undefined) {
-    const stmtOpex = extractStatementDeductions(allText).values.other_operating_expenses;
-    const stmtCloses =
-      stmt2Total !== undefined &&
-      stmtOpex !== undefined &&
-      Math.abs(attachmentSum + stmtOpex - stmt2Total) <= closureTolerance(stmt2Total);
-    const preferStmt =
-      stmtOpex !== undefined &&
-      stmtOpex >= 1_000 &&
-      stmtCloses &&
-      Math.abs(stmtOpex - opexResidual.value) / Math.max(stmtOpex, opexResidual.value) <= 0.15;
-    if (preferStmt && !curIsOfficeDetail) {
-      resolved.values.other_operating_expenses = stmtOpex;
-      resolved.confidence.other_operating_expenses = 90;
-      resolved.sources.other_operating_expenses = "Statement 2 (summed detail / residual)";
-    } else if (
-      !curIsOfficeDetail &&
-      !(curIsAuthoritativeDetail && opexResidual !== undefined) &&
-      (cur === undefined ||
-        Math.abs(cur - opexResidual.value) / Math.max(opexResidual.value, 1) > 0.12)
-    ) {
-      resolved.values.other_operating_expenses = opexResidual.value;
-      resolved.confidence.other_operating_expenses = opexResidual.confidence;
-      resolved.sources.other_operating_expenses = "Two-year comparison (OTHER DEDUCTIONS residual)";
-    }
   }
+  // other_operating_expenses comparison residual left to reconcileOtherOperatingExpenses ranking.
 }

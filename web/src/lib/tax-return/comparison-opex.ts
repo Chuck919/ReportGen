@@ -5,7 +5,9 @@ import {
 } from "@/lib/two-year-comparison-parser";
 import type { parseTwoYearComparisonBlock } from "@/lib/two-year-comparison-parser";
 import { scanStmt2MiscLineAmounts, scanDocumentWideStmt2Exclusions } from "./statement-extractors";
-import { scanFormLine20OtherDeductionsTotal } from "./form-anchors";
+import { scanFormLine20OtherDeductionsTotal, scanFormLineOtherDeductionsTotalBest } from "./form-anchors";
+import type { TaxFormKind } from "./detect-tax-form";
+import { detectTaxForm } from "./detect-tax-form";
 
 const COMP_CTX =
   /(?:\bg\s*)?ross\s+receipts?\s+or\s+sales|two\s*year\s*comparison|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i;
@@ -141,6 +143,14 @@ export function scanComparisonOtherDeductionsTotal(
   return undefined;
 }
 
+/** Comparison worksheet present but OTHER DEDUCTIONS row amounts not OCR'd for target year. */
+export function comparisonWorksheetIncomplete(allText: string, targetYear: number): boolean {
+  if (!/two\s*year\s*comparison|comparison\s+worksheet|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i.test(allText)) {
+    return false;
+  }
+  return scanComparisonOtherDeductionsTotal(allText, targetYear) === undefined;
+}
+
 /** Residual opex = comparison OTHER DEDUCTIONS (Form 20) minus known Stmt 2 attachment lines. */
 export function computeComparisonOpexResidual(
   allText: string,
@@ -148,11 +158,13 @@ export function computeComparisonOpexResidual(
   attachmentSum: number,
   hints?: ComparisonOpexHints,
   resolved?: { values: Record<string, number | undefined> },
+  formKind?: TaxFormKind,
 ): { value: number; confidence: number } | undefined {
+  const kind = formKind ?? detectTaxForm(allText).kind;
   const stmt2Total =
     scanComparisonOtherDeductionsTotal(allText, targetYear) ??
     hints?.stmt2Total ??
-    scanFormLine20OtherDeductionsTotal(allText, "1120-s");
+    scanFormLineOtherDeductionsTotalBest(allText, kind);
   if (stmt2Total === undefined) return undefined;
 
   const prof = resolved?.values.professional_fees ?? 0;
@@ -161,7 +173,9 @@ export function computeComparisonOpexResidual(
   let attachment = attachmentSum > 0 ? attachmentSum : prof + util + bank;
 
   const wideExcl = scanDocumentWideStmt2Exclusions(allText);
-  if (wideExcl >= 5_000) {
+  // On small S-corp Stmt 2 attachments, wide exclusions (insurance, dues, etc.) are
+  // workbook other_opex — not independent subtractions from the Stmt 2 total.
+  if (wideExcl >= 5_000 && stmt2Total >= 150_000) {
     const extended = prof + util + bank + wideExcl;
     if (extended > attachment && extended < stmt2Total * 0.92) {
       attachment = extended;
@@ -200,6 +214,11 @@ export function computeComparisonOpexResidual(
 
   if (attachment < 1_000) return undefined;
   if (residual < 1_000 || residual >= stmt2Total * 0.85) return undefined;
+  if (residual >= stmt2Total - Math.max(500, stmt2Total * 0.04) && attachment < stmt2Total * 0.25) {
+    return undefined;
+  }
+  // Small Stmt 2: comparison OTHER DEDUCTIONS is the attachment total, not misc-after-slots.
+  if (stmt2Total < 100_000 && residual >= stmt2Total * 0.18) return undefined;
   const closesStmt =
     Math.abs(attachment + residual - stmt2Total) <= Math.max(500, stmt2Total * 0.015);
   // Large Stmt 2 with many categorized lines — residual ≈ stmt total minus 3 lines is not workbook opex.
@@ -261,10 +280,13 @@ export function pickComparisonOpex(
   comparison?: ReturnType<typeof parseTwoYearComparisonBlock> | null,
   hints?: ComparisonOpexHints,
   resolved?: { values: Record<string, number | undefined> },
+  formKind?: TaxFormKind,
 ): { value: number; confidence: number; source: string } | undefined {
+  const kind = formKind ?? detectTaxForm(allText).kind;
   const stmt2Total =
     scanComparisonOtherDeductionsTotal(allText, targetYear) ??
     hints?.stmt2Total ??
+    scanFormLine20OtherDeductionsTotal(allText, kind) ??
     comparison?.values.other_operating_expenses;
   const enrichedHints: ComparisonOpexHints = { ...hints, stmt2Total };
 
@@ -274,6 +296,7 @@ export function pickComparisonOpex(
     hints?.attachmentSum ?? 0,
     enrichedHints,
     resolved,
+    kind,
   );
   if (residual !== undefined) {
     return {

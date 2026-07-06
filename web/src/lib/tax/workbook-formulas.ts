@@ -1,0 +1,150 @@
+import { TAX_WORKBOOK_ROWS } from "@/lib/tax-workbook";
+
+function n(values: Record<string, number | undefined>, id: string): number {
+  const v = values[id];
+  return typeof v === "number" && Number.isFinite(v) ? Math.round(v) : 0;
+}
+
+function sum(values: Record<string, number | undefined>, ids: string[]): number {
+  return Math.round(ids.reduce((s, id) => s + n(values, id), 0));
+}
+
+function anyPresent(values: Record<string, number | undefined>, ids: string[], minCount: number): boolean {
+  let present = 0;
+  for (const id of ids) if (values[id] !== undefined) present++;
+  return present >= minCount;
+}
+
+/**
+ * Minimal, deterministic workbook formula engine.
+ * This is intentionally conservative: if too many inputs are missing, some totals remain undefined.
+ */
+export function computeWorkbookFormulas(values: Record<string, number | undefined>): Record<string, number | undefined> {
+  const out: Record<string, number | undefined> = { ...values };
+
+  // Income statement
+  if (out.sales !== undefined || out.cogs !== undefined) {
+    out.gross_profit = Math.round(n(out, "sales") - n(out, "cogs"));
+  }
+  if (out.depreciation !== undefined || out.amortization !== undefined) {
+    out.depreciation_amortization = Math.round(n(out, "depreciation") + n(out, "amortization"));
+  }
+  const top8Ids = [
+    "officer_compensation",
+    "salaries_wages",
+    "advertising",
+    "rent",
+    "taxes_licenses",
+    "bank_credit_card",
+    "professional_fees",
+    "utilities",
+  ];
+  if (anyPresent(out, top8Ids, 1)) {
+    out.overhead_sga = sum(out, top8Ids);
+  }
+
+  if (
+    out.gross_profit !== undefined ||
+    out.overhead_sga !== undefined ||
+    out.other_operating_income !== undefined ||
+    out.other_operating_expenses !== undefined ||
+    out.depreciation_amortization !== undefined
+  ) {
+    out.operating_profit = Math.round(
+      n(out, "gross_profit") -
+        n(out, "depreciation_amortization") +
+        n(out, "other_operating_income") -
+        n(out, "overhead_sga") -
+        n(out, "other_operating_expenses"),
+    );
+  }
+
+  if (
+    out.operating_profit !== undefined ||
+    out.interest_expense !== undefined ||
+    out.other_income !== undefined ||
+    out.other_expenses !== undefined
+  ) {
+    out.net_profit_before_taxes = Math.round(
+      n(out, "operating_profit") - n(out, "interest_expense") + n(out, "other_income") - n(out, "other_expenses"),
+    );
+  }
+
+  if (out.net_profit_before_taxes !== undefined || out.adjusted_owner_compensation !== undefined) {
+    out.adjusted_net_profit_before_taxes = Math.round(
+      n(out, "net_profit_before_taxes") + n(out, "adjusted_owner_compensation"),
+    );
+  }
+
+  if (
+    out.adjusted_net_profit_before_taxes !== undefined ||
+    out.taxes_paid !== undefined ||
+    out.extraordinary_gain !== undefined ||
+    out.extraordinary_loss !== undefined
+  ) {
+    out.net_income = Math.round(
+      n(out, "adjusted_net_profit_before_taxes") -
+        n(out, "taxes_paid") +
+        n(out, "extraordinary_gain") -
+        n(out, "extraordinary_loss"),
+    );
+  }
+
+  // Balance sheet
+  const currentAssetIds = ["cash", "accounts_receivable", "inventory", "other_current_assets"];
+  if (anyPresent(out, currentAssetIds, 2)) {
+    out.total_current_assets = sum(out, currentAssetIds);
+  }
+  if (out.gross_fixed_assets !== undefined || out.accumulated_depreciation !== undefined) {
+    out.net_fixed_assets = Math.round(n(out, "gross_fixed_assets") - Math.abs(n(out, "accumulated_depreciation")));
+  }
+  if (out.gross_intangible_assets !== undefined || out.accumulated_amortization !== undefined) {
+    out.net_intangible_assets = Math.round(
+      n(out, "gross_intangible_assets") - Math.abs(n(out, "accumulated_amortization")),
+    );
+  }
+  const assetParts = ["total_current_assets", "net_fixed_assets", "net_intangible_assets", "other_assets"];
+  // Missing optional buckets (intangibles / other assets) count as 0 — do not blank Total Assets.
+  if (out.total_current_assets !== undefined || out.net_fixed_assets !== undefined) {
+    out.total_assets = sum(out, assetParts);
+  }
+
+  const currentLiabIds = ["accounts_payable", "short_term_debt", "current_portion_ltd", "other_current_liabilities"];
+  // One present bucket is enough — missing siblings count as 0 (KCF only has other current liabilities).
+  if (anyPresent(out, currentLiabIds, 1)) {
+    out.total_current_liabilities = sum(out, currentLiabIds);
+  }
+  const ltLiabIds = ["notes_minus_short_term", "subordinated", "other_long_term_liabilities"];
+  if (anyPresent(out, ltLiabIds, 1)) {
+    out.long_term_liabilities = sum(out, ltLiabIds);
+  }
+  const liabParts = ["total_current_liabilities", "long_term_liabilities"];
+  if (anyPresent(out, liabParts, 1)) {
+    out.total_liabilities = sum(out, liabParts);
+  }
+
+  const equityIds = [
+    "preferred_stock",
+    "common_stock",
+    "additional_paid_in_capital",
+    "other_stock_equity",
+    "unclassified_equity",
+  ];
+  // KCF-style returns often only fill unclassified equity.
+  if (anyPresent(out, equityIds, 1)) {
+    out.total_equity = sum(out, equityIds);
+  }
+  const leParts = ["total_liabilities", "total_equity"];
+  if (anyPresent(out, leParts, 1)) {
+    out.total_liabilities_equity = sum(out, leParts);
+  }
+
+  // Ensure all formula IDs exist in output map for callers that iterate workbook rows.
+  for (const row of TAX_WORKBOOK_ROWS) {
+    if (row.excelBehavior !== "formula") continue;
+    if (!(row.id in out)) out[row.id] = undefined;
+  }
+
+  return out;
+}
+

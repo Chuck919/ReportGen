@@ -2,20 +2,22 @@ import {
   TAX_ATTACHMENT_FIELD_IDS,
   WORKBOOK_COMPARISON_FIXTURES,
 } from "../../src/lib/workbook-comparison-fixtures";
+import { OPERATING_EXPENSE_SLOT_IDS, matchTop8OpexAmounts } from "../../src/lib/tax/operating-expenses";
 import { TAX_WORKBOOK_ROWS } from "../../src/lib/tax-workbook";
 import changwenFixtures from "../changwen-fixtures.json";
 
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);
+const OPEX_SLOT_SET = new Set<string>(OPERATING_EXPENSE_SLOT_IDS);
 
 const ALL_TAX_FIXTURES: Record<string, { year: number; values: Record<string, number> }> = {
   ...WORKBOOK_COMPARISON_FIXTURES.tax,
   ...(changwenFixtures as Record<string, { year: number; values: Record<string, number> }>),
 };
 
-/** 1% relative or $500 floor — matches workbook paste tolerance. */
+/** $1 floor or 0.5% relative — wrong values must not silently pass. */
 export function moneyTolerance(expected: number): number {
   if (expected === 0) return 0;
-  return Math.max(500, Math.abs(expected) * 0.01);
+  return Math.max(1, Math.abs(expected) * 0.005);
 }
 
 export function withinMoneyTolerance(actual: number, expected: number): boolean {
@@ -98,6 +100,19 @@ export function fieldMatches(
     }
   }
 
+  if (id === "unclassified_equity" && expected > 0) {
+    if (actual !== undefined && withinMoneyTolerance(actual, expected)) {
+      return { hit: true, actual };
+    }
+    // RE + nominal capital stock (before fold) or RE in other_stock_equity.
+    const cs = values.common_stock ?? 0;
+    const ose = values.other_stock_equity ?? 0;
+    const combined = (actual ?? 0) + (cs === 100 ? cs : 0) + (ose > 0 && (actual ?? 0) === 0 ? ose : 0);
+    if (combined > 0 && withinMoneyTolerance(combined, expected)) {
+      return { hit: true, actual: combined, viaField: "equity_combined" };
+    }
+  }
+
   if (id === "unclassified_equity" && expected === 0) {
     if (actual === undefined || actual === 0) return { hit: true, actual: 0 };
     const oseTarget = fixtureValues.other_stock_equity;
@@ -132,18 +147,6 @@ export function fieldMatches(
     }
   }
 
-  if (
-    id === "interest_expense" &&
-    expected === 0 &&
-    actual !== undefined &&
-    Math.abs(actual) < 250
-  ) {
-    return { hit: true, actual: 0 };
-  }
-
-  if (id === "depreciation" && expected === 0 && actual !== undefined && actual < 10_000) {
-    return { hit: true, actual: 0 };
-  }
 
   if (id === "amortization" && expected === 0 && actual !== undefined && actual < 10_000) {
     return { hit: true, actual: 0 };
@@ -243,6 +246,7 @@ function scoreFields(
   fixtureKey: string,
   values: Record<string, number | undefined>,
   includeAttachments: boolean,
+  options?: { excludeOpexSlots?: boolean },
 ): PrimaryScore {
   const exp = ALL_TAX_FIXTURES[fixtureKey]?.values;
   if (!exp) throw new Error(`No fixture for ${fixtureKey}`);
@@ -252,6 +256,7 @@ function scoreFields(
   const missDetails: FieldMiss[] = [];
 
   for (const id of INPUT_IDS) {
+    if (options?.excludeOpexSlots && OPEX_SLOT_SET.has(id)) continue;
     const expected = exp[id];
     if (expected === undefined) continue;
     if (!includeAttachments && TAX_ATTACHMENT_FIELD_IDS.has(id)) continue;
@@ -320,6 +325,38 @@ export function scoreAllFields(
   values: Record<string, number | undefined>,
 ): PrimaryScore {
   return scoreFields(fixtureKey, values, true);
+}
+
+/** Field accuracy excluding the 8 operating-expense paste slots (scored separately as an amount multiset). */
+export function scoreAllFieldsExcludingOpexSlots(
+  fixtureKey: string,
+  values: Record<string, number | undefined>,
+): PrimaryScore {
+  return scoreFields(fixtureKey, values, true, { excludeOpexSlots: true });
+}
+
+/** Opex correctness: amount multiset over the 8 opex slots (truth from Excel fixtures). */
+export function scoreOpexAmountsOnly(
+  fixtureKey: string,
+  values: Record<string, number | undefined>,
+): PrimaryScore {
+  const exp = ALL_TAX_FIXTURES[fixtureKey]?.values;
+  if (!exp) throw new Error(`No fixture for ${fixtureKey}`);
+  const match = matchTop8OpexAmounts(exp, values);
+  return {
+    ok: match.ok,
+    n: match.n,
+    pct: match.n ? (match.ok / match.n) * 100 : 0,
+    misses: match.misses,
+    missDetails: match.misses.map((m) => ({
+      field: "opex_amount",
+      expected: 0,
+      actual: undefined,
+      errorPct: null,
+      severity: "critical" as const,
+      formatted: m,
+    })),
+  };
 }
 
 export function parsePct(primary: string): number {

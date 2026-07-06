@@ -93,7 +93,7 @@ export type ConfidenceCalibration = {
 };
 
 const WARNING_FLAG =
-  /candidate_conflict|source_disagreement|formula_inconsistency|ocr_incomplete|comparison_missing|stmt2_missing|page_truncation|low_numeric_density|verify manually|other reads|sources disagree|subtractive|low-trust/i;
+  /candidate_conflict|source_disagreement|formula_inconsistency|ocr_incomplete|comparison_missing|stmt2_missing|page_truncation|low_numeric_density|verify manually|other reads|sources disagree|subtractive|low-trust|residual opex|formula-disagreement/i;
 
 function getFixtureValues(fixtureKey: string): Record<string, number> {
   const all: Record<string, { values: Record<string, number> }> = {

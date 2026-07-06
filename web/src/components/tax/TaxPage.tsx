@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useAppSession } from "@/components/providers/AppSessionProvider";
 import { useElapsedTimer } from "@/hooks/use-elapsed-timer";
 import { SUPPORTED_TAX_FORMS_LABEL } from "@/lib/tax/tax-form-copy";
@@ -7,12 +8,14 @@ import { Container } from "@/components/ui/Container";
 import { Button } from "@/components/ui/Button";
 import { TaxUploadPanel } from "./TaxUploadPanel";
 import { TaxWorkbookTable } from "./TaxWorkbookTable";
+import { TaxWorkbookCopyBar } from "./TaxWorkbookCopyBar";
 import { UploadResultSummary } from "./UploadResultSummary";
 import { TrustColorGuide } from "./TrustColorGuide";
 
 export function TaxPage() {
   const { tax: upload } = useAppSession();
   const elapsedMs = useElapsedTimer(upload.busy);
+  const [reverseYears, setReverseYears] = useState(false);
 
   return (
     <Container className="py-12">
@@ -41,13 +44,16 @@ export function TaxPage() {
         queueError={upload.queueError}
       />
 
-      <UploadResultSummary
-        batchWarnings={upload.batchWarnings}
-        fileErrors={upload.fileErrors}
-        partial={upload.partial}
-      />
+      {!upload.busy && (
+        <UploadResultSummary
+          batchWarnings={upload.batchWarnings}
+          fileErrors={upload.fileErrors}
+          partial={upload.partial}
+        />
+      )}
 
-      {upload.hasData && (
+      {/* Hide partial years / color guide until the full batch finishes. */}
+      {upload.hasData && !upload.busy && (
         <div className="mt-8 space-y-8">
           {upload.clientName && (
             <p className="text-sm text-stone-600">
@@ -55,20 +61,31 @@ export function TaxPage() {
             </p>
           )}
           <TrustColorGuide />
-          <div className="flex justify-end">
-            <Button variant="ghost" className="text-stone-500" onClick={upload.clearAll}>
+          <TaxWorkbookCopyBar columns={upload.columns} />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {upload.columns.length > 1 && (
+              <Button variant="secondary" onClick={() => setReverseYears((r) => !r)}>
+                Reverse years{reverseYears ? " ✓" : ""}
+              </Button>
+            )}
+            <Button variant="ghost" className="ml-auto text-stone-500" onClick={upload.clearAll}>
               Clear all
             </Button>
           </div>
           <TaxWorkbookTable
             columns={upload.columns}
             section="Income Statement Data"
+            reverseYears={reverseYears}
             onFieldEdit={upload.updateField}
+            onFieldVerify={upload.verifyField}
+            onOpexLabelEdit={upload.updateOpexSlotLabel}
           />
           <TaxWorkbookTable
             columns={upload.columns}
             section="Balance Sheet Data"
+            reverseYears={reverseYears}
             onFieldEdit={upload.updateField}
+            onFieldVerify={upload.verifyField}
           />
         </div>
       )}

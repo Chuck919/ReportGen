@@ -145,8 +145,13 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
         comparisonOpex: ctx.comparison?.values.other_operating_expenses,
       }) ?? scanFormLine20OtherDeductionsTotal(ctx.allText, ctx.formKind);
     const opex = resolved.values.other_operating_expenses;
+    const opexSrc = resolved.sources.other_operating_expenses ?? "";
+    // Keep comparison / form residuals — ranking already scored them; blanking forces worse UX.
+    const opexFromTrustedRead =
+      /comparison|form\s*line|other deductions residual|document-wide exclusion/i.test(opexSrc);
     if (
       opex !== undefined &&
+      !opexFromTrustedRead &&
       !isPlausibleOtherOperatingExpense(opex, {
         sales,
         stmt2Total: stmt2,

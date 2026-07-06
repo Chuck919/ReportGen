@@ -44,7 +44,7 @@ export function classifyComparisonLine(line: string): string | null {
   if (/compensat\w*.{0,24}off|ompensat\w*.{0,24}off|compensat\w*\s+of\s+(ofc|afc|off)/i.test(t)) return "officer_compensation";
   if (/sar\w*\s+and\s+wa|salari\w*\s+and\s+wag/.test(t)) return "salaries_wages";
   if (/advert|verteng/.test(t) && !/adjusted/i.test(t)) return "advertising";
-  if (/(^|[^a-z])rents?\b|(?:\b|r)ents\b/.test(t) && !/cur(r)?ent/i.test(t)) return "rent";
+  if (/\brents?\b/i.test(t) && !/gross\s+rent|cur(r)?ent|parent\s+corp/i.test(t)) return "rent";
   if (/tax(es)?\s+and\s+(lic|es)|totes\s+ond\s+es|\baxes\s+and\s+lic/i.test(t)) return "taxes_licenses";
   if (/interest\s+exp|interest\s*\(/.test(t) && !/interest\s+income/i.test(t)) return "interest_expense";
   if (/depreciation/.test(t) && !/accum/i.test(t)) return "depreciation";
@@ -112,6 +112,7 @@ function isStructurallyValid(id: string, value: number, line: string, headerYear
   if (headerYears && (v === headerYears[0] || v === headerYears[1])) return false;
   if (id === "depreciation" && (value < 0 || /accumulated/i.test(line))) return false;
   if ((id === "depreciation" || id === "amortization") && value >= 2020 && value <= 2030) return false;
+  if ((id === "depreciation" || id === "amortization") && (value === 1986 || value === 1987)) return false;
   if (id === "accounts_receivable" && /balance at|beginning|ending|year/i.test(line)) return false;
   if ((id === "other_income" || id === "taxes_paid" || id === "depreciation" || id === "amortization") && Math.abs(value) < 100) return false;
   if (id === "other_operating_expenses" && Math.abs(value) < 1000) return false;
@@ -244,8 +245,16 @@ function parseTwoYearComparisonAt(
     }
 
     if (!id && pendingLabelId && /\d{1,3},\d{3}/.test(line)) {
-      id = pendingLabelId;
-      pendingLabelId = null;
+      if (
+        /total\s+inc|net\s+inc|gross\s+profit|total\s+deduct|taxable\s+inc|ordinary\s+busin/i.test(
+          line,
+        )
+      ) {
+        pendingLabelId = null;
+      } else {
+        id = pendingLabelId;
+        pendingLabelId = null;
+      }
     }
     const context = `${prevLine} ${line}`;
     if (
@@ -279,7 +288,7 @@ function parseTwoYearComparisonAt(
       continue;
     }
 
-    let nums = moneyFromLine(line, id);
+    const nums = moneyFromLine(line, id);
     const pair = shrinkToYearColumns(nums);
     if (!pair) {
       prevLine = line;

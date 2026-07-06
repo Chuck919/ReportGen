@@ -17,7 +17,7 @@ function readSession(): BenchmarkSession {
     if (!raw) return { data: null };
     const parsed = JSON.parse(raw) as BenchmarkSession;
     if (!parsed || typeof parsed !== "object") return { data: null };
-    return { data: parsed.data ?? null, ...parsed };
+    return { ...parsed, data: parsed.data ?? null };
   } catch {
     return { data: null };
   }

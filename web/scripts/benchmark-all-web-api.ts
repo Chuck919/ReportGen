@@ -11,7 +11,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Agent, fetch as undiciFetch } from "undici";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";
-import { scoreAllFields, scorePrimary } from "./lib/tax-benchmark-score";
+import { scoreAllFieldsExcludingOpexSlots, scoreOpexAmountsOnly, scorePrimary } from "./lib/tax-benchmark-score";
 import {
   aggregateConfidenceCalibration,
   buildFieldMissDiagnostics,
@@ -23,6 +23,11 @@ import {
 } from "./lib/tax-benchmark-confidence";
 import { TAX_BENCHMARK_CLIENTS, fixtureKey, type TaxBenchmarkClient } from "./lib/tax-benchmark-clients";
 import { forceExit } from "./lib/force-exit";
+import {
+  buildClientYearDebugReport,
+  printDebugReports,
+  type ClientYearDebugReport,
+} from "./lib/tax-benchmark-debug";
 
 const mode = process.argv[2] ?? "thorough";
 const base = process.argv[3] ?? "http://localhost:3000";
@@ -42,8 +47,11 @@ type RowResult = {
   status: number;
   primaryPct: number;
   allPct: number;
+  fieldPct: number;
+  opexAmountPct: number;
   allMisses: string[];
   missDiagnostics?: FieldMissDiagnostic[];
+  debug?: ClientYearDebugReport;
   confidenceCalibration?: ConfidenceCalibration;
   elapsedMs: number;
   error?: string;
@@ -143,17 +151,23 @@ async function postPdfOnce(client: TaxBenchmarkClient, year: number): Promise<Ro
     }
     const fk = fixtureKey(client, year);
     const primary = scorePrimary(fk, row.values);
-    const all = scoreAllFields(fk, row.values);
+    const fieldsNoOpex = scoreAllFieldsExcludingOpexSlots(fk, row.values);
+    const opexAmounts = scoreOpexAmountsOnly(fk, row.values);
+    const all = fieldsNoOpex;
     const missDiagnostics = buildFieldMissDiagnostics(row, all);
     const confidenceCalibration = computeConfidenceCalibration(fk, row);
+    const debug = buildClientYearDebugReport(client.id, year, fk, row);
     return {
       client: client.id,
       year,
       status: res.status,
       primaryPct: primary.pct,
+      fieldPct: fieldsNoOpex.pct,
+      opexAmountPct: opexAmounts.pct,
       allPct: all.pct,
       allMisses: all.misses,
       missDiagnostics,
+      debug,
       confidenceCalibration,
       elapsedMs,
     };
@@ -206,7 +220,7 @@ async function main() {
         console.log(`${tag} ${row.error}${row.retried ? " (after retry)" : ""} (${(row.elapsedMs / 1000).toFixed(0)}s)`);
       } else {
         console.log(
-          `primary ${row.primaryPct.toFixed(1)}% all ${row.allPct.toFixed(1)}% (${(row.elapsedMs / 1000).toFixed(0)}s)`,
+          `primary ${row.primaryPct.toFixed(1)}% fields ${row.fieldPct.toFixed(1)}% opexAmt ${row.opexAmountPct.toFixed(1)}% (${(row.elapsedMs / 1000).toFixed(0)}s)`,
         );
         if (row.allMisses.length) {
           console.log(`  misses: ${row.allMisses.join("; ")}`);
@@ -237,6 +251,10 @@ async function main() {
   console.log("\n--- confidence calibration (aggregate) ---");
   console.log(formatCalibrationSummary(aggregateCalibration));
 
+  printDebugReports(
+    rows.filter((r) => r.debug).map((r) => r.debug!),
+  );
+
   const outDir = path.join(process.cwd(), "scripts", "benchmark-output");
   await mkdir(outDir, { recursive: true });
   const outPath = path.join(outDir, `web-api-${mode}-${Date.now()}.json`);
@@ -248,6 +266,7 @@ async function main() {
         base,
         timeoutMs,
         rows,
+        debugReports: rows.filter((r) => r.debug).map((r) => r.debug),
         summary: {
           timeouts: timeouts.length,
           infraErrors: infraErrors.length,

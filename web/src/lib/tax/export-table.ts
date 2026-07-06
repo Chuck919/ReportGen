@@ -4,11 +4,19 @@ import {
   formatExcelNumber,
   type TaxYearValues,
 } from "@/lib/tax-workbook";
+import { resolveWorkbookDisplayValues } from "@/lib/tax/workbook-display";
+import {
+  OPERATING_EXPENSE_SLOT_IDS,
+  resolveOpexSlotLabel,
+  sharedOpexSlotLabels,
+} from "@/lib/tax/operating-expenses";
 
 export type TaxTableRow = {
   id: string;
   label: string;
   section: string;
+  excelBehavior: "input" | "formula";
+  excelRow: number;
   values: Record<string, number | null>;
 };
 
@@ -18,18 +26,40 @@ export type TaxTableResponse = {
   tsv: string;
 };
 
-/** Workbook table for API consumers and UI — all input rows, empty/null when not extracted. */
-export function buildTaxTable(columns: TaxYearValues[]): TaxTableResponse {
-  const years = Array.from(new Set(columns.map((c) => c.year))).sort((a, b) => a - b);
-  const byYear = new Map(columns.map((c) => [c.year, c]));
+export type BuildTaxTableOptions = {
+  /** When true, year columns display newest-first (UI only — paste order unchanged). */
+  reverseYears?: boolean;
+};
 
-  const rows: TaxTableRow[] = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((row) => {
+/** Workbook table for API consumers and UI — all rows including formula lines. */
+export function buildTaxTable(columns: TaxYearValues[], options?: BuildTaxTableOptions): TaxTableResponse {
+  const years = Array.from(new Set(columns.map((c) => c.year))).sort((a, b) =>
+    options?.reverseYears ? b - a : a - b,
+  );
+  const byYear = new Map(columns.map((c) => [c.year, c]));
+  const sharedLabels = sharedOpexSlotLabels(columns);
+
+  const rows: TaxTableRow[] = TAX_WORKBOOK_ROWS.map((row) => {
     const values: Record<string, number | null> = {};
     for (const year of years) {
-      const v = byYear.get(year)?.values[row.id];
+      const col = byYear.get(year);
+      const computed = col ? resolveWorkbookDisplayValues(col) : {};
+      const v = computed[row.id];
       values[String(year)] = v !== undefined ? v : null;
     }
-    return { id: row.id, label: row.label, section: row.section, values };
+    const latestCol = [...columns].sort((a, b) => b.year - a.year)[0];
+    const dynamicLabel =
+      OPERATING_EXPENSE_SLOT_IDS.includes(row.id as (typeof OPERATING_EXPENSE_SLOT_IDS)[number])
+        ? sharedLabels[row.id] ?? resolveOpexSlotLabel(latestCol, row.id) ?? row.label
+        : row.label;
+    return {
+      id: row.id,
+      label: dynamicLabel,
+      section: row.section,
+      excelBehavior: row.excelBehavior,
+      excelRow: row.row,
+      values,
+    };
   });
 
   return {
