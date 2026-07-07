@@ -8,8 +8,10 @@
       "amortization": 0,
       "officer_compensation": 62951,
       "salaries_wages": 70720,
+      "repairs_maintenance": 18046,
       "rent": 18000,
       "taxes_licenses": 12438,
+      "insurance": 7755,
       "professional_fees": 24390,
       "utilities": 14059,
       "other_operating_income": 0,
@@ -42,7 +44,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 159555,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      62951,
+      70720,
+      18046,
+      18000,
+      12438,
+      7755,
+      24390,
+      14059
+    ]
   },
   "carithers-liquor/integrator.xls / 2022": {
     "year": 2022,
@@ -53,8 +65,10 @@
       "amortization": 0,
       "officer_compensation": 64033,
       "salaries_wages": 69587,
+      "repairs_maintenance": 3312,
       "rent": 18000,
       "taxes_licenses": 21962,
+      "insurance": 5249,
       "professional_fees": 18890,
       "utilities": 20468,
       "other_operating_income": 0,
@@ -87,7 +101,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 153455,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      64033,
+      69587,
+      3312,
+      18000,
+      21962,
+      5249,
+      18890,
+      20468
+    ]
   },
   "carithers-liquor/integrator.xls / 2023": {
     "year": 2023,
@@ -98,8 +122,10 @@
       "amortization": 0,
       "officer_compensation": 63796,
       "salaries_wages": 74693,
+      "repairs_maintenance": 2206,
       "rent": 18000,
       "taxes_licenses": 18746,
+      "insurance": 11650,
       "professional_fees": 19446,
       "utilities": 18880,
       "other_operating_income": 3525,
@@ -132,7 +158,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 154070,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      63796,
+      74693,
+      2206,
+      18000,
+      18746,
+      11650,
+      19446,
+      18880
+    ]
   },
   "carithers-liquor/integrator.xls / 2024": {
     "year": 2024,
@@ -143,8 +179,10 @@
       "amortization": 0,
       "officer_compensation": 59182,
       "salaries_wages": 74828,
+      "repairs_maintenance": 5347,
       "rent": 18000,
       "taxes_licenses": 20184,
+      "insurance": 9284,
       "professional_fees": 18700,
       "utilities": 19153,
       "other_operating_income": 857,
@@ -177,7 +215,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 215419,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      59182,
+      74828,
+      5347,
+      18000,
+      20184,
+      9284,
+      18700,
+      19153
+    ]
   },
   "carithers-liquor/integrator.xls / 2025": {
     "year": 2025,
@@ -188,8 +236,10 @@
       "amortization": 0,
       "officer_compensation": 60374,
       "salaries_wages": 80363,
+      "repairs_maintenance": 10786,
       "rent": 18000,
       "taxes_licenses": 23803,
+      "insurance": 11894,
       "professional_fees": 27443,
       "utilities": 16362,
       "other_operating_income": 0,
@@ -222,7 +272,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 229459,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      60374,
+      80363,
+      10786,
+      18000,
+      23803,
+      11894,
+      27443,
+      16362
+    ]
   },
   "strategic-solution-services/integrator.xls / 2022": {
     "year": 2022,
@@ -232,8 +292,10 @@
       "depreciation": 4369,
       "amortization": 0,
       "officer_compensation": 115120,
+      "repairs_maintenance": 258012,
       "rent": 446481,
       "taxes_licenses": 191523,
+      "insurance": 226212,
       "utilities": 63509,
       "professional_fees": 49289,
       "other_operating_income": 0,
@@ -266,7 +328,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 0,
       "unclassified_equity": 269305
-    }
+    },
+    "top8Amounts": [
+      115120,
+      258012,
+      446481,
+      191523,
+      226212,
+      70185,
+      63509,
+      49289
+    ]
   },
   "strategic-solution-services/integrator.xls / 2023": {
     "year": 2023,
@@ -276,8 +348,10 @@
       "depreciation": 36543,
       "amortization": 0,
       "officer_compensation": 78334,
+      "repairs_maintenance": 206165,
       "rent": 625131,
       "taxes_licenses": 129064,
+      "insurance": 324036,
       "utilities": 27159,
       "professional_fees": 53833,
       "other_operating_income": 0,
@@ -310,7 +384,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 0,
       "unclassified_equity": 345550
-    }
+    },
+    "top8Amounts": [
+      78334,
+      206165,
+      625131,
+      129064,
+      324036,
+      0,
+      27159,
+      53833
+    ]
   },
   "strategic-solution-services/integrator.xls / 2024": {
     "year": 2024,
@@ -320,8 +404,10 @@
       "depreciation": 3155,
       "amortization": 0,
       "officer_compensation": 0,
+      "repairs_maintenance": 141348,
       "rent": 359184,
       "taxes_licenses": 5693,
+      "insurance": 482586,
       "utilities": 5066,
       "professional_fees": 28282,
       "other_operating_income": 0,
@@ -354,7 +440,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 0,
       "unclassified_equity": 286193
-    }
+    },
+    "top8Amounts": [
+      0,
+      141348,
+      359184,
+      5693,
+      482586,
+      90718,
+      5066,
+      28282
+    ]
   },
   "strategic-solution-services/integrator.xls / 2025": {
     "year": 2025,
@@ -364,8 +460,10 @@
       "depreciation": 0,
       "amortization": 0,
       "officer_compensation": 0,
+      "repairs_maintenance": 141001,
       "rent": 313240,
       "taxes_licenses": 5594,
+      "insurance": 745465,
       "utilities": 1544,
       "professional_fees": 32528,
       "other_operating_income": 0,
@@ -398,7 +496,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 0,
       "unclassified_equity": 518983
-    }
+    },
+    "top8Amounts": [
+      0,
+      141001,
+      313240,
+      5594,
+      745465,
+      28455,
+      1544,
+      32528
+    ]
   },
   "strategic-solution-services/integrator.xls / 2026": {
     "year": 2026,
@@ -408,8 +516,10 @@
       "depreciation": 0,
       "amortization": 0,
       "officer_compensation": 0,
+      "repairs_maintenance": 153810,
       "rent": 303433,
       "taxes_licenses": 5055,
+      "insurance": 759183,
       "utilities": 1705,
       "professional_fees": 28958,
       "other_operating_income": 0,
@@ -442,7 +552,17 @@
       "additional_paid_in_capital": 0,
       "other_stock_equity": 0,
       "unclassified_equity": 687127
-    }
+    },
+    "top8Amounts": [
+      0,
+      153810,
+      303433,
+      5055,
+      759183,
+      28054,
+      1705,
+      28958
+    ]
   },
   "arizona-sun-supply/integrator.xls / 2022": {
     "year": 2022,
@@ -485,7 +605,17 @@
       "additional_paid_in_capital": 206,
       "other_stock_equity": 4248685,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      448004,
+      836092,
+      274000,
+      119483,
+      108239,
+      83585,
+      44787,
+      39998
+    ]
   },
   "arizona-sun-supply/integrator.xls / 2023": {
     "year": 2023,
@@ -528,7 +658,17 @@
       "additional_paid_in_capital": 206,
       "other_stock_equity": 3538926,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      458186,
+      1103045,
+      300000,
+      133081,
+      135031,
+      87401,
+      55514,
+      45162
+    ]
   },
   "arizona-sun-supply/integrator.xls / 2024": {
     "year": 2024,
@@ -571,7 +711,17 @@
       "additional_paid_in_capital": 206,
       "other_stock_equity": 3696339,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      467910,
+      1139582,
+      300000,
+      134983,
+      138627,
+      88881,
+      47676,
+      53688
+    ]
   },
   "arizona-sun-supply/integrator.xls / 2025": {
     "year": 2025,
@@ -614,7 +764,17 @@
       "additional_paid_in_capital": 206,
       "other_stock_equity": 4401116,
       "unclassified_equity": 0
-    }
+    },
+    "top8Amounts": [
+      470741,
+      1145768,
+      504000,
+      141702,
+      151560,
+      102370,
+      50842,
+      57434
+    ]
   },
   "arizona-sun-supply/integrator.xls / 2026": {
     "year": 2026,
@@ -657,6 +817,16 @@
       "additional_paid_in_capital": 206,
       "other_stock_equity": 4719773,
       "unclassified_equity": 11498
-    }
+    },
+    "top8Amounts": [
+      420946,
+      1198725,
+      504000,
+      160544,
+      41664,
+      103926,
+      48461,
+      58034
+    ]
   }
 }

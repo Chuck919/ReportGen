@@ -9,9 +9,9 @@ import changwenFixtures from "../changwen-fixtures.json";
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);
 const OPEX_SLOT_SET = new Set<string>(OPERATING_EXPENSE_SLOT_IDS);
 
-const ALL_TAX_FIXTURES: Record<string, { year: number; values: Record<string, number> }> = {
+const ALL_TAX_FIXTURES: Record<string, { year: number; values: Record<string, number>; top8Amounts?: number[] }> = {
   ...WORKBOOK_COMPARISON_FIXTURES.tax,
-  ...(changwenFixtures as Record<string, { year: number; values: Record<string, number> }>),
+  ...(changwenFixtures as Record<string, { year: number; values: Record<string, number>; top8Amounts?: number[] }>),
 };
 
 /** $1 floor or 0.5% relative — wrong values must not silently pass. */
@@ -335,12 +335,12 @@ export function scoreAllFieldsExcludingOpexSlots(
   return scoreFields(fixtureKey, values, true, { excludeOpexSlots: true });
 }
 
-/** Opex correctness: amount multiset over the 8 opex slots (truth from Excel fixtures). */
+/** Opex correctness: amount multiset over the eight expense rows (truth from Excel integrator). */
 export function scoreOpexAmountsOnly(
   fixtureKey: string,
   values: Record<string, number | undefined>,
 ): PrimaryScore {
-  const exp = ALL_TAX_FIXTURES[fixtureKey]?.values;
+  const exp = ALL_TAX_FIXTURES[fixtureKey];
   if (!exp) throw new Error(`No fixture for ${fixtureKey}`);
   const match = matchTop8OpexAmounts(exp, values);
   return {

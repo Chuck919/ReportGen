@@ -47,7 +47,11 @@ import { applyWorkbookConfidenceLayer } from "@/lib/tax-confidence/field-confide
 import { capConfidenceForFlags, mergeConfidenceFlags } from "@/lib/tax-confidence/confidence-flags";
 import { STMT_ATTACHMENT_FIELD_IDS } from "./ocr-coverage-rescan";
 import { reconcileCogsFromSources } from "./cogs-reconcile";
-import { extractOperatingExpenseLinesFromText, applyOperatingExpensesToSingleYear } from "@/lib/tax/operating-expenses";
+import {
+  extractOperatingExpenseLinesFromText,
+  extractDirectFormExpenseLines,
+  applyOperatingExpensesToSingleYear,
+} from "@/lib/tax/operating-expenses";
 
 /** P&L lines that should surface OCR-gap warnings when still missing after parse. */
 const MISSING_MATERIAL_FIELD_IDS = new Set([
@@ -1691,7 +1695,10 @@ function applyPostVerificationWorkbookFixes(
       }
     : undefined;
 
-  const operatingExpenseLines = extractOperatingExpenseLinesFromText(ctx.allText);
+  const operatingExpenseLines = [
+    ...extractOperatingExpenseLinesFromText(ctx.allText),
+    ...extractDirectFormExpenseLines(ctx.allText),
+  ];
   const opexApplied = applyOperatingExpensesToSingleYear({
     values,
     confidence,

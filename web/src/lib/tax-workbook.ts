@@ -1,6 +1,5 @@
 import type { FieldTrustTier } from "@/lib/tax/field-trust-tier";
 import { computeWorkbookFormulas } from "@/lib/tax/workbook-formulas";
-import { resolveWorkbookDisplayValues } from "@/lib/tax/workbook-display";
 import type { OcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
 
 export type TaxWorkbookRow = {
@@ -12,6 +11,16 @@ export type TaxWorkbookRow = {
 };
 
 export type FieldReviewStatus = "verified" | "review" | "missing";
+
+/** Per-field review state captured after initial parse — restored when user unchecks verify. */
+export type ParserReviewSnapshot = {
+  values: Record<string, number>;
+  fieldSources?: Record<string, string>;
+  fieldFlags?: Record<string, string[]>;
+  fieldStatus?: Record<string, FieldReviewStatus>;
+  displayConfidence?: Record<string, number>;
+  fieldTrustTier?: Record<string, FieldTrustTier>;
+};
 
 export type TaxYearValues = {
   year: number;
@@ -62,6 +71,8 @@ export type TaxYearValues = {
   formulaOverrides?: Record<string, number>;
   /** Formula totals computed from parser inputs at upload — for extraction mismatch hints. */
   parserFormulaBaseline?: Record<string, number>;
+  /** Post-parse review metadata — restored when user unchecks verify on a field. */
+  parserReviewSnapshot?: ParserReviewSnapshot;
   /** When a two-year comparison block includes the prior tax year, values from that column. */
   comparisonPriorYear?: number;
   comparisonPriorValues?: Record<string, number>;
@@ -290,8 +301,8 @@ export function buildPasteTsv(
       if (!col) return confirmedOnly ? "" : PASTE_ZERO;
       if (!includeFormulas && row.excelBehavior === "formula") return "";
       const layout = col.workbookValues ?? col.values;
-      const display = resolveWorkbookDisplayValues(col);
-      const value = display[row.id] ?? computeWorkbookFormulas(layout)[row.id];
+      const computed = computeWorkbookFormulas(layout);
+      const value = col.formulaOverrides?.[row.id] ?? computed[row.id];
       if (confirmedOnly) {
         if (row.excelBehavior === "input" && !isUserVerifiedField(col, row.id)) return "";
         return formatExcelPasteNumber(value);

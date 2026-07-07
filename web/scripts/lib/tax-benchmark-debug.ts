@@ -19,9 +19,9 @@ import {
   type PrimaryScore,
 } from "./tax-benchmark-score";
 
-const ALL_FIXTURES: Record<string, { values: Record<string, number> }> = {
+const ALL_FIXTURES: Record<string, { values: Record<string, number>; top8Amounts?: number[] }> = {
   ...WORKBOOK_COMPARISON_FIXTURES.tax,
-  ...(changwenFixtures as Record<string, { values: Record<string, number> }>),
+  ...(changwenFixtures as Record<string, { values: Record<string, number>; top8Amounts?: number[] }>),
 };
 
 const ROW_LABEL = new Map(TAX_WORKBOOK_ROWS.map((r) => [r.id, r.label]));
@@ -50,8 +50,8 @@ export type ClientYearDebugReport = {
   fixSuggestions: string[];
 };
 
-function fixtureValues(fixtureKey: string): Record<string, number> {
-  const exp = ALL_FIXTURES[fixtureKey]?.values;
+function fixtureForKey(fixtureKey: string): { values: Record<string, number>; top8Amounts?: number[] } {
+  const exp = ALL_FIXTURES[fixtureKey];
   if (!exp) throw new Error(`No fixture for ${fixtureKey}`);
   return exp;
 }
@@ -141,9 +141,10 @@ export function buildClientYearDebugReport(
   fixtureKey: string,
   parsed: ParsedBenchmarkContext,
 ): ClientYearDebugReport {
-  const exp = fixtureValues(fixtureKey);
+  const fixture = fixtureForKey(fixtureKey);
+  const exp = fixture.values;
   const fields = scoreAllFieldsExcludingOpexSlots(fixtureKey, parsed.values);
-  const opexDiagnostic = diagnoseTop8OpexMultiset(exp, parsed.values);
+  const opexDiagnostic = diagnoseTop8OpexMultiset(fixture, parsed.values);
   const fieldDiagnostics = buildFieldMissDiagnostics(parsed, fields);
 
   const opexSlotSources = OPERATING_EXPENSE_SLOT_IDS.map((id) => ({

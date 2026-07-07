@@ -22,7 +22,12 @@ const INPUT_ROW_IDS = new Set(
 );
 
 function usesAttachmentGapRescan(mode: OcrMode): boolean {
-  return isOcrRecoveryEnabled() && (mode === "thorough" || mode === "vercel-thorough");
+  return (
+    mode === "thorough" ||
+    mode === "vercel-thorough" ||
+    mode === "balanced" ||
+    mode === "vercel-balanced"
+  );
 }
 
 const FACT_TO_TAX_ID: Record<string, string> = {
@@ -214,13 +219,17 @@ export async function parseTaxReturn(
       ocrModeLabel = (ocr.ocrMode ?? ocrMode) as OcrMode;
 
       if (usesAttachmentGapRescan(ocrMode)) {
+        // Baseline for "which pages have we already OCR'd" is the balanced-tier equivalent
+        // of whatever mode actually ran (thorough modes build on top of balanced internally;
+        // balanced modes already are that baseline).
+        const baselineMode = ocrModeLabel.startsWith("vercel") ? "vercel-balanced" : "balanced";
         const gap = await rescanMissingAttachmentsExperimental(
           bytes,
           embeddedText,
           ocrText,
           filename,
           yearProbe ?? undefined,
-          ocrModeLabel === "thorough" ? "balanced" : "vercel-balanced",
+          baselineMode,
         );
         if (gap.ran) {
           ocrText = gap.ocrText;

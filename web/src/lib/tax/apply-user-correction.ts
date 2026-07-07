@@ -8,7 +8,7 @@ import {
 import { refreshTaxYearVerification } from "@/lib/tax/reconcile-tax-year";
 import { OPERATING_EXPENSE_SLOT_IDS } from "@/lib/tax/operating-expenses";
 import { isFormulaFieldId, snapshotParserFormulaBaseline } from "@/lib/tax/workbook-display";
-import type { TaxYearValues } from "@/lib/tax-workbook";
+import type { ParserReviewSnapshot, TaxYearValues } from "@/lib/tax-workbook";
 import type { OpexCandidate } from "@/lib/tax-return/opex-candidate-ranking";
 
 export function enrichParsedTaxYear(row: ParsedTaxYear): TaxYearValues {
@@ -60,13 +60,108 @@ function snapshotParserSources(col: TaxYearValues): Record<string, string> {
   return { ...(col.parserFieldSources ?? col.fieldSources ?? {}) };
 }
 
-function restoreParserFieldSource(col: TaxYearValues, fieldId: string): TaxYearValues {
-  const parserFieldSources = snapshotParserSources(col);
-  const fieldSources = { ...(col.fieldSources ?? {}) };
-  const restored = parserFieldSources[fieldId];
-  if (restored) fieldSources[fieldId] = restored;
-  else delete fieldSources[fieldId];
-  return { ...col, parserFieldSources, fieldSources };
+/** Capture post-parse values and review flags for one column (call once after finalize). */
+export function snapshotParserReview(col: TaxYearValues): ParserReviewSnapshot {
+  const values = { ...(col.workbookValues ?? col.values) };
+  return {
+    values,
+    fieldSources: col.fieldSources ? { ...col.fieldSources } : undefined,
+    fieldFlags: col.fieldFlags
+      ? Object.fromEntries(Object.entries(col.fieldFlags).map(([k, v]) => [k, [...v]]))
+      : undefined,
+    fieldStatus: col.fieldStatus ? { ...col.fieldStatus } : undefined,
+    displayConfidence: col.displayConfidence ? { ...col.displayConfidence } : undefined,
+    fieldTrustTier: col.fieldTrustTier ? { ...col.fieldTrustTier } : undefined,
+  };
+}
+
+function restoreReviewField(col: TaxYearValues, snap: ParserReviewSnapshot | undefined, fieldId: string) {
+  if (!snap) return {};
+  const patch: Partial<TaxYearValues> = {};
+  if (snap.fieldSources && fieldId in snap.fieldSources) {
+    patch.fieldSources = { ...(col.fieldSources ?? {}), [fieldId]: snap.fieldSources[fieldId]! };
+  }
+  if (snap.fieldFlags && snap.fieldFlags[fieldId]) {
+    patch.fieldFlags = { ...(col.fieldFlags ?? {}), [fieldId]: [...snap.fieldFlags[fieldId]!] };
+  } else if (col.fieldFlags?.[fieldId]) {
+    const fieldFlags = { ...col.fieldFlags };
+    delete fieldFlags[fieldId];
+    patch.fieldFlags = fieldFlags;
+  }
+  if (snap.fieldStatus && snap.fieldStatus[fieldId]) {
+    patch.fieldStatus = { ...(col.fieldStatus ?? {}), [fieldId]: snap.fieldStatus[fieldId]! };
+  }
+  if (snap.displayConfidence && snap.displayConfidence[fieldId] !== undefined) {
+    patch.displayConfidence = {
+      ...(col.displayConfidence ?? {}),
+      [fieldId]: snap.displayConfidence[fieldId]!,
+    };
+  }
+  if (snap.fieldTrustTier && snap.fieldTrustTier[fieldId]) {
+    patch.fieldTrustTier = { ...(col.fieldTrustTier ?? {}), [fieldId]: snap.fieldTrustTier[fieldId]! };
+  }
+  return patch;
+}
+
+function restoreFieldFromParserReview(col: TaxYearValues, fieldId: string): TaxYearValues {
+  const snap = col.parserReviewSnapshot;
+  const baseline = col.parserBaseline ?? col.values;
+
+  const userEditedFields = { ...(col.userEditedFields ?? {}) };
+  delete userEditedFields[fieldId];
+
+  const userVerifiedFields = { ...(col.userVerifiedFields ?? {}) };
+  userVerifiedFields[fieldId] = false;
+
+  let values = { ...col.values };
+  let workbookValues = col.workbookValues ? { ...col.workbookValues } : undefined;
+  let formulaOverrides = col.formulaOverrides ? { ...col.formulaOverrides } : undefined;
+
+  if (isFormulaFieldId(fieldId)) {
+    if (formulaOverrides) {
+      delete formulaOverrides[fieldId];
+      if (!Object.keys(formulaOverrides).length) formulaOverrides = undefined;
+    }
+  } else {
+    const restored = snap?.values[fieldId] ?? baseline[fieldId];
+    if (restored !== undefined) {
+      values[fieldId] = restored;
+      if (
+        OPERATING_EXPENSE_SLOT_IDS.includes(fieldId as (typeof OPERATING_EXPENSE_SLOT_IDS)[number]) ||
+        fieldId === "other_operating_expenses"
+      ) {
+        workbookValues = { ...(workbookValues ?? values), [fieldId]: restored };
+      }
+    }
+  }
+
+  if (!snap) {
+    const legacy: TaxYearValues = {
+      ...col,
+      values,
+      workbookValues,
+      formulaOverrides,
+      userEditedFields,
+      userVerifiedFields,
+      parserFieldSources: snapshotParserSources(col),
+    };
+    const restoredSrc = col.parserFieldSources?.[fieldId];
+    if (restoredSrc) {
+      legacy.fieldSources = { ...(col.fieldSources ?? {}), [fieldId]: restoredSrc };
+    }
+    return refreshTaxYearVerification(legacy);
+  }
+
+  return {
+    ...col,
+    ...restoreReviewField(col, snap, fieldId),
+    values,
+    workbookValues,
+    formulaOverrides,
+    userEditedFields,
+    userVerifiedFields,
+    parserFieldSources: snapshotParserSources(col),
+  };
 }
 
 function withUserVerified(col: TaxYearValues, fieldId: string, source: string): TaxYearValues {
@@ -172,8 +267,7 @@ export function applyUserFieldVerification(
   }
 
   userVerifiedFields[fieldId] = false;
-  const next = restoreParserFieldSource({ ...col, userVerifiedFields }, fieldId);
-  return refreshTaxYearVerification(next);
+  return restoreFieldFromParserReview({ ...col, userVerifiedFields }, fieldId);
 }
 
 export function parseEditedNumber(raw: string): number | null {

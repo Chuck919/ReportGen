@@ -2,7 +2,7 @@ import type { ResolvedFields } from "./merge";
 import { lineMoneyTokens } from "./money";
 import { pickComparisonColumnIndex, shrinkToYearColumns } from "@/lib/two-year-comparison-parser";
 import { scanComparisonOtherDeductionsTotal, computeComparisonOpexResidual } from "./comparison-opex";
-import { extractOtherDeductionsBlockOpex, extractStatementDeductions, blockStmtTotalCorroborated, scanStatement2Total, extractStatementTaxesSplit } from "./statement-extractors";
+import { extractOtherDeductionsBlockOpex, extractStatementDeductions, blockStmtTotalCorroborated, scanStatement2Total, extractStatementTaxesSplit, isComparisonWorksheetContext } from "./statement-extractors";
 import { lineMatchesLabelPattern, repairOcrLabel } from "./ocr-label-repair";
 import { knownStmt2AttachmentSum } from "./stmt2-total-inference";
 import { closureTolerance } from "./structural-tolerance";
@@ -16,12 +16,22 @@ type RowRule = {
 };
 
 const COMPARISON_ROW_RULES: RowRule[] = [
+  { id: "officer_compensation", labelRe: /OFFICER|COMPENSATION\s+OF\s+OFFICER/i, minAmount: 1000 },
+  {
+    id: "salaries_wages",
+    labelRe: /SALAR.*WAGE|WAGES?\s+LESS|EMPLOYMENT\s+CREDIT/i,
+    minAmount: 5000,
+  },
   { id: "utilities", labelRe: /UTILIT|UTILITY|ELECTRIC/i, minAmount: 500 },
   { id: "bank_credit_card", labelRe: /BANK|CREDIT\s+CARD|MERCHANT/i, minAmount: 500 },
   { id: "professional_fees", labelRe: /PROFESSIONAL|LEGAL\s+AND|ACCOUNTING/i, minAmount: 500 },
+  { id: "repairs", labelRe: /REPAIR|MAINT/i, minAmount: 500 },
+  { id: "insurance", labelRe: /^INSURANCE\b/i, minAmount: 500 },
+  { id: "advertising", labelRe: /ADVERT/i, minAmount: 100 },
   { id: "taxes_paid", labelRe: /TAXES\s+PAID|STATE\s+INCOME\s+TAX/i, minAmount: 1000 },
   { id: "rent", labelRe: /\bRENTS?\b/i, minAmount: 10_000 },
   { id: "taxes_licenses", labelRe: /TAXES\s+AND\s+LIC/i, minAmount: 1000 },
+  { id: "employee_benefits", labelRe: /EMPLOYEE\s+BENEFIT/i, minAmount: 1000 },
   { id: "other_operating_income", labelRe: /OTHER\s+OPERATING\s+INCOME|OTHER\s+INCOME/i, minAmount: 100 },
   { id: "cogs", labelRe: /COST\s+OF\s+(?:GOODS|SALES)|COGS|\bC\.?\s*O\.?\s*G/i, minAmount: 10_000 },
   { id: "depreciation", labelRe: /DEPRECIATION/i, minAmount: 100 },
@@ -335,4 +345,100 @@ export function refillFromComparisonLabeledRows(
     }
   }
   // other_operating_expenses comparison residual left to reconcileOtherOperatingExpenses ranking.
+}
+
+const COMPARISON_LEDGER_LABELS: Record<string, string> = {
+  officer_compensation: "Officer compensation",
+  salaries_wages: "Salaries and wages",
+  repairs: "Repairs and maintenance",
+  insurance: "Insurance",
+  utilities: "Utilities",
+  bank_credit_card: "Bank and credit card",
+  professional_fees: "Professional fees",
+  employee_benefits: "Employee benefit programs",
+  advertising: "Advertising",
+  taxes_licenses: "Taxes and Licenses",
+};
+
+const COMPARISON_LEDGER_IDS = new Set(Object.keys(COMPARISON_LEDGER_LABELS));
+
+/** Comparison-worksheet expense rows for top-8 ledger (repairs, insurance, utilities, etc.). */
+export function extractComparisonExpenseLines(
+  allText: string,
+  targetYear: number,
+): Array<{ label: string; amount: number; source: string }> {
+  const blockInfo = findComparisonBlock(allText);
+  if (!blockInfo) return [];
+  const years = headerYearsInBlock(blockInfo.text, allText, blockInfo.start);
+  const out: Array<{ label: string; amount: number; source: string }> = [];
+  const rawLines = blockInfo.text.split(/\n/);
+
+  for (let i = 0; i < rawLines.length; i++) {
+    let line = rawLines[i]!.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    if (!/\d/.test(line) && i + 1 < rawLines.length) {
+      const next = rawLines[i + 1]!.replace(/\s+/g, " ").trim();
+      if (/\d/.test(next) && /salar|wage|officer|repair|insur|advert|rent|tax|utilit|bank|profession|benefit|supply/i.test(`${line} ${next}`)) {
+        line = `${line} ${next}`;
+        i += 1;
+      }
+    }
+    if (!/\d/.test(line)) continue;
+    pushComparisonLine(line, years, targetYear, out);
+  }
+
+  // Fallback: comparison rows OCR'd outside the primary block window.
+  for (const rawLine of allText.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line || !/\d/.test(line)) continue;
+    const lineIdx = allText.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? allText.slice(Math.max(0, lineIdx - 1200), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : "";
+    if (!isComparisonExpenseRowContext(recentContext)) continue;
+    pushComparisonLine(line, years, targetYear, out);
+  }
+
+  return dedupeComparisonLines(out);
+}
+
+function isComparisonExpenseRowContext(ctx: string): boolean {
+  return (
+    isComparisonWorksheetContext(ctx) ||
+    /prior\s+year\s+current\s+year|gross\s+receipts|deductions\s*:/i.test(ctx)
+  );
+}
+
+function pushComparisonLine(
+  line: string,
+  years: [number, number] | undefined,
+  targetYear: number,
+  out: Array<{ label: string; amount: number; source: string }>,
+): void {
+  for (const rule of COMPARISON_ROW_RULES) {
+    if (!COMPARISON_LEDGER_IDS.has(rule.id)) continue;
+    const labelLine = repairOcrLabel(line);
+    if (!lineMatchesLabelPattern(line, rule.labelRe) && !rule.labelRe.test(labelLine)) continue;
+    const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= rule.minAmount);
+    const picked = pickColumn(nums, targetYear, years);
+    if (picked === undefined) continue;
+    out.push({
+      label: COMPARISON_LEDGER_LABELS[rule.id] ?? rule.id,
+      amount: Math.round(Math.abs(picked)),
+      source: `Two-year comparison (${rule.id} row)`,
+    });
+    break;
+  }
+}
+
+function dedupeComparisonLines(
+  lines: Array<{ label: string; amount: number; source: string }>,
+): Array<{ label: string; amount: number; source: string }> {
+  const byLabel = new Map<string, { label: string; amount: number; source: string }>();
+  for (const line of lines) {
+    const prev = byLabel.get(line.label);
+    if (!prev || line.amount > prev.amount) byLabel.set(line.label, line);
+  }
+  return [...byLabel.values()];
 }

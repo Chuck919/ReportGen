@@ -15,6 +15,9 @@
  *
  * Live forces HTTP /api/parse-tax-return per PDF, then mergeParsedTaxYears (same as the browser).
  *
+ * Live batch (single multi-year, multi-file POST — not one request per year):
+ *   UI_BENCH_LIVE=1 UI_BENCH_LIVE_BATCH=1 BASE_URL=http://localhost:3000 npx tsx scripts/benchmark-ui-session.ts balanced
+ *
  * Thresholds (exit 1 if any fail):
  *   - avg field accuracy (excl opex slots) ≥ 99%
  *   - avg opex amount multiset ≥ 99%
@@ -31,6 +34,8 @@ import { getEmbeddedPdfText } from "./lib/pdf-embedded-text";
 import { parseTaxReturnFromText } from "../src/lib/tax-return/parse-from-text";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";
 import { mergeParsedTaxYears } from "../src/lib/tax/client-merge";
+import { rescanMissingAttachmentsExperimental } from "../src/lib/tax/ocr-recovery-experimental";
+import { probeOcrCoverageGaps } from "../src/lib/tax-return/ocr-coverage-rescan";
 import {
   scoreAllFieldsExcludingOpexSlots,
   scoreOpexAmountsOnly,
@@ -58,8 +63,61 @@ import changwenFixtures from "./changwen-fixtures.json";
 const mode = (process.argv[2] ?? "balanced") as "fast" | "balanced" | "thorough";
 const onlyClient = process.argv[3];
 const live = process.env.UI_BENCH_LIVE === "1";
+// "sequential" (default) matches the real Tax-tab UI: one POST per PDF, then a single client-side
+// mergeParsedTaxYears() over all returned rows. "batch" instead sends every year's PDF as multiple
+// `files` fields on ONE POST (the API supports this — form.getAll("files")) — a genuine multi-year,
+// single-request upload, to check the server's multi-file path and cross-year opex grouping when
+// years truly arrive together server-side, not just merged client-side after N sequential calls.
+const liveBatch = process.env.UI_BENCH_LIVE_BATCH === "1";
 const base = process.env.BASE_URL ?? "http://localhost:3000";
 const CACHE_DIR = path.join(process.cwd(), "scripts", "ocr-cache");
+const OUT_DIR = path.join(process.cwd(), "scripts", "benchmark-output");
+const timeoutMs = Number(process.env.BENCHMARK_TIMEOUT_MS) || 25 * 60_000;
+
+let liveFetchAgent: Agent | undefined;
+
+function liveApiHeaders(): Record<string, string> {
+  const key = process.env.PARSE_TAX_API_KEY?.trim();
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
+function getLiveFetchAgent(): Agent {
+  if (!liveFetchAgent) {
+    liveFetchAgent = new Agent({
+      connectTimeout: 60_000,
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
+    });
+  }
+  return liveFetchAgent;
+}
+
+async function closeLiveFetchAgent(): Promise<void> {
+  if (!liveFetchAgent) return;
+  await liveFetchAgent.close();
+  liveFetchAgent = undefined;
+}
+
+async function warmupLiveServer(): Promise<void> {
+  const agent = new Agent({ connectTimeout: 10_000, headersTimeout: 120_000, bodyTimeout: 120_000 });
+  try {
+    const res = await undiciFetch(`${base}/api/parse-tax-return`, {
+      method: "GET",
+      headers: liveApiHeaders(),
+      dispatcher: agent,
+    });
+    if (!res.ok) throw new Error(`warmup HTTP ${res.status}`);
+    await res.text();
+    console.log(`Server ready at ${base}\n`);
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Dev server not reachable at ${base} (${detail}). Start it first: cd web && npm run dev`,
+    );
+  } finally {
+    await agent.close();
+  }
+}
 
 /** UI cells that look trusted/green — wrong values here are dangerous. */
 const TRUSTED_GREEN_TIERS = new Set<FieldTrustTier>([
@@ -135,25 +193,48 @@ async function parseYearCached(client: TaxBenchmarkClient, year: number): Promis
   const bytes = await readFile(pdfPath);
   const embedded = await getEmbeddedPdfText(bytes);
   const cp = await resolveCache(client.id, year);
+  let ocr: string;
   if (cp) {
-    const ocr = await readFile(cp, "utf8");
-    const parsed = parseTaxReturnFromText(path.basename(pdfPath), embedded, ocr, year, {
-      ocrMode: mode,
-    });
+    ocr = await readFile(cp, "utf8");
+  } else {
+    console.log("(live OCR) ");
+    const { parseTaxReturn } = await import("../src/lib/tax-return-parser");
+    const live = await parseTaxReturn(path.basename(pdfPath), bytes, embedded, year, mode);
     return {
-      ...parsed,
+      ...live,
       filename: path.basename(pdfPath),
-      parseStatus: "ok",
+      parseStatus: live.parseStatus ?? "ok",
     } as ParsedTaxYear;
   }
-  // No cache for this mode — run live local OCR (same as Tax tab server path).
-  console.log("(live OCR) ");
-  const { parseTaxReturn } = await import("../src/lib/tax-return-parser");
-  const live = await parseTaxReturn(path.basename(pdfPath), bytes, embedded, year, mode);
+
+  if (mode === "thorough" || mode === "balanced") {
+    const gapProbe = probeOcrCoverageGaps(embedded, ocr, year);
+    if (gapProbe.reasons.some((r) => /stmt2-detail-missing|stmt2-total-unparseable/i.test(r))) {
+      const gap = await rescanMissingAttachmentsExperimental(
+        bytes,
+        embedded,
+        ocr,
+        path.basename(pdfPath),
+        year,
+        "balanced",
+      );
+      if (gap.ran) {
+        ocr = gap.ocrText;
+        console.log(`gap-rescan p${gap.pages.join(",")} `);
+        if (cp) {
+          await writeFile(cp, ocr, "utf8");
+        }
+      }
+    }
+  }
+
+  const parsed = parseTaxReturnFromText(path.basename(pdfPath), embedded, ocr, year, {
+    ocrMode: mode,
+  });
   return {
-    ...live,
+    ...parsed,
     filename: path.basename(pdfPath),
-    parseStatus: live.parseStatus ?? "ok",
+    parseStatus: "ok",
   } as ParsedTaxYear;
 }
 
@@ -164,18 +245,60 @@ async function parseYearLive(client: TaxBenchmarkClient, year: number): Promise<
   form.append("files", new Blob([bytes], { type: "application/pdf" }), path.basename(pdfPath));
   form.append("ocrMode", mode);
   form.append("format", "json");
-  const timeoutMs = Number(process.env.BENCHMARK_TIMEOUT_MS) || 25 * 60_000;
-  const agent = new Agent({ connectTimeout: 60_000, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
   const res = await undiciFetch(`${base}/api/parse-tax-return`, {
     method: "POST",
+    headers: liveApiHeaders(),
     body: form as unknown as BodyInit,
-    dispatcher: agent,
+    dispatcher: getLiveFetchAgent(),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${client.id} ${year}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} for ${client.id} ${year}: ${text.slice(0, 200)}`);
+  }
   const json = (await res.json()) as { parsed?: ParsedTaxYear[]; error?: string };
   const row = json.parsed?.[0];
   if (!row) throw new Error(json.error ?? `No parse result for ${client.id} ${year}`);
   return row;
+}
+
+/** All of a client's PDFs (every year) attached as multiple `files` fields on one POST — a true
+ * single-request, multi-year upload, exercising the server's own multi-file loop instead of N
+ * separate client-simulated requests. */
+async function parseYearsLiveBatch(client: TaxBenchmarkClient): Promise<ParsedTaxYear[]> {
+  const form = new FormData();
+  for (const year of client.years) {
+    const pdfPath = await resolveTaxReturnPdf(path.resolve(process.cwd(), client.docsDir), year);
+    const bytes = await readFile(pdfPath);
+    form.append("files", new Blob([bytes], { type: "application/pdf" }), path.basename(pdfPath));
+  }
+  form.append("ocrMode", mode);
+  form.append("format", "json");
+  const res = await undiciFetch(`${base}/api/parse-tax-return`, {
+    method: "POST",
+    headers: liveApiHeaders(),
+    body: form as unknown as BodyInit,
+    dispatcher: getLiveFetchAgent(),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} for ${client.id} batch upload: ${text.slice(0, 300)}`);
+  }
+  const json = (await res.json()) as {
+    parsed?: ParsedTaxYear[];
+    error?: string;
+    fileErrors?: Array<{ filename: string; message: string }>;
+    partial?: boolean;
+  };
+  if (json.fileErrors?.length) {
+    for (const fe of json.fileErrors) console.log(`  warn: OCR miss on ${fe.filename}: ${fe.message}`);
+  }
+  if (!json.parsed?.length) throw new Error(json.error ?? `No parse results for ${client.id} batch upload`);
+  if (json.parsed.length !== client.years.length) {
+    console.log(
+      `  warn: batch upload returned ${json.parsed.length} row(s) for ${client.years.length} file(s)`,
+    );
+  }
+  return json.parsed;
 }
 
 function isCleanLabel(label: string): { ok: boolean; reason?: string } {
@@ -269,12 +392,18 @@ function auditGreenDangers(columns: TaxYearValues[], client: TaxBenchmarkClient)
  * (same as uploading a batch / progressive onTier).
  */
 async function runClientSession(client: TaxBenchmarkClient): Promise<ClientSessionResult> {
-  const incoming: ParsedTaxYear[] = [];
-  for (const year of client.years) {
-    process.stdout.write(`  parse ${client.id} ${year}… `);
-    const row = live ? await parseYearLive(client, year) : await parseYearCached(client, year);
-    incoming.push(row);
+  let incoming: ParsedTaxYear[] = [];
+  if (live && liveBatch) {
+    process.stdout.write(`  parse ${client.id} (batch upload, ${client.years.length} files)… `);
+    incoming = await parseYearsLiveBatch(client);
     console.log("ok");
+  } else {
+    for (const year of client.years) {
+      process.stdout.write(`  parse ${client.id} ${year}… `);
+      const row = live ? await parseYearLive(client, year) : await parseYearCached(client, year);
+      incoming.push(row);
+      console.log("ok");
+    }
   }
 
   // Exact UI merge: empty session → all years at once (batch upload).
@@ -347,6 +476,8 @@ async function runClientSession(client: TaxBenchmarkClient): Promise<ClientSessi
 }
 
 async function main() {
+  await mkdir(OUT_DIR, { recursive: true });
+
   const clients = onlyClient
     ? TAX_BENCHMARK_CLIENTS.filter((c) => c.id === onlyClient)
     : TAX_BENCHMARK_CLIENTS;
@@ -355,15 +486,21 @@ async function main() {
     `=== UI SESSION BENCHMARK mode=${mode} path=${live ? `live ${base}` : "cached+merge"} ===\n`,
   );
 
+  if (live) await warmupLiveServer();
+
   const results: ClientSessionResult[] = [];
-  for (const client of clients) {
-    console.log(`\n── ${client.id} (${client.years.join(", ")}) ──`);
-    try {
-      results.push(await runClientSession(client));
-    } catch (e) {
-      console.error(`  ERROR: ${e instanceof Error ? e.message : e}`);
-      forceExit(2);
+  try {
+    for (const client of clients) {
+      console.log(`\n── ${client.id} (${client.years.join(", ")}) ──`);
+      try {
+        results.push(await runClientSession(client));
+      } catch (e) {
+        console.error(`  ERROR: ${e instanceof Error ? e.message : e}`);
+        forceExit(2);
+      }
     }
+  } finally {
+    await closeLiveFetchAgent();
   }
 
   console.log("\n═══ SUMMARY ═══\n");
@@ -438,9 +575,7 @@ async function main() {
   console.log(`Unclean labels: ${totalLabel}`);
   console.log(`Formula mismatches: ${totalMath}`);
 
-  const outDir = path.join(process.cwd(), "scripts", "benchmark-output");
-  await mkdir(outDir, { recursive: true });
-  const outPath = path.join(outDir, `ui-session-${mode}-${Date.now()}.json`);
+  const outPath = path.join(OUT_DIR, `ui-session-${live ? "live-" : ""}${mode}-${Date.now()}.json`);
   await writeFile(outPath, JSON.stringify({ mode, live, results, aggregate: agg, yellowRate }, null, 2));
   console.log(`\nWrote ${outPath}`);
 

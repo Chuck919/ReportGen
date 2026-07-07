@@ -1,6 +1,10 @@
 import type { OcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
 import { scanComparisonOtherDeductionsTotal } from "@/lib/tax-return/comparison-opex";
-import { scanStatement2Total } from "@/lib/tax-return/statement-extractors";
+import {
+  extractDocumentWideDeductionLines,
+  extractStatementExpenseLines,
+  scanStatement2Total,
+} from "@/lib/tax-return/statement-extractors";
 
 export type CoverageGapProbe = {
   needsRescan: boolean;
@@ -53,11 +57,34 @@ export function probeOcrCoverageGaps(
   const mentionsStmt2 = /see\s+stmt\s*2|statement\s*2|stmt\s*2.*other\s+deduct|other\s+deduct.*statement/i.test(
     allText,
   );
-  if (mentionsStmt2 && scanStatement2Total(allText) === undefined) {
+  const stmt2Total = scanStatement2Total(allText);
+  if (mentionsStmt2 && stmt2Total === undefined) {
     reasons.push("stmt2-total-unparseable");
     hintFields.add("other_operating_expenses");
     hintFields.add("professional_fees");
     hintFields.add("utilities");
+  }
+
+  /** Stmt-2 total present but itemized bank/prof/util not found — attachment OCR gap. */
+  if (stmt2Total !== undefined && stmt2Total >= 5_000) {
+    const targeted = extractDocumentWideDeductionLines(allText);
+    const stmt = extractStatementExpenseLines(allText);
+    const pools = [...targeted, ...stmt];
+    const hasCategory = (id: string) =>
+      pools.some((l) => {
+        const t = l.label.toLowerCase();
+        if (id === "bank_credit_card") return /bank|credit\s+card|merchant/.test(t);
+        if (id === "professional_fees") return /profession|legal|account/.test(t);
+        if (id === "utilities") return /utilit/.test(t);
+        return false;
+      });
+    const gaps = (["bank_credit_card", "professional_fees", "utilities"] as const).filter(
+      (id) => !hasCategory(id),
+    );
+    if (gaps.length >= 2) {
+      reasons.push(`stmt2-detail-missing (${gaps.join(", ")})`);
+      for (const id of gaps) hintFields.add(id);
+    }
   }
 
   return {

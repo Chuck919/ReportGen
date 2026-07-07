@@ -122,14 +122,17 @@ export async function rescanMissingAttachmentsExperimental(
   const gap = probeOcrCoverageGaps(embeddedText, ocrText, year, coverage);
   const opexClosureBad =
     coverage.opexClosureRatio !== undefined && coverage.opexClosureRatio < 0.45;
+  const stmt2DetailMissing = gap.reasons.some((r) => /stmt2-detail-missing/i.test(r));
   const needsGapRescan =
     gap.needsRescan &&
     (missingAttach.includes("other_operating_expenses") ||
       parsed.values.other_operating_expenses === undefined ||
-      opexClosureBad);
+      opexClosureBad ||
+      stmt2DetailMissing);
   const needsRescan =
-    missingAttach.includes("other_operating_expenses") ||
+    missingAttach.some((id) => ATTACHMENT_RESCAN_FIELDS.includes(id as (typeof ATTACHMENT_RESCAN_FIELDS)[number])) ||
     needsGapRescan ||
+    stmt2DetailMissing ||
     needsStmt2AttachmentRescan(embeddedText, ocrText);
   if (!needsRescan) {
     return { ocrText, pages: [], ms: 0, ran: false };

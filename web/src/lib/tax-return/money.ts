@@ -56,9 +56,21 @@ export function lineMoneyTokens(line: string): number[] {
   return parseOcrMoneyRuns(line, 2);
 }
 
-/** Form 1120-S page-1 line prefix — tolerates OCR junk before bracketed line numbers (e.g. `Z[11 Rents`). */
+/**
+ * Form 1120-S page-1 line prefix — tolerates OCR junk before bracketed line numbers (e.g. `Z[11 Rents`).
+ * Uses a lookbehind (not a `{0,2}` optional prefix class, which can match zero-width and silently
+ * accept a digit right before `n`) so a trailing digit of a larger number — e.g. the `9` in a
+ * comparison-schedule "change" column value like `5,439` — can never be mistaken for line number 9.
+ */
 export function isForm1120Line(line: string, n: number): boolean {
-  return new RegExp(`(?:^|[\\s|]|[^\\d\\s]{0,2})\\[?${n}(?:\\](?!\\d)|\\b(?!\\d))`, "i").test(line);
+  const m = new RegExp(`(?<![\\d.])\\[?${n}(?:\\](?!\\d)|\\b(?!\\d))`, "i").exec(line);
+  if (!m) return false;
+  // A genuine form row prints its line number at (or near) the start of the row, tolerating a
+  // short OCR-junk prefix (e.g. `Z[11 Rents`, `& | 26 Other deductions`). A match found deep into
+  // the line is almost always a cross-reference inside unrelated prose — e.g. a local/state tax
+  // form's instructions mentioning "...Line 31 is greater than $5,000..." as a threshold, not an
+  // actual IRS Form 1120 row — which would otherwise be misread as that row's dollar amount.
+  return m.index <= 30;
 }
 
 /** Leading IRS line number on a row (e.g. `18 Other current liabilities`). */
@@ -81,7 +93,16 @@ export function substantialMoneyTokens(line: string): number[] {
 /** Rightmost money amount on a line (typical Form 1120-S layout). */
 export function lineTailAmount(line: string): number | undefined {
   const nums = lineMoneyTokens(line);
-  return nums.length ? nums[nums.length - 1] : undefined;
+  if (!nums.length) return undefined;
+  // A blank amount cell is sometimes OCR'd as nothing but the row's own line-number reference,
+  // repeated once leading and once bracketed (e.g. "13 Salaries and wages ... [13]") — when every
+  // money-like token on the line is that same tiny value, there is no real dollar amount printed.
+  const distinct = new Set(nums.map((n) => Math.abs(n)));
+  if (distinct.size === 1) {
+    const only = [...distinct][0]!;
+    if (only >= 1 && only <= 99) return undefined;
+  }
+  return nums[nums.length - 1];
 }
 
 /** End-of-row amount on Schedule L / Stmt lines — skips leading line numbers. */

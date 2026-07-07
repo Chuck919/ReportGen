@@ -17,6 +17,10 @@ LABEL_TO_ID: dict[str, str] = {
     "compensation of officers": "officer_compensation",
     "officer compensation": "officer_compensation",
     "salaries and wages": "salaries_wages",
+    "repairs and maintenance": "repairs_maintenance",
+    "repairs": "repairs_maintenance",
+    "insurance": "insurance",
+    "bank and credit card": "bank_credit_card",
     "advertising": "advertising",
     "rents": "rent",
     "rent": "rent",
@@ -74,6 +78,25 @@ def excel_year_columns(sh: xlrd.sheet.Sheet) -> dict[int, int]:
     return out
 
 
+def extract_top8_amounts(sh: xlrd.sheet.Sheet, col: int) -> list[int]:
+    """Eight expense rows immediately above Overhead or S,G,&A (integrator rows 11–18)."""
+    overhead_row: int | None = None
+    for row in range(sh.nrows):
+        label = norm_label(sh.cell_value(row, 0))
+        if "overhead" in label and ("s,g" in label or "sga" in label.replace(" ", "")):
+            overhead_row = row
+            break
+    if overhead_row is None or overhead_row < 8:
+        return []
+    out: list[int] = []
+    for row in range(overhead_row - 8, overhead_row):
+        raw = sh.cell_value(row, col)
+        if raw == "" or raw is None or not isinstance(raw, (int, float)):
+            continue
+        out.append(int(round(raw)))
+    return out
+
+
 def extract_file(path: Path, fixture_prefix: str) -> dict[str, dict]:
     wb = xlrd.open_workbook(str(path))
     sh = wb.sheet_by_index(0)
@@ -98,8 +121,12 @@ def extract_file(path: Path, fixture_prefix: str) -> dict[str, dict]:
                 num = abs(num)
             values[field_id] = num
 
+        top8 = extract_top8_amounts(sh, col)
         key = f"{fixture_prefix} / {year}"
-        fixtures[key] = {"year": year, "values": values}
+        entry: dict = {"year": year, "values": values}
+        if len(top8) == 8:
+            entry["top8Amounts"] = top8
+        fixtures[key] = entry
 
     return fixtures
 

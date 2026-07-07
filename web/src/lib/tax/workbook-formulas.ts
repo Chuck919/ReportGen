@@ -91,8 +91,11 @@ export function computeWorkbookFormulas(values: Record<string, number | undefine
   }
 
   // Balance sheet
+  // A small business Schedule L commonly reports only "Cash" with the other current-asset rows
+  // genuinely blank (no AR/inventory) — one present bucket is enough, matching the liability/equity
+  // buckets below. Requiring 2+ silently dropped a real, single-line cash total from Total Assets.
   const currentAssetIds = ["cash", "accounts_receivable", "inventory", "other_current_assets"];
-  if (anyPresent(out, currentAssetIds, 2)) {
+  if (anyPresent(out, currentAssetIds, 1)) {
     out.total_current_assets = sum(out, currentAssetIds);
   }
   if (out.gross_fixed_assets !== undefined || out.accumulated_depreciation !== undefined) {

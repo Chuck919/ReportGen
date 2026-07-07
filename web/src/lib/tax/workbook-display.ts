@@ -1,9 +1,11 @@
 import { TAX_WORKBOOK_ROWS, type TaxYearValues } from "@/lib/tax-workbook";
 import { computeWorkbookFormulas } from "@/lib/tax/workbook-formulas";
 
-const FORMULA_IDS = new Set(
-  TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "formula").map((r) => r.id),
-);
+function formulaFieldIds(): Set<string> {
+  return new Set(
+    TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "formula").map((r) => r.id),
+  );
+}
 
 function moneyTolerance(expected: number): number {
   return Math.max(1, Math.abs(expected) * 0.005);
@@ -14,7 +16,7 @@ function moneyDiffers(a: number, b: number): boolean {
 }
 
 export function isFormulaFieldId(fieldId: string): boolean {
-  return FORMULA_IDS.has(fieldId);
+  return formulaFieldIds().has(fieldId);
 }
 
 export function workbookInputValues(col: TaxYearValues): Record<string, number | undefined> {
@@ -69,7 +71,7 @@ export function snapshotParserFormulaBaseline(
 ): Record<string, number> {
   const computed = computeWorkbookFormulas(values);
   const out: Record<string, number> = {};
-  for (const id of FORMULA_IDS) {
+  for (const id of formulaFieldIds()) {
     const v = computed[id];
     if (v !== undefined) out[id] = v;
   }

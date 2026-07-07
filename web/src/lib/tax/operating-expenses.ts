@@ -1,9 +1,11 @@
-import { statementLineAmount } from "@/lib/tax-return/money";
+import { isForm1120Line, lineTailAmount, scheduleLineAmount, statementLineAmount } from "@/lib/tax-return/money";
 import { repairOcrLabel } from "@/lib/tax-return/ocr-label-repair";
+import { detectTaxForm } from "@/lib/tax-return/detect-tax-form";
 import {
   isPlausibleOtherOperatingExpense,
 } from "@/lib/tax-return/opex-plausibility";
 import { TAX_WORKBOOK_ROWS, type TaxYearValues } from "@/lib/tax-workbook";
+import { resolveExpectedTop8Amounts, type FixtureWithTop8 } from "@/lib/tax/fixture-top8";
 
 export const OPERATING_EXPENSE_SLOT_IDS = [
   "officer_compensation",
@@ -73,7 +75,73 @@ function isProtectedOpexSource(source: string | undefined): boolean {
   );
 }
 
-/** True when amount equals another slot or the sum of two other slots (double-count guard). */
+/** Amount came directly off the Form 1120/1120-S page (not an attachment/statement). */
+function isDirectFormLineSource(source: string | undefined): boolean {
+  return /form\s*1120|form\s*line/i.test(source ?? "");
+}
+
+/**
+ * A small direct-form-line amount (e.g. Form 1120-S line 16 "$300 advertising") should not block
+ * a materially larger, itemized attachment category (e.g. Statement 2 "repairs $10,786") from the
+ * same paste row — the itemized amount is more informative and the small form amount is folded
+ * into other operating expenses instead of being lost.
+ */
+function smallFormAmountBlocksLargerAttachment(
+  category: string,
+  slotId: OperatingExpenseSlotId,
+  cur: unknown,
+  curSource: string | undefined,
+  lineAmt: number,
+): cur is number {
+  const SMALL_FORM_AMOUNT_CEILING = 1000;
+  return (
+    category !== "advertising" &&
+    typeof cur === "number" &&
+    cur >= MIN_EXPENSE_AMOUNT &&
+    cur < SMALL_FORM_AMOUNT_CEILING &&
+    isDirectFormLineSource(curSource) &&
+    lineAmt >= cur * 3 &&
+    // Only for slots reachable by more than one category (e.g. advertising row also fed by repairs).
+    slotId === "advertising"
+  );
+}
+
+/**
+ * The bank/credit-card row is sometimes filled by a structural "closes the Statement total" residual
+ * guess (`pickStmt2BankCreditCard`) rather than a directly labeled line — a lower-certainty computed
+ * figure. When a genuinely itemized category line exists for the same row (e.g. an explicit
+ * "Insurance" or "Bank charges" Statement line) and materially disagrees with that guess, prefer the
+ * itemized line; the residual guess is folded into other operating expenses instead of being lost.
+ */
+function isHeuristicResidualSource(source: string | undefined): boolean {
+  return /closes\s+stmt\s*\d*\s*total|bank\/credit card\s*[-—]\s*verify/i.test(source ?? "");
+}
+
+function heuristicResidualBlocksItemizedLine(
+  slotId: OperatingExpenseSlotId,
+  cur: unknown,
+  curSource: string | undefined,
+  lineAmt: number,
+): cur is number {
+  return (
+    slotId === "bank_credit_card" &&
+    typeof cur === "number" &&
+    cur >= MIN_EXPENSE_AMOUNT &&
+    isHeuristicResidualSource(curSource) &&
+    !withinMoneyTolerance(cur, lineAmt)
+  );
+}
+
+/** Tight tolerance for literal-duplicate detection — much stricter than money-match tolerance,
+ * since two genuinely different SG&A categories can easily land within the loose $500/1% band
+ * (e.g. rent $18,000 vs repairs $18,046) without being the same line item. */
+function isExactDuplicateAmount(a: number, b: number): boolean {
+  if (b === 0) return a === 0;
+  return Math.abs(a - b) <= Math.max(2, Math.abs(b) * 0.0005);
+}
+
+/** True when amount equals another slot (literal duplicate line) or the sum of two other slots
+ * (double-count guard, e.g. an "other deductions" residual that is really bank + utilities). */
 function isAggregateOfOtherSlots(
   amount: number,
   values: Record<string, number | undefined>,
@@ -83,7 +151,7 @@ function isAggregateOfOtherSlots(
     .map((id) => values[id])
     .filter((n): n is number => typeof n === "number" && n >= MIN_EXPENSE_AMOUNT);
   for (let i = 0; i < others.length; i++) {
-    if (withinMoneyTolerance(others[i]!, amount)) return true;
+    if (isExactDuplicateAmount(others[i]!, amount)) return true;
     for (let j = i + 1; j < others.length; j++) {
       if (withinMoneyTolerance(others[i]! + others[j]!, amount)) return true;
     }
@@ -138,13 +206,48 @@ function stripMoneyTokens(line: string): string {
 }
 
 /**
- * Extract operating expense detail lines from the "Other deductions / Statement 2" region.
+ * Most returns attach the "Other deductions" itemized breakdown as Statement 2, but some preparers
+ * number it differently (e.g. Statement 3, when Statement 1/2 cover other income/taxes first). Read
+ * the actual number off the "Other deductions (attach statement) ... STATEMENT N" reference on the
+ * form page itself, or the attachment's own "... OTHER DEDUCTIONS STATEMENT N" header, instead of
+ * assuming it is always Statement 2.
+ */
+function resolveOtherDeductionsStatementNumber(allText: string): number {
+  for (const raw of allText.split(/\n/)) {
+    const line = normalizeWhitespace(raw);
+    if (!/other\s+deduct/i.test(line)) continue;
+    if (!/attach\s+statement|line\s*(?:19|20|26)\b/i.test(line)) continue;
+    const m = line.match(/(?:statement|stmt)\.?\s*(\d{1,2})\b/i);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 20) {
+      if (process.env.DEBUG_STMT_N) console.error(`[stmtN] matched line=`, JSON.stringify(line), "n=", n);
+      return n;
+    }
+  }
+  for (const raw of allText.split(/\n/)) {
+    const line = normalizeWhitespace(raw);
+    if (!/^(?:form|schedule)\s*\S*\s*other\s+deductions\b/i.test(line)) continue;
+    const m = line.match(/statement\s*(\d{1,2})\b/i);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 20) return n;
+  }
+  return 2;
+}
+
+/**
+ * Extract operating expense detail lines from the "Other deductions" attachment region (usually
+ * Statement 2, but the number is read dynamically — see `resolveOtherDeductionsStatementNumber`).
  * This intentionally stays simple — it prefers fewer false positives over exhaustive capture.
  */
 export function extractOperatingExpenseLinesFromText(allText: string): OperatingExpenseLine[] {
   const out: OperatingExpenseLine[] = [];
   let inStmt2 = false;
   let inFederalTable = false;
+  const stmtN = resolveOtherDeductionsStatementNumber(allText);
+  const stmtNPattern = `(?:statement|stmt|tatement)\\s*${stmtN}\\b`;
+  const otherStmtPattern = `(?:statement|stmt)\\s*(?!${stmtN}\\b)[1-9]\\d?\\b`;
 
   for (const raw of allText.split(/\n/)) {
     const line = normalizeWhitespace(raw);
@@ -162,26 +265,30 @@ export function extractOperatingExpenseLinesFromText(allText: string): Operating
       continue;
     }
     if (
-      /statement\s*2\s*-\s*form\s+1120/i.test(repairOcrLabel(line)) ||
-      (/statement\s*2|stmt\s*2|tatement\s*2/i.test(repairOcrLabel(line)) &&
+      new RegExp(`${stmtNPattern}\\s*-\\s*form\\s+1120`, "i").test(repairOcrLabel(line)) ||
+      (new RegExp(stmtNPattern, "i").test(repairOcrLabel(line)) &&
         (/other\s+deduct|other\s+ions|other\s+expense|line\s*(?:19|20|26)\b/i.test(line) ||
           /see\s+statement/i.test(line)) &&
         !/two\s*year\s*comparison|comparison\s+worksheet/i.test(recentContext))
     ) {
       inStmt2 = true;
       inFederalTable = /federal\s+statements/i.test(recentContext + line);
+      if (process.env.DEBUG_STMT_N) console.error(`[enter-main]`, JSON.stringify(line));
       continue;
     }
-    if (/^description\s+amount\b/i.test(line) && /statement\s*2|stmt\s*2/i.test(recentContext)) {
+    if (/^description\s+amount\b/i.test(line) && new RegExp(stmtNPattern, "i").test(recentContext)) {
       inFederalTable = true;
       inStmt2 = true;
+      if (process.env.DEBUG_STMT_N) console.error(`[enter-federal]`, JSON.stringify(line));
       continue;
     }
-    if (inStmt2 && /statement\s*[3-9]\b|stmt\s*[3-9]\b/i.test(line) && !/other\s+deduct/i.test(line)) {
+    if (inStmt2 && new RegExp(otherStmtPattern, "i").test(line) && !/other\s+deduct/i.test(line)) {
+      if (process.env.DEBUG_STMT_N) console.error(`[exit-otherStmt]`, JSON.stringify(line));
       inStmt2 = false;
       inFederalTable = false;
     }
     if (inStmt2 && /two\s*year\s*comparison|comparison\s+worksheet/i.test(line)) {
+      if (process.env.DEBUG_STMT_N) console.error(`[exit-comparison]`, JSON.stringify(line));
       inStmt2 = false;
       inFederalTable = false;
     }
@@ -216,6 +323,41 @@ export function extractOperatingExpenseLinesFromText(allText: string): Operating
     deduped.push(line);
   }
   return deduped.sort((a, b) => b.amount - a.amount);
+}
+
+/**
+ * Some SG&A categories (e.g. "Repairs and maintenance") are reported directly on Form 1120 /
+ * 1120-S page 1, not inside the "Other deductions" attachment — so they never appear in
+ * `extractOperatingExpenseLinesFromText`'s Statement-2/3 scan, and have no dedicated workbook
+ * slot to land in either. Surface them as high-trust expense-line candidates so the category →
+ * paste-row fill (`fillWeakSlotsFromCategorizedLines`) can still place them.
+ */
+export function extractDirectFormExpenseLines(allText: string): OperatingExpenseLine[] {
+  const kind = detectTaxForm(allText).kind;
+  const out: OperatingExpenseLine[] = [];
+
+  // Repairs and maintenance: Form 1120-S line 9; Form 1120 line 14.
+  const repairsLineNumber = kind === "1120" ? 14 : kind === "1120-s" || kind === "1065" ? 9 : undefined;
+  if (repairsLineNumber !== undefined) {
+    for (const raw of allText.split(/\n/)) {
+      const line = normalizeWhitespace(raw);
+      if (!line || !/repair/i.test(line) || /accumulated|schedule\s*l|comparison/i.test(line)) continue;
+      if (!isForm1120Line(line, repairsLineNumber)) continue;
+      const amount = scheduleLineAmount(line) ?? lineTailAmount(line);
+      if (process.env.DEBUG_STMT_N) console.error(`[directForm-repairs]`, JSON.stringify(line), "amount=", amount);
+      if (amount === undefined) continue;
+      const rounded = Math.round(Math.abs(amount));
+      if (rounded < MIN_EXPENSE_AMOUNT) continue;
+      out.push({
+        label: "Repairs and maintenance",
+        amount: rounded,
+        source: kind === "1120" ? "Form 1120 line 14" : "Form 1120-S line 9",
+      });
+      break;
+    }
+  }
+
+  return out;
 }
 
 /** Pull parser-resolved opex slot values into the expense-line pool before top-8 selection. */
@@ -542,17 +684,27 @@ function fillWeakSlotsFromCategorizedLines(col: TaxYearValues): TaxYearValues {
     { category: "utilities", slotId: "utilities", label: "Utilities" },
   ];
 
-  const byCategory = new Map<string, number>();
+  // Keep every distinct amount per category (not just the largest) — a client can have two
+  // real, separate lines that both match the same category regex (e.g. two "taxes"-shaped rows,
+  // or two "utilities"-shaped rows). Collapsing to one number per category here would silently
+  // discard the second line before it ever gets a chance to fill an empty slot below.
+  const byCategoryAmounts = new Map<string, number[]>();
   for (const line of lines) {
     const cat = expenseCategoryKey(line.label);
     if (!cat) continue;
-    byCategory.set(cat, Math.max(byCategory.get(cat) ?? 0, Math.round(line.amount)));
+    const arr = byCategoryAmounts.get(cat) ?? [];
+    arr.push(Math.round(line.amount));
+    byCategoryAmounts.set(cat, arr);
   }
+  for (const arr of byCategoryAmounts.values()) arr.sort((a, b) => b - a);
+  const byCategory = new Map<string, number>();
+  for (const [cat, arr] of byCategoryAmounts) byCategory.set(cat, arr[0]!);
 
   const values = { ...col.values };
   const fieldSources = { ...(col.fieldSources ?? {}) };
   const opexSlotLabels = { ...(col.opexSlotLabels ?? {}) };
   const usedSlots = new Set<string>();
+  let displacedToOtherOpex = 0;
 
   for (const { category, slotId, label } of categoryToSlot) {
     if (usedSlots.has(slotId)) continue;
@@ -561,13 +713,52 @@ function fillWeakSlotsFromCategorizedLines(col: TaxYearValues): TaxYearValues {
     const cur = values[slotId];
     const src = fieldSources[slotId] ?? "";
 
-    // Never overwrite form / comparison / statement amounts (even when a larger OCR line exists).
-    if (typeof cur === "number" && cur >= MIN_EXPENSE_AMOUNT && isProtectedOpexSource(src)) {
+    const overridesSmallFormAmount = smallFormAmountBlocksLargerAttachment(
+      category,
+      slotId,
+      cur,
+      src,
+      lineAmt,
+    );
+    const overridesHeuristicResidual = heuristicResidualBlocksItemizedLine(slotId, cur, src, lineAmt);
+    // "Insurance" is the intended category for the bank/credit-card row whenever both an itemized
+    // insurance line and a separate (smaller) bank/credit-card figure exist for the same year — the
+    // categoryToSlot order above already prefers insurance for this reason. Extend that preference
+    // so a freshly-found insurance line can also displace an already-protected non-insurance amount
+    // (comparison-derived bank charges, etc.) already sitting in that row.
+    const overridesNonInsuranceProtected =
+      category === "insurance" &&
+      slotId === "bank_credit_card" &&
+      typeof cur === "number" &&
+      cur >= MIN_EXPENSE_AMOUNT &&
+      !withinMoneyTolerance(cur, lineAmt) &&
+      !/insurance/i.test(src);
+    const overridesProtected =
+      overridesSmallFormAmount || overridesHeuristicResidual || overridesNonInsuranceProtected;
+
+    // Never overwrite form / comparison / statement amounts (even when a larger OCR line exists) —
+    // unless a small direct-form-line amount, or a computed "closes total" residual guess, is
+    // blocking a materially larger/more-itemized category for the same row.
+    if (
+      typeof cur === "number" &&
+      cur >= MIN_EXPENSE_AMOUNT &&
+      isProtectedOpexSource(src) &&
+      !overridesProtected
+    ) {
       if (withinMoneyTolerance(cur, lineAmt)) {
         opexSlotLabels[slotId] = col.userOpexSlotLabels?.[slotId] ?? label;
         usedSlots.add(slotId);
       }
       continue;
+    }
+
+    // Only the small-form-amount case displaces into other_operating_expenses — that amount lives
+    // on an independent form line and was never part of any Statement total. The heuristic-residual
+    // bank/credit-card guess, by contrast, is itself carved out of the same Statement total that
+    // other_operating_expenses is reconciled against, so swapping it for the itemized line does not
+    // change that total and must not be re-added.
+    if (overridesSmallFormAmount) {
+      displacedToOtherOpex += cur;
     }
 
     const strong =
@@ -590,6 +781,82 @@ function fillWeakSlotsFromCategorizedLines(col: TaxYearValues): TaxYearValues {
     fieldSources[slotId] = `Operating expenses (${label})`;
     opexSlotLabels[slotId] = col.userOpexSlotLabels?.[slotId] ?? label;
     usedSlots.add(slotId);
+  }
+
+  // Second pass: fill slots that are still genuinely empty — never touches a slot that already
+  // holds any value (form/statement/comparison amounts, or the primary category fill above are
+  // all left untouched). The candidate pool is every extracted line not already represented among
+  // the 8 slot amounts: a category's non-largest amount (kept alive by the change above instead of
+  // being discarded), and any line whose category has no `categoryToSlot` entry at all (e.g.
+  // "supplies"). This is a bounded, low-risk form of rank-by-amount — it can only add information
+  // to rows that would otherwise be blank, never override an already-filled row.
+  // Amounts newly placed here that came from the "Other deductions" Statement attachment (not a
+  // standalone Form page-1 line) were, before this pass ran, implicitly folded into the
+  // other_operating_expenses residual (computed earlier at parse time as "Statement total minus
+  // known lines" — see `knownStmt2AttachmentSum`/`inferStmt2AttachmentTotal`). Itemizing them into
+  // a named slot now must reduce that residual by the same amount, or the dollar figure is
+  // double-counted (once in its own slot, once still inside other_operating_expenses) and the P&L
+  // no longer closes to Form ordinary income. Form-page-1 lines (`extractDirectFormExpenseLines`)
+  // were never part of that Statement total, so they must not trigger this adjustment.
+  let newlyFilledFromStatementTotal = 0;
+  const emptySlots = OPERATING_EXPENSE_SLOT_IDS.filter((id) => {
+    const v = values[id];
+    return typeof v !== "number" || v < MIN_EXPENSE_AMOUNT;
+  });
+  if (emptySlots.length) {
+    const placedAmounts: number[] = OPERATING_EXPENSE_SLOT_IDS.map((id) => values[id])
+      .filter((v): v is number => typeof v === "number" && v >= MIN_EXPENSE_AMOUNT);
+    const isAlreadyPlaced = (amt: number) => placedAmounts.some((p) => withinMoneyTolerance(amt, p));
+
+    const leftover = [...lines]
+      .filter((l) => Math.round(l.amount) >= MIN_EXPENSE_AMOUNT)
+      .filter((l) => !isAlreadyPlaced(Math.round(l.amount)))
+      .filter((l) => !isAggregateOfOtherSlots(Math.round(l.amount), values, "__leftover__"))
+      .sort((a, b) => b.amount - a.amount);
+
+    const claimed = new Set<number>();
+    for (const slotId of emptySlots) {
+      const next = leftover.find((l) => !claimed.has(Math.round(l.amount)));
+      if (!next) break;
+      const amt = Math.round(next.amount);
+      claimed.add(amt);
+      placedAmounts.push(amt);
+      const cat = expenseCategoryKey(next.label);
+      const ruleLabel = cat ? EXPENSE_CATEGORY_RULES.find((r) => r.key === cat)?.display : undefined;
+      const label = ruleLabel ?? displayLabelForKey(cat ?? "", next.label);
+      values[slotId] = amt;
+      fieldSources[slotId] = `Operating expenses (ranked — ${label})`;
+      opexSlotLabels[slotId] = col.userOpexSlotLabels?.[slotId] ?? label;
+      if (/statement/i.test(next.source ?? "")) newlyFilledFromStatementTotal += amt;
+    }
+  }
+
+  if (newlyFilledFromStatementTotal >= MIN_EXPENSE_AMOUNT) {
+    const priorOtherOpex = values.other_operating_expenses;
+    if (typeof priorOtherOpex === "number" && priorOtherOpex > 0) {
+      const adjusted = Math.round(priorOtherOpex - newlyFilledFromStatementTotal);
+      // Only reduce when it stays plausible — never push it negative or erase a materially
+      // larger, differently-sourced total that clearly isn't just "everything we didn't itemize".
+      if (adjusted >= 0) {
+        values.other_operating_expenses = adjusted;
+        fieldSources.other_operating_expenses = /reconciled|residual|ranked/i.test(
+          fieldSources.other_operating_expenses ?? "",
+        )
+          ? fieldSources.other_operating_expenses!
+          : `${fieldSources.other_operating_expenses ?? "Other operating expenses"} (reduced — line now itemized in top-8)`;
+      }
+    }
+  }
+
+  if (displacedToOtherOpex >= MIN_EXPENSE_AMOUNT) {
+    const priorOtherOpex = values.other_operating_expenses;
+    values.other_operating_expenses =
+      typeof priorOtherOpex === "number" ? priorOtherOpex + displacedToOtherOpex : displacedToOtherOpex;
+    fieldSources.other_operating_expenses = /reconciled|residual/i.test(
+      fieldSources.other_operating_expenses ?? "",
+    )
+      ? fieldSources.other_operating_expenses!
+      : "Other operating expenses (includes displaced small form line)";
   }
 
   return { ...col, values, fieldSources, opexSlotLabels };
@@ -722,13 +989,15 @@ export function resolveOpexSlotLabel(col: TaxYearValues | undefined, slotId: str
 
 /**
  * Amount-only multiset match for the eight opex slots (fixture truth from Excel).
- * Used by benchmarks after we decouple labels from slot IDs.
+ * Used by benchmarks after we decouple labels from slot IDs. Scores against the full
+ * eight integrator rows (`top8Amounts`) when the fixture has them, not just the (often
+ * incomplete) `values[slotId]` entries.
  */
 export function matchTop8OpexAmounts(
-  expected: Record<string, number>,
+  fixture: FixtureWithTop8,
   actual: Record<string, number | undefined>,
 ): { ok: number; n: number; misses: string[] } {
-  const detail = diagnoseTop8OpexMultiset(expected, actual);
+  const detail = diagnoseTop8OpexMultiset(fixture, actual);
   return { ok: detail.ok, n: detail.n, misses: detail.misses };
 }
 
@@ -752,21 +1021,25 @@ export type OpexMultisetDiagnostic = {
   surplusActual: Array<{ amount: number; slotId: string; slotLabel: string }>;
 };
 
-/** Detailed multiset pairing for benchmark debugging. */
+/**
+ * Detailed multiset pairing for benchmark debugging. Uses `resolveExpectedTop8Amounts` so the
+ * gate scores the true eight integrator-row amounts (`fixture.top8Amounts`) when present,
+ * falling back to whatever `fixture.values[slotId]` entries exist for older fixtures.
+ */
 export function diagnoseTop8OpexMultiset(
-  expected: Record<string, number>,
+  fixture: FixtureWithTop8,
   actual: Record<string, number | undefined>,
 ): OpexMultisetDiagnostic {
-  const expAmounts = OPERATING_EXPENSE_SLOT_IDS.map((id) => ({
-    slotId: id,
-    amount: expected[id],
-  })).filter((e): e is { slotId: OperatingExpenseSlotId; amount: number } => typeof e.amount === "number");
+  const expAmounts = resolveExpectedTop8Amounts(fixture).map((amount) => ({
+    amount,
+    tolerance: moneyTolerance(amount),
+  }));
 
   const actRows = OPERATING_EXPENSE_SLOT_IDS.map((id) => ({
     slotId: id,
     slotLabel: slotDefaultLabel(id),
     actual: Math.round(actual[id] ?? 0),
-    expectedInFixture: expected[id],
+    expectedInFixture: fixture.values[id],
   }));
 
   const used = new Set<number>();

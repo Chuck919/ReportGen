@@ -1,4 +1,5 @@
 import { isReasonableMoneyAmount, substantialMoneyTokens } from "./money";
+import { isOtherDeductionsBlockHeader, endsOtherDeductionsBlock } from "./statement-extractors";
 
 export type Stmt2BankPick = {
   value: number;
@@ -72,19 +73,25 @@ export function pickStmt2BankCreditCard(
 
   const candidates = new Set<number>();
   const expenseChargeBanks = new Set<number>();
+  // Which IRS statement number holds "Other deductions" varies by client (Stmt 2 for some,
+  // Stmt 3+ for others) — reuse the same block-boundary detector as the main other-deductions
+  // extractor so this scan never drifts onto an unrelated same-numbered statement (e.g. a
+  // "Taxes and licenses" attachment that also happens to be Statement 2) or bail out right as it
+  // enters the real attachment (e.g. when "Other deductions" itself is Statement 3+).
   let inStmt2 = false;
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
-    if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions/i.test(line)) {
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? text.slice(Math.max(0, lineIdx - 600), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : undefined;
+    if (isOtherDeductionsBlockHeader(line, recentContext)) {
       inStmt2 = true;
       continue;
     }
-    if (/federal\s+statements/i.test(line) && /statement\s*2|stmt\s*2/i.test(line)) {
-      inStmt2 = true;
-      continue;
-    }
-    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
+    if (inStmt2 && endsOtherDeductionsBlock(line, recentContext)) inStmt2 = false;
     if (!inStmt2 || !BANK_LABEL.test(line) || /payable/i.test(line)) continue;
     const isExpenseCharge = /bank\s+&?\s*credit|bank\s+charg|credit\s+card\s+charg/i.test(line);
     for (const n of bankAmountsOnLine(line)) {

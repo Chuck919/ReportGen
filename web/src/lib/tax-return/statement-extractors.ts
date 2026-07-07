@@ -205,23 +205,22 @@ export function scanStmt2MiscLineAmounts(text: string): number[] {
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
-    if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
-      const lineIdx = text.indexOf(rawLine);
-      const recentContext = text
-        .slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length)
-        .replace(/\s+/g, " ");
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+    // "Other deductions" isn't always Statement 2 (e.g. Statement 3 when Stmt 2 is Taxes and
+    // licenses) — use the same block-boundary detector as the main extractor so this misc scan
+    // targets the actual other-deductions attachment, not a same-numbered unrelated statement.
+    if (isOtherDeductionsBlockHeader(line, recentContext)) {
       if (isComparisonWorksheetContext(recentContext)) continue;
       inStmt2 = true;
       amounts.length = 0;
       primaryAmounts.clear();
       continue;
     }
-    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
+    if (inStmt2 && endsOtherDeductionsBlock(line, recentContext)) inStmt2 = false;
     if (!inStmt2) continue;
-    const lineIdx = text.indexOf(rawLine);
-    const recentContext = text
-      .slice(Math.max(0, lineIdx - 400), lineIdx + rawLine.length)
-      .replace(/\s+/g, " ");
     if (isComparisonWorksheetContext(recentContext)) continue;
     if (/^total\b/i.test(line)) continue;
     const amount = statementLineAmount(line);
@@ -321,7 +320,7 @@ const OPEX_DETAIL_LINE =
 const LARGE_OPEX_EXCLUDED =
   /utilities\b|^auto\b|licenses?\s+and\s+permits|merchant\s+svc|merchant\s+service|professional|accounting\s+&|legal\s+and\s+prof|bank\s+charg|^insurance\b/i;
 
-function isComparisonWorksheetContext(ctx: string): boolean {
+export function isComparisonWorksheetContext(ctx: string): boolean {
   return /two\s*year\s*comparison|comparison\s+worksheet|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i.test(
     ctx,
   );
@@ -348,7 +347,7 @@ function isFormLineOtherDeductionsPointer(line: string, recentContext?: string):
   return false;
 }
 
-function isOtherDeductionsBlockHeader(line: string, recentContext?: string): boolean {
+export function isOtherDeductionsBlockHeader(line: string, recentContext?: string): boolean {
   const repaired = repairOcrLabel(line);
   const ctx = `${recentContext ?? ""} ${repaired} ${line}`;
   if (isFormLineOtherDeductionsPointer(line, recentContext)) return false;
@@ -389,7 +388,7 @@ function isFederalStatementsExpenseTable(line: string, recentContext: string): b
   );
 }
 
-function endsOtherDeductionsBlock(line: string, recentContext?: string): boolean {
+export function endsOtherDeductionsBlock(line: string, recentContext?: string): boolean {
   const ctx = `${recentContext ?? ""} ${line}`;
   if (isComparisonWorksheetContext(ctx)) return true;
   if (/form\s+1120\s+return\s+summary/i.test(line)) return true;
@@ -1021,6 +1020,240 @@ export function scanBooksOtherIncomeForYear(allText: string, targetYear: number)
     return col === 0 ? pair[0] : pair[1];
   }
   return undefined;
+}
+
+export type StatementExpenseLine = { label: string; amount: number; source: string };
+
+function stripStmt2MoneyLabel(line: string): string {
+  return repairOcrLabel(line)
+    .replace(/[\d$,.()-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isPlausibleStmt2ExpenseLabel(label: string): boolean {
+  if (label.length < 3 || label.length > 80) return false;
+  if (!/[a-z]{3,}/i.test(label)) return false;
+  if (/^total\b|^description\b|^amount\b/i.test(label)) return false;
+  if (
+    /\b(omb no|fein number|electronically filed|form corp|payment type|officer's signature|reserved for future|taxable business income|liquor\s+tax\s+payable)\b/i.test(
+      label,
+    )
+  ) {
+    return false;
+  }
+  return /\b(fees?|rents?|utilit|insur|suppl|office|bank|credit|merchant|profession|legal|account|advert|tax|licen|payroll|repairs?|maint|travel|telephone|dues|salaries?|wages?|officers?|compensation|benefit)/i.test(
+    label,
+  );
+}
+
+/** Itemized Stmt-2 expense lines for top-8 ledger (same regions as extractStatementDeductions). */
+export function extractStatementExpenseLines(text: string): StatementExpenseLine[] {
+  const out: StatementExpenseLine[] = [];
+  let inStmt2 = false;
+  let inFederalExpenseTable = false;
+
+  const pushLine = (line: string, source: string) => {
+    if (/^total\b/i.test(line)) return;
+    if (/^description\b/i.test(line) && /\bamount\b/i.test(line)) return;
+    if (/\bdepreciation\b/i.test(line) && !/accumulated/i.test(line)) return;
+    if (/\bamortization\b/i.test(line) && !/accumulated/i.test(line)) return;
+    const amount = statementLineAmount(line);
+    if (amount === undefined || !isReasonableMoneyAmount(amount)) return;
+    const rounded = Math.round(Math.abs(amount));
+    if (rounded < 100) return;
+    const label = stripStmt2MoneyLabel(line);
+    if (!isPlausibleStmt2ExpenseLabel(label)) return;
+    out.push({ label, amount: rounded, source });
+  };
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+
+    const lineIdx = text.indexOf(rawLine);
+    if (lineIdx < 0) continue;
+    const recentContext = text
+      .slice(Math.max(0, lineIdx - 600), lineIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+
+    if (isOtherDeductionsBlockHeader(line, recentContext)) {
+      inStmt2 = true;
+      inFederalExpenseTable = false;
+    }
+    if (isFederalStatementsExpenseTable(line, recentContext)) {
+      inFederalExpenseTable = true;
+      inStmt2 = true;
+    }
+    if (isComparisonWorksheetContext(recentContext)) {
+      inStmt2 = false;
+      inFederalExpenseTable = false;
+    }
+    if (inStmt2 && endsOtherDeductionsBlock(line, recentContext)) {
+      inStmt2 = false;
+      inFederalExpenseTable = false;
+    }
+
+    if (!inStmt2) continue;
+    pushLine(
+      line,
+      inFederalExpenseTable ? "Statement 2 (federal statements table)" : "Statement 2",
+    );
+  }
+
+  // Federal Statements Stmt-2 tables (DESCRIPTION / AMOUNT) — tight anchor to avoid Stmt-3 / Schedule K bleed.
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const hit = text.slice(searchFrom).search(/FORM\s+1120[\s\S]{0,120}?OTHER\s+DEDUCT(?:IONS)?[\s\S]{0,80}?STATEMENT\s*2/i);
+    if (hit < 0) break;
+    const start = searchFrom + hit;
+    const chunk = text.slice(start, start + 2800);
+    searchFrom = start + 80;
+    if (isComparisonWorksheetContext(chunk.slice(0, 400))) continue;
+    if (!/DESCRIPTION/i.test(chunk) || !/\bAMOUNT\b/i.test(chunk)) continue;
+    for (const rawLine of chunk.split(/\n/)) {
+      const line = rawLine.replace(/\s+/g, " ").trim();
+      if (!line) continue;
+      if (/SECTION\s+199A|ORDINARY\s+(?:BUSINESS\s+)?INCOME|SCHEDULE\s+K|DISTRIBUTIONS/i.test(line)) continue;
+      pushLine(line, "Statement 2 (federal statements table)");
+    }
+  }
+
+  const insurance = scanStmt2InsuranceAmount(text);
+  if (insurance !== undefined && insurance >= 100) {
+    out.push({ label: "Insurance", amount: insurance, source: "Statement 2 (insurance line)" });
+  }
+
+  const seen = new Set<string>();
+  const deduped: StatementExpenseLine[] = [];
+  for (const line of out) {
+    const key = `${line.label.toLowerCase().replace(/\s+/g, " ")}:${line.amount}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(line);
+  }
+  return deduped.sort((a, b) => b.amount - a.amount);
+}
+
+type DocumentScanRule = {
+  key: string;
+  label: string;
+  re: RegExp;
+  reject?: RegExp;
+};
+
+/** Known deduction categories — document-wide scan when Stmt-2 region gates miss attachment pages. */
+const DOCUMENT_SCAN_RULES: DocumentScanRule[] = [
+  {
+    key: "bank_credit_card",
+    label: "Bank and credit card",
+    re: /(?:^bank\b|bank\s*(?:&|and)?\s*credit\s+card|credit\s+card|merchant\s+(?:fee|service|svc))/i,
+  },
+  {
+    key: "professional_fees",
+    label: "Professional fees",
+    re: /^(?:professional|legal\s+and\s+prof|accounting\s*&|accounting\s+fee)/i,
+    reject: /staff\s+meetings?|pension|profit[\s-]*sharing|dues\s*&\s*subscriptions?/i,
+  },
+  { key: "utilities", label: "Utilities", re: /^(?:utilities\b|utility\s+expense)/i },
+  { key: "insurance", label: "Insurance", re: /^insurance\b/i },
+  { key: "repairs", label: "Repairs and maintenance", re: /^(?:repairs?\b|repairs?\s+and\s+maint)/i },
+  {
+    key: "rent",
+    label: "Rent",
+    re: /^rents?\b/i,
+    reject: /gross\s+rent|rental\s+real\s+estate|net\s+rental/i,
+  },
+  { key: "advertising", label: "Advertising", re: /^(?:advert|marketing)/i },
+  { key: "employee_benefits", label: "Employee benefit programs", re: /^employee\s+benefit/i },
+  { key: "supplies", label: "Supplies", re: /^(?:supplies\b|office\s+suppl)/i },
+];
+
+/**
+ * Targeted document-wide deduction lines — only accepts rows whose label matches a known category.
+ * Lower noise than region parsing; catches Stmt-2 detail on pages where block headers were missed.
+ */
+export function extractDocumentWideDeductionLines(text: string): StatementExpenseLine[] {
+  type ScanHit = StatementExpenseLine & { matchStrength: number };
+
+  const maxByKey = new Map<string, ScanHit>();
+
+  for (const rawLine of text.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line || /^total\b/i.test(line)) continue;
+    if (/^description\b/i.test(line) && /\bamount\b/i.test(line)) continue;
+
+    const lineIdx = text.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? text.slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : "";
+
+    if (isComparisonWorksheetContext(recentContext)) continue;
+    if (isFormLineOtherDeductionsPointer(line, recentContext)) continue;
+    if (isTaxesLicensesStmt2Line(line)) continue;
+    if (isEinOrPaymentInstructionBleed(line, 0)) continue;
+    if (
+      /\b(sign and return|form\s*8879|payment type|banking\s+information|apply for|fein number|omb no)\b/i.test(
+        recentContext + line,
+      )
+    ) {
+      continue;
+    }
+    if (/SECTION\s+199A|ORDINARY\s+(?:BUSINESS\s+)?INCOME|SCHEDULE\s+K\b|DISTRIBUTIONS/i.test(line)) {
+      continue;
+    }
+
+    const repaired = repairOcrLabel(line);
+    for (const rule of DOCUMENT_SCAN_RULES) {
+      if (!rule.re.test(repaired) && !rule.re.test(line)) continue;
+      if (rule.reject?.test(repaired) || rule.reject?.test(line)) continue;
+      if (rule.key === "bank_credit_card" && /payment|instruction/i.test(line)) continue;
+      if (rule.key === "bank_credit_card" && /payables?|accounts\s+payable|credit\s+card\s+payable/i.test(line)) {
+        continue;
+      }
+
+      let amount = statementLineAmount(line);
+      if (rule.key === "bank_credit_card") {
+        const labelAmt = line.match(
+          /(?:bank|credit\s+card|merchant)[^0-9]{0,40}(\d{1,3}(?:,\d{3})+(?:\.\d{2})?)/i,
+        );
+        if (labelAmt?.[1] !== undefined) {
+          const n = Number(labelAmt[1].replace(/,/g, ""));
+          if (Number.isFinite(n) && n >= 500) amount = n;
+        }
+      }
+      if (amount === undefined) {
+        const tokens = substantialMoneyTokens(line)
+          .map((n) => Math.round(Math.abs(n)))
+          .filter((n) => n >= 500 && isReasonableMoneyAmount(n));
+        if (tokens.length === 1) amount = tokens[0];
+      }
+      if (amount === undefined || !isReasonableMoneyAmount(amount)) continue;
+      const abs = Math.round(Math.abs(amount));
+      if (abs < 500 || abs > 2_000_000) continue;
+
+      const matchStrength = rule.re.test(repaired) && repaired.search(rule.re) === 0 ? 0 : 1;
+      const prev = maxByKey.get(rule.key);
+      if (
+        !prev ||
+        matchStrength < prev.matchStrength ||
+        (matchStrength === prev.matchStrength && abs > prev.amount)
+      ) {
+        maxByKey.set(rule.key, {
+          label: rule.label,
+          amount: abs,
+          source: "Document scan (targeted category)",
+          matchStrength,
+        });
+      }
+      break;
+    }
+  }
+
+  return [...maxByKey.values()]
+    .map(({ matchStrength: _s, ...line }) => line)
+    .sort((a, b) => b.amount - a.amount);
 }
 
 /** Insurance line amount from Stmt 2/3 other-deductions attachment (excluded from workbook opex). */

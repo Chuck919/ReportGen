@@ -93,8 +93,6 @@ export function TaxWorkbookTable({
 }) {
   const table = buildTaxTable(columns, { reverseYears });
   const rows = table.rows.filter((row) => row.section === section);
-  if (!table.columns.length || !rows.length) return null;
-
   const multiYear = columns.length > 1;
   const dynamicOpexLabels = useMemo(() => sharedOpexSlotLabels(columns), [columns]);
   const pasteTsv = useMemo(
@@ -107,6 +105,8 @@ export function TaxWorkbookTable({
       }),
     [columns, section, multiYear, dynamicOpexLabels],
   );
+
+  if (!table.columns.length || !rows.length) return null;
 
   const sectionTitle = section === "Income Statement Data" ? "Income Statement Data" : "Balance Sheet Data";
   const inputCount = rows.filter((r) => r.excelBehavior === "input").length;
