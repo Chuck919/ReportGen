@@ -1,3 +1,8 @@
-:80 {
+reportgen.duckdns.org {
+	reverse_proxy app:3000
+}
+
+# Keep direct IP access over HTTP (no TLS cert for bare IP).
+http://135.148.42.88 {
 	reverse_proxy app:3000
 }
