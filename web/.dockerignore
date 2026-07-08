@@ -6,4 +6,4 @@ node_modules
 scripts/ocr-cache
 scripts/benchmark-matrix.json
 *.md
-!deploy/oracle/README.md
+!deploy/vps/README.md

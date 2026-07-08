@@ -13,14 +13,6 @@ import { isVercelDeploy } from "@/lib/tax/ocr-modes";
 import { applyUserFieldCorrection, applyUserFieldVerification } from "@/lib/tax/apply-user-correction";
 import type { TaxYearValues } from "@/lib/tax-workbook";
 
-function mergeQueuedFiles(existing: File[], incoming: File[]): File[] {
-  const byKey = new Map(existing.map((f) => [`${f.name}:${f.size}`, f]));
-  for (const file of incoming) {
-    byKey.set(`${file.name}:${file.size}`, file);
-  }
-  return Array.from(byKey.values());
-}
-
 export function useTaxUpload() {
   const [columns, setColumns] = useState<TaxYearValues[]>([]);
   const [hydrated, setHydrated] = useState(false);
@@ -88,10 +80,14 @@ export function useTaxUpload() {
   const addFiles = useCallback(
     (files: FileList | null) => {
       if (!files?.length || busy) return;
+      if (columns.length > 0) {
+        setQueueError("Clear current results before uploading a new return.");
+        return;
+      }
       setQueueError("");
       setError("");
 
-      const list = Array.from(files);
+      const list = Array.from(files).slice(0, 1);
       const validation = validateClientFileList(list, { isVercel: isVercelDeploy() });
       if (!validation.ok) {
         const msg = validation.checks.flatMap((c) => c.errors.map((e) => `${c.filename}: ${e}`)).join(" ");
@@ -99,9 +95,9 @@ export function useTaxUpload() {
         return;
       }
 
-      setQueuedFiles((prev) => mergeQueuedFiles(prev, list));
+      setQueuedFiles(list);
     },
-    [busy],
+    [busy, columns.length],
   );
 
   const removeQueuedFile = useCallback((index: number) => {

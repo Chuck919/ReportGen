@@ -7,6 +7,16 @@ export function normalizeClientKey(name: string): string {
     .trim();
 }
 
+const JUNK_NAME =
+  /^(do not send|keep for your records|officer'?s signature|under penalties|internal revenue|department of the treasury|form\s+\d|schedule\s+[a-z]|see instructions|u\.?s\.?\s+individual)/i;
+
+function isPlausibleBusinessName(name: string): boolean {
+  if (name.length < 4 || name.length > 80) return false;
+  if (JUNK_NAME.test(name)) return false;
+  if (/^(form|schedule|u\.?s\.?|internal revenue)/i.test(name)) return false;
+  return true;
+}
+
 function cleanBusinessName(raw: string): string {
   return raw
     .replace(/\s+/g, " ")
@@ -33,16 +43,17 @@ export function extractBusinessName(text: string, filename?: string): string | u
     const m = head.match(re);
     if (m?.[1]) {
       const name = cleanBusinessName(m[1]);
-      if (name.length >= 4 && !/^(form|schedule|u\.?s\.?|internal revenue)/i.test(name)) {
-        return name;
-      }
+      if (isPlausibleBusinessName(name)) return name;
     }
   }
 
   if (filename) {
     const base = filename.replace(/\.pdf$/i, "").trim();
     const fromName = base.match(/^(.+?)\s*(?:20\d{2}|tax|return)/i)?.[1]?.trim();
-    if (fromName && fromName.length >= 3) return cleanBusinessName(fromName);
+    if (fromName) {
+      const name = cleanBusinessName(fromName);
+      if (isPlausibleBusinessName(name)) return name;
+    }
   }
 
   return undefined;

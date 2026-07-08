@@ -5,8 +5,12 @@ import { useState } from "react";
 /** Copy text — works on localhost (HTTPS) and plain HTTP deploys (OVH IP, etc.). */
 async function copyTextToClipboard(text: string): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText && window.isSecureContext) {
-    await navigator.clipboard.writeText(text);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      /* fall through to execCommand */
+    }
   }
   const textarea = document.createElement("textarea");
   textarea.value = text;

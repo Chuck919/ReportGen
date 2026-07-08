@@ -20,6 +20,7 @@ function formatFileSize(bytes: number): string {
 }
 
 export function TaxUploadPanel({
+  hasData,
   ocrMode,
   onOcrModeChange,
   queuedFiles,
@@ -36,6 +37,7 @@ export function TaxUploadPanel({
   error,
   queueError,
 }: {
+  hasData: boolean;
   ocrMode: OcrMode;
   onOcrModeChange: (mode: OcrMode) => void;
   queuedFiles: File[];
@@ -57,19 +59,21 @@ export function TaxUploadPanel({
   return (
     <div className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
       <FileDropzone
-        label={`Add ${SUPPORTED_TAX_FORMS_LABEL} tax return PDFs`}
+        label={`Add ${SUPPORTED_TAX_FORMS_LABEL} tax return PDF`}
         hint={
-          isVercelDeploy()
-            ? "Add PDFs, then click Start"
-            : TAX_UPLOAD_HINT
+          hasData
+            ? "Clear all results above before uploading another return."
+            : isVercelDeploy()
+              ? "Add a PDF, then click Start"
+              : TAX_UPLOAD_HINT
         }
         accept="application/pdf"
-        multiple
-        disabled={busy}
+        multiple={false}
+        disabled={busy || hasData}
         onFiles={onAddFiles}
       />
 
-      <p className="mt-3 text-xs text-stone-500">{TAX_MULTI_YEAR_HINT}</p>
+      {!hasData && <p className="mt-3 text-xs text-stone-500">{TAX_MULTI_YEAR_HINT}</p>}
 
       {queuedFiles.length > 0 && (
         <div className="mt-4 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3">

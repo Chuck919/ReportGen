@@ -27,6 +27,7 @@ export function TaxPage() {
       </header>
 
       <TaxUploadPanel
+        hasData={upload.hasData}
         ocrMode={upload.ocrMode}
         onOcrModeChange={upload.setOcrMode}
         queuedFiles={upload.queuedFiles}
@@ -55,11 +56,6 @@ export function TaxPage() {
       {/* Hide partial years / color guide until the full batch finishes. */}
       {upload.hasData && !upload.busy && (
         <div className="mt-8 space-y-8">
-          {upload.clientName && (
-            <p className="text-sm text-stone-600">
-              Company: <span className="font-medium text-stone-900">{upload.clientName}</span>
-            </p>
-          )}
           <TrustColorGuide />
           <TaxWorkbookCopyBar columns={upload.columns} />
           <div className="flex flex-wrap items-center justify-between gap-3">

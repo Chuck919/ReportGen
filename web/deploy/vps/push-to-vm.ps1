@@ -1,11 +1,11 @@
-# Upload web/ to Hetzner Cloud VM and start (run from web/)
-#   .\deploy\hetzner\push-to-vm.ps1 -VmIp 1.2.3.4
-#   .\deploy\hetzner\push-to-vm.ps1 -VmIp 1.2.3.4 -SshKey $env:USERPROFILE\.ssh\hetzner_rsa
+# Upload web/ to OVH VPS and rebuild (run from web/)
+#   .\deploy\vps\push-to-vm.ps1 -VmIp 135.148.42.88
+#   .\deploy\vps\push-to-vm.ps1 -VmIp 135.148.42.88 -SshKey $env:USERPROFILE\.ssh\ovh_ed25519
 param(
   [Parameter(Mandatory = $true)][string]$VmIp,
-  [string]$SshKey = "$env:USERPROFILE\.ssh\id_rsa",
-  [string]$User = "root",
-  [string]$RemoteDir = "/opt/reportgen"
+  [string]$SshKey = "$env:USERPROFILE\.ssh\ovh_ed25519",
+  [string]$User = "ubuntu",
+  [string]$RemoteDir = "/opt/reportgen-src/web"
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,24 +25,26 @@ $sshArgs = @("-i", $SshKey, "-o", "StrictHostKeyChecking=accept-new")
 $target = "${User}@${VmIp}"
 
 Write-Host "Creating $RemoteDir on VM..."
-ssh @sshArgs $target "mkdir -p $RemoteDir"
+ssh @sshArgs $target "sudo mkdir -p $RemoteDir && sudo chown -R ${User}:${User} $(Split-Path $RemoteDir -Parent)"
 
 Write-Host "Uploading archive..."
-scp @sshArgs $Tar "${target}:${RemoteDir}/reportgen-web.tar.gz"
+scp @sshArgs $Tar "${target}:${parent}/reportgen-web.tar.gz"
 
-Write-Host "Extracting and installing..."
+Write-Host "Extracting and rebuilding..."
+$parent = (Split-Path $RemoteDir -Parent) -replace '\\', '/'
 $remote = @"
 set -e
+mkdir -p $RemoteDir
+tar -xzf $parent/reportgen-web.tar.gz -C $RemoteDir
+rm -f $parent/reportgen-web.tar.gz
 cd $RemoteDir
-tar -xzf reportgen-web.tar.gz
-rm reportgen-web.tar.gz
 chmod +x deploy/vps/install-on-vm.sh
 export ENV_TEMPLATE=deploy/vps/.env.production.example
-export OPEN_UFW=1
+export OPEN_UFW=0
 bash deploy/vps/install-on-vm.sh
 "@
 ssh @sshArgs $target $remote
 
 Write-Host ""
-Write-Host "Shareable URL: http://$VmIp/tax"
-Write-Host "Logs:          ssh -i `"$SshKey`" $target 'cd $RemoteDir && docker compose logs -f app'"
+Write-Host "App: https://reportgen.duckdns.org/tax"
+Write-Host "Logs: ssh -i `"$SshKey`" $target 'cd $RemoteDir && sudo docker compose logs -f app'"

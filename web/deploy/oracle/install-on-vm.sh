@@ -1,7 +1,0 @@
-﻿#!/usr/bin/env bash
-# Oracle VM wrapper — delegates to shared VPS installer (security list handles firewall).
-set -euo pipefail
-cd "$(dirname "$0")/../.."
-export ENV_TEMPLATE="${ENV_TEMPLATE:-deploy/vps/.env.production.example}"
-export OPEN_UFW="${OPEN_UFW:-0}"
-exec bash deploy/vps/install-on-vm.sh
