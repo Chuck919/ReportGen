@@ -1,14 +1,10 @@
 /**
  * OCR presets. Env: FREE_OCR_MODE=fast|balanced|thorough|vercel-fast|vercel-balanced
  *
- * fast / balanced / thorough — local & VPS (100% matrix presets; do not retune for Vercel).
- * vercel-fast / vercel-balanced — separate Hobby-tier modes only.
- */
-/**
- * Local/VPS tiers (workers=1 for Oracle/Hetzner CPU limits):
- *   fast     — embedded text when possible; else few pages, no hi-DPI (~1–3 min)
- *   balanced — phase1 keyword scan + selective hi-DPI (proven accuracy preset)
- *   thorough — balanced baseline + hi-DPI only on weak Schedule L / form-1 pages
+ * Local/VPS targets (single ~75pg return, workers≥2):
+ *   fast     — ~1–2 min, opening pages preview only
+ *   balanced — ~5 min, production accuracy (phase1 + selective hi-DPI)
+ *   thorough — ≤10 min, balanced baseline + hi-DPI on weak Schedule L / Stmt pages
  */
 const BALANCED_PRESET = {
   label: "Balanced",
@@ -16,18 +12,21 @@ const BALANCED_PRESET = {
   fullScale: 2.08,
   hiScale: 3.55,
   maxPhase2Pages: 36,
-  maxHiDpiPages: 5,
+  /** When PDF exceeds this page count, phase-2 cap scales down (large returns). */
+  largeDocPages: 100,
+  maxPhase2PagesLarge: 28,
+  maxHiDpiPages: 4,
   maxVariantsEasy: 1,
   maxVariantsNormal: 3,
-  maxVariantsHeavy: 4,
-  maxHiDpiVariants: 4,
+  maxVariantsHeavy: 3,
+  maxHiDpiVariants: 3,
   easyPageMinConf: 85,
   easyPageMinMoney: 8,
   baselineGoodConf: 79,
   baselineGoodMoney: 6,
   earlyExitStreak: 1,
   minScoreGain: 1.75,
-  skipHiDpiMinConf: 72,
+  skipHiDpiMinConf: 74,
   skipPhase3UnlessCritical: true,
   // Keep phase1 keyword scan — skipping it regressed live KCF/Arizona accuracy.
   skipPhase1QuickScan: false,
@@ -35,14 +34,16 @@ const BALANCED_PRESET = {
   workers: 1,
 };
 
-/** Thorough — balanced baseline + hi-DPI on weak pages (~5–8 min). */
+/** Thorough — balanced baseline + hi-DPI retry on weak pages (≤10 min wall clock). */
 const THOROUGH_PRESET = {
   label: "Thorough",
   quickScale: 0.4,
   fullScale: 2.12,
   hiScale: 3.85,
   maxPhase2Pages: 40,
-  maxHiDpiPages: 10,
+  largeDocPages: 100,
+  maxPhase2PagesLarge: 30,
+  maxHiDpiPages: 8,
   maxVariantsEasy: 1,
   maxVariantsNormal: 4,
   maxVariantsHeavy: 5,
@@ -69,13 +70,13 @@ const MODES = {
   fast: {
     label: "Fast",
     quickScale: 0.4,
-    fullScale: 1.85,
+    fullScale: 1.75,
     hiScale: 3.55,
-    maxPhase2Pages: 14,
+    maxPhase2Pages: 10,
     maxHiDpiPages: 0,
     maxVariantsEasy: 0,
     maxVariantsNormal: 1,
-    maxVariantsHeavy: 2,
+    maxVariantsHeavy: 1,
     maxHiDpiVariants: 0,
     easyPageMinConf: 86,
     easyPageMinMoney: 8,
@@ -87,7 +88,6 @@ const MODES = {
     skipPhase3UnlessCritical: true,
     skipPhase1QuickScan: true,
     useFastHeuristicPages: true,
-    // Prefer baseline OCR; only heavy variants on Schedule L / weak pages.
     baselineOnly: true,
     workers: 1,
   },
@@ -221,6 +221,16 @@ function resolveOcrMode(mode) {
   return resolved;
 }
 
+/** Scale phase-2 page cap down on very large PDFs (e.g. 179pp Arizona) to hold ~5 min balanced. */
+function effectivePhase2Cap(mode, totalPages, profile) {
+  const base = profile === "benchmark" ? 12 : mode.maxPhase2Pages || 36;
+  const largeAt = mode.largeDocPages ?? 100;
+  const largeCap = mode.maxPhase2PagesLarge ?? Math.max(24, base - 8);
+  if (totalPages > largeAt + 40) return Math.min(base, largeCap - 4);
+  if (totalPages > largeAt) return Math.min(base, largeCap);
+  return base;
+}
+
 function capVariants(variants, max) {
   if (!max || max <= 0) return variants;
   return variants.slice(0, max);
@@ -254,4 +264,4 @@ function selectVariants(variants, max, { scheduleL = false, formCritical = false
   return picked.slice(0, max);
 }
 
-module.exports = { MODES, VERCEL_MODES, ALL_MODES, resolveOcrMode, capVariants, selectVariants };
+module.exports = { MODES, VERCEL_MODES, ALL_MODES, resolveOcrMode, effectivePhase2Cap, capVariants, selectVariants };

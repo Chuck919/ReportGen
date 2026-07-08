@@ -24,7 +24,7 @@ const { PDFParse } = requirePkg("pdf-parse");
 const { createWorker } = requirePkg("tesseract.js");
 const { readFile } = require("node:fs/promises");
 const { preprocessPageImage, buildTaxVariants } = require("./ocr-preprocess.cjs");
-const { resolveOcrMode, selectVariants } = require("./ocr-modes.cjs");
+const { resolveOcrMode, selectVariants, effectivePhase2Cap } = require("./ocr-modes.cjs");
 const {
   uniqueSorted,
   heuristicPages,
@@ -191,9 +191,12 @@ function isBaselineGoodEnough(text, conf, money, score, mode) {
 }
 
 function phase1ScanPages(total, prof) {
-  const heuristic = heuristicPages(total, prof);
   const head = [];
   for (let i = 1; i <= Math.min(14, total); i++) head.push(i);
+  // On 100+ page returns, phase-1 scans only the opening band — keyword hits there
+  // plus phase-2 capPageTargets (head+tail) still reach Stmt/Schedule L attachments.
+  if (total > 100) return head;
+  const heuristic = heuristicPages(total, prof);
   return uniqueSorted([...head, ...heuristic]);
 }
 
@@ -361,6 +364,13 @@ async function main() {
   const pdfPath = process.argv[2];
   if (!pdfPath) throw new Error("Usage: node scripts/free-ocr.cjs <pdf-path>");
 
+  const os = require("node:os");
+  if (!process.env.FREE_OCR_WORKERS) {
+    const cores = os.cpus()?.length ?? 1;
+    const cap = Number(process.env.FREE_OCR_MAX_WORKERS ?? (cores <= 2 ? 2 : 3));
+    process.env.FREE_OCR_WORKERS = String(Math.min(cores, cap));
+  }
+
   const logs = [];
   const phases = [];
   const quickScale = Number(process.env.FREE_OCR_QUICK_SCALE ?? ocrMode.quickScale);
@@ -452,7 +462,8 @@ async function main() {
       targets = targets.slice(0, maxPages);
     }
 
-    const defaultPhase2Cap = profile === "benchmark" ? 12 : ocrMode.maxPhase2Pages;
+    const totalForCap = quickPageCount || (await readPdfPageTotal(buffer));
+    const defaultPhase2Cap = effectivePhase2Cap(ocrMode, totalForCap, profile);
     const maxPhase2 = Number(process.env.FREE_OCR_MAX_PHASE2_PAGES ?? defaultPhase2Cap);
     if (maxPhase2 > 0 && targets.length > maxPhase2) {
       logs.push(`capped phase2 OCR ${targets.length} -> ${maxPhase2} (FREE_OCR_MAX_PHASE2_PAGES)`);

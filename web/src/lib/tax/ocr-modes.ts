@@ -12,20 +12,20 @@ export const LOCAL_OCR_MODE_OPTIONS: OcrModeOption[] = [
   {
     id: "fast",
     label: "Fast",
-    hint: "",
-    detail: "Quick preview — scans the opening pages only. Use Balanced for a complete workbook.",
+    hint: "~1–2 min",
+    detail: "Quick preview — opening pages only. Numbers may be incomplete; use Balanced for Excel paste.",
   },
   {
     id: "balanced",
     label: "Balanced",
-    hint: "",
-    detail: "Recommended. Full extraction for Excel paste.",
+    hint: "~5 min",
+    detail: "Recommended. Full extraction for Excel paste (~5 min per file on typical returns).",
   },
   {
     id: "thorough",
     label: "Thorough",
-    hint: "",
-    detail: "Maximum accuracy on difficult scans. Takes longer.",
+    hint: "≤10 min",
+    detail: "Maximum accuracy on difficult scans — balanced pass plus hi-DPI on weak pages (up to ~10 min).",
   },
 ];
 
@@ -69,7 +69,7 @@ export function estimateOcrDurationMs(mode: OcrMode, fileCount = 1): number {
     mode === "fast" || mode === "vercel-fast"
       ? 90_000
       : mode === "thorough" || mode === "vercel-thorough"
-        ? 8 * 60_000
+        ? 10 * 60_000
         : 5 * 60_000;
   return perFile * Math.max(fileCount, 1);
 }

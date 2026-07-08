@@ -8,11 +8,13 @@ import { mergeOcrPageTexts, chunkArray, OCR_BATCH_SIZE } from "@/lib/api/batched
 import { getMissingAttachmentFieldIds } from "@/lib/tax/gap-analysis";
 import { parseTaxReturnFromText } from "@/lib/tax-return/parse-from-text";
 import { probeOcrCoverageGaps } from "@/lib/tax-return/ocr-coverage-rescan";
+import type { CoverageGapProbe } from "@/lib/tax-return/ocr-coverage-rescan";
 import { buildOcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
 import { detectTaxForm } from "@/lib/tax-return/detect-tax-form";
 import { runLocalOcrPages, runOcrPlan } from "@/lib/tax-return/local-ocr";
 
 const MAX_ATTACHMENT_RESCAN_PAGES = 14;
+const MAX_BALANCED_RECOVERY_PAGES = 5;
 
 const ATTACHMENT_RESCAN_FIELDS = [
   "other_operating_expenses",
@@ -52,17 +54,26 @@ async function ocrPageBatch(
   };
 }
 
-function needsStmt2AttachmentRescan(embeddedText: string, ocrText: string): boolean {
-  const probe = `${embeddedText}\n${ocrText}`;
-  if (/see\s+stmt\s*2|stmt\s*2.*other\s+deduct|other\s+deduct.*attach\s+statement/i.test(probe)) {
-    return true;
+function needsStmt2AttachmentRescan(
+  embeddedText: string,
+  ocrText: string,
+  gap: CoverageGapProbe,
+): boolean {
+  // Form page-1 almost always says "Other deductions … SEE STMT 2" even when the attachment
+  // was already OCR'd — matching that boilerplate alone re-OCRs 14 thorough pages on every
+  // large return (e.g. Arizona ~179pp → 70+ min). Only rescan when coverage probe found a
+  // real attachment gap, not a form cross-reference.
+  if (!gap.reasons.some((r) => /stmt2-detail-missing|stmt2-total-unparseable/i.test(r))) {
+    return false;
   }
-  return /\bother\s+deduct[^|\n]{0,80}\|\s*\d{1,3}(?:,\d{3}){2,}/i.test(probe);
+  const probe = `${embeddedText}\n${ocrText}`;
+  return /see\s+stmt\s*2|stmt\s*2.*other\s+deduct|other\s+deduct.*attach\s+statement/i.test(probe);
 }
 
 function prioritizeAttachmentRescanTargets(
   plan: { totalPages: number; targets: number[]; deltaOnly?: number[]; reOcr?: number[] },
   alreadyPages: number[],
+  maxPages: number,
 ): number[] {
   const already = new Set(alreadyPages);
   const deltaOnly = plan.deltaOnly?.length
@@ -77,7 +88,7 @@ function prioritizeAttachmentRescanTargets(
   const add = (pages: number[]) => {
     for (const page of pages) {
       if (plan.targets.includes(page)) picked.add(page);
-      if (picked.size >= MAX_ATTACHMENT_RESCAN_PAGES) break;
+      if (picked.size >= maxPages) break;
     }
   };
 
@@ -87,7 +98,7 @@ function prioritizeAttachmentRescanTargets(
   add(reOcr.filter((page) => page >= 12 && page <= midEnd));
   add(deltaOnly);
   add(plan.targets);
-  return [...picked].sort((a, b) => a - b).slice(0, MAX_ATTACHMENT_RESCAN_PAGES);
+  return [...picked].sort((a, b) => a - b).slice(0, maxPages);
 }
 
 export function isOcrRecoveryEnabled(): boolean {
@@ -104,7 +115,10 @@ export async function rescanMissingAttachmentsExperimental(
   year?: number,
   baselineMode: OcrMode = "balanced",
 ): Promise<{ ocrText: string; pages: number[]; ms: number; ran: boolean; reasons?: string[] }> {
-  const parsed = parseTaxReturnFromText(filename, embeddedText, ocrText, year, { ocrMode: "thorough" });
+  const probeOcrMode = baselineMode.startsWith("vercel") ? "vercel-balanced" : "balanced";
+  const parsed = parseTaxReturnFromText(filename, embeddedText, ocrText, year, {
+    ocrMode: probeOcrMode,
+  });
   const missingAttach = getMissingAttachmentFieldIds(parsed);
   const allText = `${embeddedText}\n${ocrText}`;
   const formKind = detectTaxForm(allText).kind;
@@ -120,20 +134,23 @@ export async function rescanMissingAttachmentsExperimental(
     { targetYear: year, opex: parsed.values.other_operating_expenses },
   );
   const gap = probeOcrCoverageGaps(embeddedText, ocrText, year, coverage);
-  const opexClosureBad =
-    coverage.opexClosureRatio !== undefined && coverage.opexClosureRatio < 0.45;
   const stmt2DetailMissing = gap.reasons.some((r) => /stmt2-detail-missing/i.test(r));
-  const needsGapRescan =
-    gap.needsRescan &&
-    (missingAttach.includes("other_operating_expenses") ||
-      parsed.values.other_operating_expenses === undefined ||
-      opexClosureBad ||
-      stmt2DetailMissing);
+  const stmt2TotalMissing = gap.reasons.some((r) => /stmt2-total-unparseable/i.test(r));
+  const attachmentFieldsMissing = missingAttach.some((id) =>
+    ATTACHMENT_RESCAN_FIELDS.includes(id as (typeof ATTACHMENT_RESCAN_FIELDS)[number]),
+  );
+  const keyOpexBlank =
+    parsed.values.other_operating_expenses === undefined &&
+    parsed.values.bank_credit_card === undefined &&
+    parsed.values.professional_fees === undefined &&
+    parsed.values.utilities === undefined;
+
+  // Hard evidence only — never rescan just because form page-1 says "SEE STMT 2".
   const needsRescan =
-    missingAttach.some((id) => ATTACHMENT_RESCAN_FIELDS.includes(id as (typeof ATTACHMENT_RESCAN_FIELDS)[number])) ||
-    needsGapRescan ||
     stmt2DetailMissing ||
-    needsStmt2AttachmentRescan(embeddedText, ocrText);
+    stmt2TotalMissing ||
+    (attachmentFieldsMissing && (stmt2DetailMissing || keyOpexBlank)) ||
+    needsStmt2AttachmentRescan(embeddedText, ocrText, gap);
   if (!needsRescan) {
     return { ocrText, pages: [], ms: 0, ran: false };
   }
@@ -151,18 +168,29 @@ export async function rescanMissingAttachmentsExperimental(
     ),
   ];
 
-  const plan = await runOcrPlan(bytes, "thorough", {
+  const plan = await runOcrPlan(bytes, baselineMode.startsWith("vercel") ? "vercel-thorough" : "thorough", {
     deltaFrom: baselineMode,
     alreadyPages,
     missingFields: missingFields.length ? [...missingFields] : ["other_operating_expenses"],
   });
-  const targets = prioritizeAttachmentRescanTargets(plan, alreadyPages);
+  const maxPages =
+    baselineMode === "balanced" || baselineMode === "vercel-balanced"
+      ? MAX_BALANCED_RECOVERY_PAGES
+      : MAX_ATTACHMENT_RESCAN_PAGES;
+  const targets = prioritizeAttachmentRescanTargets(plan, alreadyPages, maxPages);
   if (!targets.length) {
     return { ocrText, pages: [], ms: 0, ran: false };
   }
 
+  const recoveryMode = baselineMode.startsWith("vercel") ? "vercel-balanced" : "balanced";
+  const useThoroughRecovery = baselineMode === "thorough" || baselineMode === "vercel-thorough";
   const t0 = Date.now();
-  const delta = await ocrPageBatch(bytes, "thorough", targets, true);
+  const delta = await ocrPageBatch(
+    bytes,
+    useThoroughRecovery ? "thorough" : recoveryMode,
+    targets,
+    useThoroughRecovery,
+  );
   const merged = mergeOcrPageTexts([ocrText, delta.text]);
   return {
     ocrText: merged,

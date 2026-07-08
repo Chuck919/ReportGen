@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -9,6 +9,12 @@ const execFileAsync = promisify(execFile);
 
 import type { OcrMode } from "@/lib/api/types";
 import { VERCEL_OCR_BUDGET_MS } from "@/lib/tax/resolve-ocr-mode";
+
+function defaultOcrWorkers(): string {
+  const cores = os.cpus()?.length ?? 1;
+  const cap = Number(process.env.FREE_OCR_MAX_WORKERS ?? (cores <= 2 ? 2 : 3));
+  return String(Math.min(cores, cap));
+}
 
 export type { OcrMode };
 export type LocalOcrProfile = "tax" | "benchmark";
@@ -148,23 +154,26 @@ function mergeOcrPageTexts(a: string, b: string): { text: string; picks: number;
   return { text: out.join("\n"), picks, pages: nums.length };
 }
 
-/** Pages with Schedule L / form-1 that still look weak after merge — hi-DPI retry targets. */
-function weakPagesForRetry(text: string): number[] {
+/** Pages with Schedule L / form-1 / Stmt attachment that still look weak — hi-DPI retry targets. */
+function weakPagesForRetry(text: string, maxPages: number): number[] {
   const weak: number[] = [];
   for (const [n, block] of extractOcrPages(text)) {
     const commaMoney = (block.match(/\d{1,3}(?:,\d{3})+/g) || []).length;
     const isSchedL = /schedule\s+l/i.test(block);
     const isForm1 = /caution:\s*include\s+only\s+trade|gross receipts or sales/i.test(block);
-    if (!isSchedL && !isForm1) continue;
+    const isStmt =
+      /statement\s*\d|federal\s+statements|other\s+deduct/i.test(block) && !isSchedL && !isForm1;
+    if (!isSchedL && !isForm1 && !isStmt) continue;
     const missingRent = isForm1 && !/\brents?\b|\brens\b/i.test(block);
     const missingLine17 =
       isSchedL &&
       /less\s+than\s+1\s+year|payable\s+in\s+less/i.test(block) &&
       commaMoney < 2;
     const sparseSchedL = isSchedL && commaMoney < 4;
-    if (missingRent || missingLine17 || sparseSchedL) weak.push(n);
+    const sparseStmt = isStmt && (commaMoney < 3 || block.length < 180);
+    if (missingRent || missingLine17 || sparseSchedL || sparseStmt) weak.push(n);
   }
-  return [...new Set(weak)].sort((a, b) => a - b).slice(0, 8);
+  return [...new Set(weak)].sort((a, b) => a - b).slice(0, maxPages);
 }
 
 /** Thorough: balanced baseline + hi-DPI retry on weak pages only (never full heavy re-OCR). */
@@ -177,7 +186,7 @@ async function runThoroughMerged(
   let totalMs = pass1.timingMs?.total ?? 0;
   let mergePicks = 0;
 
-  const retryPages = weakPagesForRetry(pass1.text);
+  const retryPages = weakPagesForRetry(pass1.text, 12);
   let pass2Logs: string[] = [];
   if (retryPages.length) {
     const pass2 = await runOcrScript(bytes, options, {
@@ -249,7 +258,7 @@ export async function runOcrPlan(
     const nodeModules = path.join(process.cwd(), "node_modules");
     env.NODE_PATH = env.NODE_PATH ? `${nodeModules}${path.delimiter}${env.NODE_PATH}` : nodeModules;
     if (!env.FREE_OCR_WORKERS) {
-      env.FREE_OCR_WORKERS = "1";
+      env.FREE_OCR_WORKERS = defaultOcrWorkers();
     }
     if (options?.deltaFrom) env.FREE_OCR_DELTA_FROM = options.deltaFrom;
     if (options?.alreadyPages?.length) env.FREE_OCR_ALREADY_PAGES = options.alreadyPages.join(",");
@@ -308,10 +317,12 @@ async function runOcrScript(
     const nodeModules = path.join(process.cwd(), "node_modules");
     env.NODE_PATH = env.NODE_PATH ? `${nodeModules}${path.delimiter}${env.NODE_PATH}` : nodeModules;
     if (!env.FREE_OCR_WORKERS) {
-      env.FREE_OCR_WORKERS = "1";
+      env.FREE_OCR_WORKERS = defaultOcrWorkers();
     }
     if (process.env.VERCEL === "1" && !env.FREE_OCR_TIMEOUT_MS) {
       env.FREE_OCR_TIMEOUT_MS = String(VERCEL_OCR_BUDGET_MS);
+    } else if (!env.FREE_OCR_TIMEOUT_MS && options?.mode === "thorough") {
+      env.FREE_OCR_TIMEOUT_MS = String(10 * 60 * 1000);
     }
     if (options?.profile) env.FREE_OCR_PROFILE = options.profile;
     if (options?.mode) env.FREE_OCR_MODE = options.mode;
