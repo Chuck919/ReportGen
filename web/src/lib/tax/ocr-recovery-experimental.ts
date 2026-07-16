@@ -1,7 +1,7 @@
 /**
  * Experimental OCR attachment recovery — OFF by default.
  * Enable with ENABLE_OCR_RECOVERY=1 (server) for controlled A/B benchmarks only.
- * Do not merge into default path until it improves KCF without regressing Carithers/Arizona.
+ * Experimental OCR recovery — not in the default path until it improves holdout benches without regressions.
  */
 import type { OcrMode } from "@/lib/api/types";
 import { mergeOcrPageTexts, chunkArray, OCR_BATCH_SIZE } from "@/lib/api/batched-ocr";
@@ -61,9 +61,13 @@ function needsStmt2AttachmentRescan(
 ): boolean {
   // Form page-1 almost always says "Other deductions … SEE STMT 2" even when the attachment
   // was already OCR'd — matching that boilerplate alone re-OCRs 14 thorough pages on every
-  // large return (e.g. Arizona ~179pp → 70+ min). Only rescan when coverage probe found a
+  // large return (100+ pages can take a long OCR). Only rescan when coverage probe found a
   // real attachment gap, not a form cross-reference.
-  if (!gap.reasons.some((r) => /stmt2-detail-missing|stmt2-total-unparseable/i.test(r))) {
+  if (
+    !gap.reasons.some((r) =>
+      /stmt2-detail-missing|stmt2-total-unparseable|attachment-page-missing/i.test(r),
+    )
+  ) {
     return false;
   }
   const probe = `${embeddedText}\n${ocrText}`;
@@ -115,7 +119,7 @@ export async function rescanMissingAttachmentsExperimental(
   year?: number,
   baselineMode: OcrMode = "balanced",
 ): Promise<{ ocrText: string; pages: number[]; ms: number; ran: boolean; reasons?: string[] }> {
-  const probeOcrMode = baselineMode.startsWith("vercel") ? "vercel-balanced" : "balanced";
+  const probeOcrMode = "balanced";
   const parsed = parseTaxReturnFromText(filename, embeddedText, ocrText, year, {
     ocrMode: probeOcrMode,
   });
@@ -134,7 +138,9 @@ export async function rescanMissingAttachmentsExperimental(
     { targetYear: year, opex: parsed.values.other_operating_expenses },
   );
   const gap = probeOcrCoverageGaps(embeddedText, ocrText, year, coverage);
-  const stmt2DetailMissing = gap.reasons.some((r) => /stmt2-detail-missing/i.test(r));
+  const stmt2DetailMissing = gap.reasons.some((r) =>
+    /stmt2-detail-missing|attachment-page-missing/i.test(r),
+  );
   const stmt2TotalMissing = gap.reasons.some((r) => /stmt2-total-unparseable/i.test(r));
   const attachmentFieldsMissing = missingAttach.some((id) =>
     ATTACHMENT_RESCAN_FIELDS.includes(id as (typeof ATTACHMENT_RESCAN_FIELDS)[number]),
@@ -168,13 +174,13 @@ export async function rescanMissingAttachmentsExperimental(
     ),
   ];
 
-  const plan = await runOcrPlan(bytes, baselineMode.startsWith("vercel") ? "vercel-thorough" : "thorough", {
+  const plan = await runOcrPlan(bytes, "thorough", {
     deltaFrom: baselineMode,
     alreadyPages,
     missingFields: missingFields.length ? [...missingFields] : ["other_operating_expenses"],
   });
   const maxPages =
-    baselineMode === "balanced" || baselineMode === "vercel-balanced"
+    baselineMode === "balanced"
       ? MAX_BALANCED_RECOVERY_PAGES
       : MAX_ATTACHMENT_RESCAN_PAGES;
   const targets = prioritizeAttachmentRescanTargets(plan, alreadyPages, maxPages);
@@ -182,8 +188,8 @@ export async function rescanMissingAttachmentsExperimental(
     return { ocrText, pages: [], ms: 0, ran: false };
   }
 
-  const recoveryMode = baselineMode.startsWith("vercel") ? "vercel-balanced" : "balanced";
-  const useThoroughRecovery = baselineMode === "thorough" || baselineMode === "vercel-thorough";
+  const recoveryMode = "balanced";
+  const useThoroughRecovery = baselineMode === "thorough";
   const t0 = Date.now();
   const delta = await ocrPageBatch(
     bytes,

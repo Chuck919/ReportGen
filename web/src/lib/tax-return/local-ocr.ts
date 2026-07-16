@@ -8,7 +8,6 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 import type { OcrMode } from "@/lib/api/types";
-import { VERCEL_OCR_BUDGET_MS } from "@/lib/tax/resolve-ocr-mode";
 
 function defaultOcrWorkers(): string {
   const cores = os.cpus()?.length ?? 1;
@@ -319,9 +318,7 @@ async function runOcrScript(
     if (!env.FREE_OCR_WORKERS) {
       env.FREE_OCR_WORKERS = defaultOcrWorkers();
     }
-    if (process.env.VERCEL === "1" && !env.FREE_OCR_TIMEOUT_MS) {
-      env.FREE_OCR_TIMEOUT_MS = String(VERCEL_OCR_BUDGET_MS);
-    } else if (!env.FREE_OCR_TIMEOUT_MS && options?.mode === "thorough") {
+    if (!env.FREE_OCR_TIMEOUT_MS && options?.mode === "thorough") {
       env.FREE_OCR_TIMEOUT_MS = String(10 * 60 * 1000);
     }
     if (options?.profile) env.FREE_OCR_PROFILE = options.profile;

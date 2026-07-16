@@ -6,7 +6,6 @@ import { buildBenchmarkEntryRows } from "@/lib/benchmark-entry";
 import { runLocalOcr } from "@/lib/tax-return-parser";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {

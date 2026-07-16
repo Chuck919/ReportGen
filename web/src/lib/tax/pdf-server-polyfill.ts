@@ -1,5 +1,5 @@
 /**
- * pdfjs-dist (via pdf-parse) expects browser globals. Required on Vercel Node.js.
+ * pdfjs-dist (via pdf-parse) expects browser globals. Required on Node.js (OVH VPS / local).
  * Import this module before `pdf-parse` in any server bundle.
  */
 import "pdf-parse/worker";

@@ -1,12 +1,12 @@
 "use client";
 
 import type { OcrMode } from "@/lib/api/types";
-import { isVercelDeploy } from "@/lib/tax/ocr-modes";
 import { getOcrModeOptions } from "@/lib/tax/ocr-modes";
 import {
   SUPPORTED_TAX_FORMS_LABEL,
   TAX_MULTI_YEAR_HINT,
   TAX_UPLOAD_HINT,
+  TAX_UPLOAD_HINT_WITH_DATA,
 } from "@/lib/tax/tax-form-copy";
 import { FileDropzone } from "@/components/ui/FileDropzone";
 import { ProgressBar } from "@/components/ui/ProgressBar";
@@ -60,26 +60,21 @@ export function TaxUploadPanel({
     <div className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
       <FileDropzone
         label={`Add ${SUPPORTED_TAX_FORMS_LABEL} tax return PDF`}
-        hint={
-          hasData
-            ? "Clear all results above before uploading another return."
-            : isVercelDeploy()
-              ? "Add a PDF, then click Start"
-              : TAX_UPLOAD_HINT
-        }
+        hint={hasData ? TAX_UPLOAD_HINT_WITH_DATA : TAX_UPLOAD_HINT}
         accept="application/pdf"
-        multiple={false}
-        disabled={busy || hasData}
+        multiple={true}
+        disabled={busy}
         onFiles={onAddFiles}
       />
 
-      {!hasData && <p className="mt-3 text-xs text-stone-500">{TAX_MULTI_YEAR_HINT}</p>}
+      <p className="mt-3 text-xs text-stone-500">{TAX_MULTI_YEAR_HINT}</p>
 
       {queuedFiles.length > 0 && (
         <div className="mt-4 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-medium text-stone-800">
               Ready to process ({queuedFiles.length} PDF{queuedFiles.length === 1 ? "" : "s"})
+              {hasData ? " — will merge into current workbook" : ""}
             </p>
             {!busy && (
               <button
@@ -125,7 +120,7 @@ export function TaxUploadPanel({
           disabled={!canStart}
           className={!canStart ? "cursor-not-allowed opacity-40" : ""}
         >
-          {busy ? "Processing…" : "Start extraction"}
+          {busy ? "Processing…" : hasData ? "Merge into workbook" : "Start extraction"}
         </Button>
       </div>
 

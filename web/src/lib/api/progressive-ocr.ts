@@ -13,9 +13,9 @@ import {
 import { getMissingFieldsForNextTier } from "@/lib/tax/gap-analysis";
 
 export const PROGRESSIVE_TIERS: Partial<Record<OcrMode, OcrMode[]>> = {
-  "vercel-fast": ["vercel-fast"],
-  "vercel-balanced": ["vercel-fast", "vercel-balanced"],
-  "vercel-thorough": ["vercel-fast", "vercel-balanced", "vercel-thorough"],
+  fast: ["fast"],
+  balanced: ["fast", "balanced"],
+  thorough: ["balanced", "thorough"],
 };
 
 export function shouldUseProgressiveOcr(): boolean {
@@ -178,7 +178,7 @@ export async function runProgressiveOcrAndParse(
           file,
           tierMode,
           plan.targets,
-          tierMode !== "vercel-fast",
+          tierMode !== "fast",
           onProgress,
           { tierIndex: i, tierCount: tiers.length },
         );

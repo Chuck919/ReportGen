@@ -1,40 +1,44 @@
 import type { ResolvedFields } from "./merge";
-import { lineMoneyTokens } from "./money";
+import { isFormReferenceNumber, isKeepableWorksheetAmount, isReasonableMoneyAmount, keepableWorksheetMoneyTokens, lineMoneyTokens } from "./money";
 import { pickComparisonColumnIndex, shrinkToYearColumns } from "@/lib/two-year-comparison-parser";
 import { scanComparisonOtherDeductionsTotal, computeComparisonOpexResidual } from "./comparison-opex";
 import { extractOtherDeductionsBlockOpex, extractStatementDeductions, blockStmtTotalCorroborated, scanStatement2Total, extractStatementTaxesSplit, isComparisonWorksheetContext } from "./statement-extractors";
 import { lineMatchesLabelPattern, repairOcrLabel } from "./ocr-label-repair";
 import { knownStmt2AttachmentSum } from "./stmt2-total-inference";
-import { closureTolerance } from "./structural-tolerance";
+import { exactClosureTolerance } from "./structural-tolerance";
 import { scanFormPageRent } from "./form-anchors";
 import { detectTaxForm } from "./detect-tax-form";
 
 type RowRule = {
   id: string;
   labelRe: RegExp;
-  minAmount: number;
 };
 
 const COMPARISON_ROW_RULES: RowRule[] = [
-  { id: "officer_compensation", labelRe: /OFFICER|COMPENSATION\s+OF\s+OFFICER/i, minAmount: 1000 },
+  { id: "officer_compensation", labelRe: /OFFICER|COMPENSATION\s+OF\s+OFFICER/i },
   {
     id: "salaries_wages",
-    labelRe: /SALAR.*WAGE|WAGES?\s+LESS|EMPLOYMENT\s+CREDIT/i,
-    minAmount: 5000,
+    // Match "salaries and wages", "wages and salaries", and G&A payroll captions.
+    // Do NOT match bare "employment credits" (tax-credit schedule row).
+    labelRe:
+      /SALAR.*WAGE|WAGE.*SALAR|SALARIES\s+AND\s+WAGES|GENERAL\s+AND\s+ADMINISTRATIVE.*(?:WAGE|SALAR)|WAGES?\s+LESS\s+EMPLOYMENT\s+CREDITS?/i,
   },
-  { id: "utilities", labelRe: /UTILIT|UTILITY|ELECTRIC/i, minAmount: 500 },
-  { id: "bank_credit_card", labelRe: /BANK|CREDIT\s+CARD|MERCHANT/i, minAmount: 500 },
-  { id: "professional_fees", labelRe: /PROFESSIONAL|LEGAL\s+AND|ACCOUNTING/i, minAmount: 500 },
-  { id: "repairs", labelRe: /REPAIR|MAINT/i, minAmount: 500 },
-  { id: "insurance", labelRe: /^INSURANCE\b/i, minAmount: 500 },
-  { id: "advertising", labelRe: /ADVERT/i, minAmount: 100 },
-  { id: "taxes_paid", labelRe: /TAXES\s+PAID|STATE\s+INCOME\s+TAX/i, minAmount: 1000 },
-  { id: "rent", labelRe: /\bRENTS?\b/i, minAmount: 10_000 },
-  { id: "taxes_licenses", labelRe: /TAXES\s+AND\s+LIC/i, minAmount: 1000 },
-  { id: "employee_benefits", labelRe: /EMPLOYEE\s+BENEFIT/i, minAmount: 1000 },
-  { id: "other_operating_income", labelRe: /OTHER\s+OPERATING\s+INCOME|OTHER\s+INCOME/i, minAmount: 100 },
-  { id: "cogs", labelRe: /COST\s+OF\s+(?:GOODS|SALES)|COGS|\bC\.?\s*O\.?\s*G/i, minAmount: 10_000 },
-  { id: "depreciation", labelRe: /DEPRECIATION/i, minAmount: 100 },
+  { id: "utilities", labelRe: /UTILIT|UTILITY|ELECTRIC/i },
+  { id: "bank_credit_card", labelRe: /BANK|CREDIT\s+CARD|MERCHANT/i },
+  { id: "professional_fees", labelRe: /PROFESSIONAL|LEGAL\s+AND|ACCOUNTING/i },
+  { id: "repairs", labelRe: /REPAIR|MAINT/i },
+  { id: "insurance", labelRe: /^INSURANCE\b/i },
+  { id: "advertising", labelRe: /ADVERT/i },
+  { id: "taxes_paid", labelRe: /TAXES\s+PAID|STATE\s+INCOME\s+TAX/i },
+  { id: "rent", labelRe: /\bRENTS?\b/i },
+  { id: "taxes_licenses", labelRe: /(?:TAXES|AXES)\s+AND\s+LIC/i },
+  { id: "employee_benefits", labelRe: /EMPLOYEE\s+BENEFIT/i },
+  { id: "gasoline", labelRe: /GASOLINE|\bFUEL\b/i },
+  { id: "supplies", labelRe: /JOB\s+SUPPL|MISC\s+OFFICE|OFFICE\s+EXPENSE/i },
+  { id: "vehicle_insurance", labelRe: /VEHICLE\s+INSUR/i },
+  { id: "other_operating_income", labelRe: /OTHER\s+OPERATING\s+INCOME/i },
+  { id: "cogs", labelRe: /COST\s+OF\s+(?:GOODS|SALES)|COGS|\bC\.?\s*O\.?\s*G/i },
+  { id: "depreciation", labelRe: /DEPRECIATION/i },
 ];
 
 const STMT2_UTIL =
@@ -43,7 +47,7 @@ const STMT2_UTIL =
 function findComparisonBlock(allText: string): { text: string; start: number } | undefined {
   const start =
     allText.search(
-      /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|(?:\bg\s*|ross\s+)receipts?\s+or\s+sales|ross\s+receipts?\s+or\s+sales/i,
+      /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|tax\s+projection\s+worksheet|(?:\bg\s*|ross\s+)receipts?\s+or\s+sales|ross\s+receipts?\s+or\s+sales/i,
     ) ?? -1;
   if (start < 0) return undefined;
   return { text: allText.slice(start, start + 80_000), start };
@@ -65,7 +69,7 @@ function headerYearsInBlock(block: string, allText?: string, blockStart?: number
 }
 
 function pickColumn(nums: number[], targetYear: number, years?: [number, number]): number | undefined {
-  const filtered = nums.filter((n) => Math.abs(n) >= 100);
+  const filtered = nums.filter(isKeepableWorksheetAmount);
   if (!filtered.length) return undefined;
   const pair = shrinkToYearColumns(filtered);
   if (!pair) return filtered.length >= 2 ? filtered[1] : filtered[0];
@@ -82,7 +86,15 @@ function scanStmt2UtilitiesMax(allText: string): number | undefined {
     if (!STMT2_UTIL.test(line)) return;
     for (const n of lineMoneyTokens(line)) {
       const abs = Math.round(Math.abs(n));
-      if (abs < 500 || abs > 500_000) continue;
+      // Keepable util dollars only — not a $500 size floor.
+      if (
+        abs < 1 ||
+        !isReasonableMoneyAmount(abs) ||
+        isFormReferenceNumber(abs) ||
+        (abs >= 1990 && abs <= 2035)
+      ) {
+        continue;
+      }
       if (best === undefined || abs > best) best = abs;
     }
   };
@@ -117,7 +129,12 @@ function scanStmt2RentMax(allText: string, formKind?: import("./detect-tax-form"
     if (!/\brents?\b/i.test(line)) return;
     for (const n of lineMoneyTokens(line)) {
       const abs = Math.round(Math.abs(n));
-      if (abs < 10_000 || abs > 5_000_000) continue;
+      if (
+        !isKeepableWorksheetAmount(abs) ||
+        abs > 5_000_000
+      ) {
+        continue;
+      }
       candidates.push(abs);
     }
   };
@@ -140,7 +157,7 @@ function scanStmt2RentMax(allText: string, formKind?: import("./detect-tax-form"
     }
   }
   if (formRent !== undefined) {
-    const near = candidates.find((c) => Math.abs(c - formRent) <= Math.max(5000, formRent * 0.05));
+    const near = candidates.find((c) => Math.round(c) === Math.round(formRent));
     if (near !== undefined) return near;
     return formRent;
   }
@@ -163,7 +180,10 @@ export function refillFromComparisonLabeledRows(
   const stmt2Util = scanStmt2UtilitiesMax(allText);
   if (stmt2Util !== undefined) {
     const cur = resolved.values.utilities;
-    if (cur === undefined || Math.abs(cur) < stmt2Util * 0.85) {
+    const src = resolved.sources.utilities ?? "";
+    const weak = !src || /OCR label|fuzzy|label match|embedded detail|tail scan/i.test(src);
+    // Stmt util fills missing/weak only (max-line scan can over-pick).
+    if (cur === undefined || weak) {
       resolved.values.utilities = stmt2Util;
       resolved.confidence.utilities = 93;
       resolved.sources.utilities = "Statement 2 (utilities detail max)";
@@ -175,7 +195,11 @@ export function refillFromComparisonLabeledRows(
   const authoritativeRent = formRent ?? stmt2Rent;
   if (authoritativeRent !== undefined) {
     const cur = resolved.values.rent;
-    if (cur === undefined || Math.abs(cur) < authoritativeRent * 0.85 || Math.abs(cur) > authoritativeRent * 1.05) {
+    // Form/Stmt rent dollars win whenever current disagrees — replaces soft % overwrite.
+    if (
+      cur === undefined ||
+      Math.round(Math.abs(cur)) !== Math.round(Math.abs(authoritativeRent))
+    ) {
       resolved.values.rent = authoritativeRent;
       resolved.confidence.rent = formRent !== undefined ? 96 : 93;
       resolved.sources.rent =
@@ -185,44 +209,58 @@ export function refillFromComparisonLabeledRows(
 
   if (!block) return;
 
+  let labelPrefix = "";
   for (const rawLine of block.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!line || !/\d/.test(line)) continue;
+    if (!line) continue;
+    // OCR often wraps "SALARIES AND WAGES LESS" onto the next "EMPLOYMENT CREDITS … amounts" line.
+    if (!/\d/.test(line)) {
+      // Only carry expense-row captions — bare "officer" matches Form 8879 signature boilerplate.
+      if (
+        /salar.*wage|wage.*salar|compensation\s+of\s+officer|employee\s+benefit|pension|profit-?shar|wages?\s+less\s+employment/i.test(
+          line,
+        )
+      ) {
+        labelPrefix = line;
+      }
+      continue;
+    }
+    // Do not bleed a prior label onto a money line that already has its own caption
+    // (e.g. "Salaries…" header + "Repairs… 4212" must not book 4212 as salaries).
+    const lineHasOwnCaption = COMPARISON_ROW_RULES.some(
+      (r) => r.labelRe.test(line) || r.labelRe.test(repairOcrLabel(line)),
+    );
+    const matchLine = labelPrefix && !lineHasOwnCaption ? `${labelPrefix} ${line}` : line;
+    labelPrefix = "";
+    const lineIdx = allText.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? allText.slice(Math.max(0, lineIdx - 800), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : matchLine;
+    if (isCogsOtherCostsContext(recentContext, matchLine)) continue;
 
     for (const rule of COMPARISON_ROW_RULES) {
-      const labelLine = repairOcrLabel(line);
-      if (!lineMatchesLabelPattern(line, rule.labelRe) && !rule.labelRe.test(labelLine)) continue;
-      if (rule.id === "other_operating_income" && /other\s+income/i.test(line) && !/operat/i.test(line)) {
-        const lineIdx = allText.indexOf(line);
-        const yearWindow = allText.slice(Math.max(0, lineIdx - 4000), lineIdx + line.length + 400);
-        if (targetYear !== undefined && !new RegExp(`\\b${targetYear}\\b`).test(yearWindow)) continue;
-        const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 100 && Math.abs(n) < 50_000);
-        const picked = pickColumn(nums, targetYear, years);
-        if (picked !== undefined && picked > 0) {
-          resolved.values.other_operating_income = Math.round(picked);
-          resolved.confidence.other_operating_income = 88;
-          resolved.sources.other_operating_income = "Two-year comparison (OTHER INCOME → other operating income)";
-        }
-        continue;
-      }
-      const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= rule.minAmount);
+      const labelLine = repairOcrLabel(matchLine);
+      if (!lineMatchesLabelPattern(matchLine, rule.labelRe) && !rule.labelRe.test(labelLine)) continue;
+      const nums = keepableWorksheetMoneyTokens(line);
       const picked = pickColumn(nums, targetYear, years);
       if (picked === undefined) continue;
 
       const cur = resolved.values[rule.id];
       const src = resolved.sources[rule.id] ?? "";
+      // Keep Stmt/Form utilities/rent when comparison disagrees on dollars.
       if (
         rule.id === "utilities" &&
         cur !== undefined &&
         /statement\s*2/i.test(src) &&
-        Math.abs(cur) >= Math.abs(picked) * 0.95
+        Math.round(Math.abs(cur)) !== Math.round(Math.abs(picked))
       ) {
         continue;
       }
       if (
         rule.id === "utilities" &&
         stmt2Util !== undefined &&
-        Math.abs(picked) > Math.abs(stmt2Util) * 1.5
+        Math.round(Math.abs(picked)) !== Math.round(Math.abs(stmt2Util))
       ) {
         continue;
       }
@@ -230,29 +268,18 @@ export function refillFromComparisonLabeledRows(
         rule.id === "rent" &&
         cur !== undefined &&
         /statement\s*2|federal\s+statements|form\s+1120/i.test(src) &&
-        Math.abs(picked) > Math.abs(cur) * 1.05
+        Math.round(Math.abs(picked)) !== Math.round(Math.abs(cur))
       ) {
         continue;
       }
       const weak = !src || /OCR label|fuzzy|label match|embedded detail|tail scan/i.test(src);
-      const bigDiff =
-        cur !== undefined &&
-        Math.abs(cur - picked) / Math.max(Math.abs(picked), 1) > 0.15;
-
+      // Replace only missing/weak, or structural Form salaries caption — no relative %/$ bands.
       const replace =
         cur === undefined ||
         weak ||
-        (bigDiff && (rule.id === "utilities" || rule.id === "taxes_licenses" || rule.id === "cogs" || rule.id === "rent")) ||
-        (rule.id === "utilities" && cur !== undefined && Math.abs(cur) < Math.abs(picked) * 0.5) ||
-        (rule.id === "rent" &&
+        (rule.id === "salaries_wages" &&
           cur !== undefined &&
-          picked >= 50_000 &&
-          Math.abs(cur) < Math.abs(picked) * 0.6 &&
-          !/statement\s*2|federal\s+statements/i.test(src)) ||
-        (rule.id === "taxes_licenses" &&
-          cur !== undefined &&
-          picked >= 10_000 &&
-          Math.abs(cur) < Math.abs(picked) * 0.75);
+          /wages?\s+less\s+employment|salaries\s+and\s+wages\s+less/i.test(matchLine));
 
       if (!replace) continue;
       resolved.values[rule.id] = Math.round(picked);
@@ -271,7 +298,7 @@ export function refillFromComparisonLabeledRows(
     for (const rawLine of compBlock.text.split(/\n/)) {
       const line = rawLine.replace(/\s+/g, " ").trim();
       if (!/TAXES\s+PAID|STATE\s+INCOME\s+TAX/i.test(line)) continue;
-      const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 1000);
+      const nums = keepableWorksheetMoneyTokens(line);
       const picked = pickColumn(nums, targetYear, years);
       if (picked !== undefined && picked > 0) {
         paid = Math.round(picked);
@@ -279,15 +306,10 @@ export function refillFromComparisonLabeledRows(
       }
     }
   }
-  if (
-    compTaxes !== undefined &&
-    compTaxes >= 50_000 &&
-    paid !== undefined &&
-    paid > 0 &&
-    paid < compTaxes * 0.6
-  ) {
+  // Identity split when comparison taxes row embeds taxes paid (no size/% gates).
+  if (compTaxes !== undefined && paid !== undefined && paid > 0 && paid < compTaxes) {
     const split = Math.round(compTaxes - paid);
-    if (split >= 10_000) {
+    if (split >= 1) {
       resolved.values.taxes_licenses = split;
       resolved.confidence.taxes_licenses = 91;
       resolved.sources.taxes_licenses = "Two-year comparison (taxes minus taxes paid)";
@@ -333,12 +355,9 @@ export function refillFromComparisonLabeledRows(
     const blockExcluded = blockOfficeDetail.stmtTotal! - blockOfficeDetail.opex!;
     const blockCloses =
       Math.abs(blockExcluded + blockOfficeDetail.opex! - blockOfficeDetail.stmtTotal!) <=
-      closureTolerance(blockOfficeDetail.stmtTotal!);
-    if (
-      blockCloses &&
-      (cur === undefined ||
-        Math.abs(cur - blockOfficeDetail.opex!) / Math.max(blockOfficeDetail.opex!, 1) > 0.12)
-    ) {
+      exactClosureTolerance(blockOfficeDetail.stmtTotal!);
+    // Inventory overlay only when missing — never overwrite via soft % disagreement.
+    if (blockCloses && cur === undefined) {
       resolved.values.other_operating_expenses = blockOfficeDetail.opex!;
       resolved.confidence.other_operating_expenses = blockOfficeDetail.confidence;
       resolved.sources.other_operating_expenses = blockOfficeDetail.source;
@@ -356,7 +375,11 @@ const COMPARISON_LEDGER_LABELS: Record<string, string> = {
   bank_credit_card: "Bank and credit card",
   professional_fees: "Professional fees",
   employee_benefits: "Employee benefit programs",
+  gasoline: "Gasoline",
+  supplies: "Misc office expense",
+  vehicle_insurance: "Vehicle insurance",
   advertising: "Advertising",
+  rent: "Rent",
   taxes_licenses: "Taxes and Licenses",
 };
 
@@ -373,17 +396,21 @@ export function extractComparisonExpenseLines(
   const out: Array<{ label: string; amount: number; source: string }> = [];
   const rawLines = blockInfo.text.split(/\n/);
 
+  let blockCtx = "";
   for (let i = 0; i < rawLines.length; i++) {
     let line = rawLines[i]!.replace(/\s+/g, " ").trim();
     if (!line) continue;
+    blockCtx = `${blockCtx} ${line}`.slice(-800);
     if (!/\d/.test(line) && i + 1 < rawLines.length) {
       const next = rawLines[i + 1]!.replace(/\s+/g, " ").trim();
       if (/\d/.test(next) && /salar|wage|officer|repair|insur|advert|rent|tax|utilit|bank|profession|benefit|supply/i.test(`${line} ${next}`)) {
         line = `${line} ${next}`;
         i += 1;
+        blockCtx = `${blockCtx} ${next}`.slice(-800);
       }
     }
     if (!/\d/.test(line)) continue;
+    if (isCogsOtherCostsContext(blockCtx, line)) continue;
     pushComparisonLine(line, years, targetYear, out);
   }
 
@@ -396,6 +423,7 @@ export function extractComparisonExpenseLines(
       lineIdx >= 0
         ? allText.slice(Math.max(0, lineIdx - 1200), lineIdx + rawLine.length).replace(/\s+/g, " ")
         : "";
+    if (isCogsOtherCostsContext(recentContext, line)) continue;
     if (!isComparisonExpenseRowContext(recentContext)) continue;
     pushComparisonLine(line, years, targetYear, out);
   }
@@ -403,11 +431,153 @@ export function extractComparisonExpenseLines(
   return dedupeComparisonLines(out);
 }
 
+/**
+ * Permissive comparison-worksheet pass: every row with an OCR text label + dollar amount.
+ * Use this to see all candidate top-8 lines before category rules filter them.
+ */
+export function extractAllComparisonLabelValueLines(
+  allText: string,
+  targetYear: number,
+): Array<{ label: string; amount: number; source: string }> {
+  const blockInfo = findComparisonBlock(allText);
+  if (!blockInfo) return [];
+  const years = headerYearsInBlock(blockInfo.text, allText, blockInfo.start);
+  const out: Array<{ label: string; amount: number; source: string }> = [];
+
+  const pushRawRow = (line: string, ctx = "") => {
+    if (!/\d/.test(line)) return;
+    if (isCogsOtherCostsContext(ctx, line)) return;
+    if (/^(total|gross receipts|ordinary business|taxable income|net income)\b/i.test(line)) return;
+    if (/SECTION\s+199A|SCHEDULE\s+K\b|DISTRIBUTIONS/i.test(line)) return;
+    const nums = keepableWorksheetMoneyTokens(line);
+    if (!nums.length) return;
+    const picked = pickColumn(nums, targetYear, years);
+    if (picked === undefined) return;
+    const rounded = Math.round(Math.abs(picked));
+    if (!isKeepableWorksheetAmount(rounded)) return;
+    const label = labelFromComparisonOcrLine(line, "");
+    if (!label || label.length < 2 || !/[a-z]{2,}/i.test(label)) return;
+    out.push({
+      label,
+      amount: rounded,
+      source: "Two-year comparison (raw row)",
+    });
+  };
+
+  const rawLines = blockInfo.text.split(/\n/);
+  let rawCtx = "";
+  for (let i = 0; i < rawLines.length; i++) {
+    let line = rawLines[i]!.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    rawCtx = `${rawCtx} ${line}`.slice(-800);
+    if (!/\d/.test(line) && i + 1 < rawLines.length) {
+      const next = rawLines[i + 1]!.replace(/\s+/g, " ").trim();
+      if (/\d/.test(next) && /[a-z]{3,}/i.test(line)) {
+        line = `${line} ${next}`;
+        i += 1;
+        rawCtx = `${rawCtx} ${next}`.slice(-800);
+      }
+    }
+    pushRawRow(line, rawCtx);
+  }
+
+  for (const rawLine of allText.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    const lineIdx = allText.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? allText.slice(Math.max(0, lineIdx - 1200), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : "";
+    if (!isComparisonExpenseRowContext(recentContext)) continue;
+    pushRawRow(line, recentContext);
+  }
+
+  const seen = new Set<string>();
+  const deduped: Array<{ label: string; amount: number; source: string }> = [];
+  for (const row of out.sort((a, b) => b.amount - a.amount)) {
+    const key = `${row.label.toLowerCase()}:${row.amount}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped;
+}
+
+/** Deduction-schedule rows inside comparison worksheets (bracket/pipe columns, any OCR label). */
+export function extractComparisonDeductionScheduleLines(
+  allText: string,
+  targetYear: number,
+): Array<{ label: string; amount: number; source: string }> {
+  const blockInfo = findComparisonBlock(allText);
+  const years = blockInfo
+    ? headerYearsInBlock(blockInfo.text, allText, blockInfo.start)
+    : undefined;
+  const out: Array<{ label: string; amount: number; source: string }> = [];
+
+  for (const rawLine of allText.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line || !/\d/.test(line) || !/[a-z]{3,}/i.test(line)) continue;
+    const lineIdx = allText.indexOf(rawLine);
+    const recentContext =
+      lineIdx >= 0
+        ? allText.slice(Math.max(0, lineIdx - 1200), lineIdx + rawLine.length).replace(/\s+/g, " ")
+        : "";
+    if (!isComparisonWorksheetContext(recentContext) && !/\[\s*\d{1,3}(?:,\d{3})+/.test(line)) {
+      continue;
+    }
+    const nums = keepableWorksheetMoneyTokens(line);
+    if (!nums.length) continue;
+    const picked = pickColumn(nums, targetYear, years);
+    if (picked === undefined) continue;
+    const rounded = Math.round(Math.abs(picked));
+    if (!isKeepableWorksheetAmount(rounded)) continue;
+    const label = labelFromComparisonOcrLine(line, "");
+    if (!label || label.length < 3) continue;
+    if (/^(total|gross receipts|taxable income|net income|other income|total deductions)\b/i.test(label)) {
+      continue;
+    }
+    out.push({
+      label,
+      amount: rounded,
+      source: "Comparison deduction schedule",
+    });
+  }
+
+  const seen = new Set<string>();
+  const deduped: Array<{ label: string; amount: number; source: string }> = [];
+  for (const row of out.sort((a, b) => b.amount - a.amount)) {
+    const key = `${row.label.toLowerCase()}:${row.amount}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped;
+}
+
 function isComparisonExpenseRowContext(ctx: string): boolean {
   return (
     isComparisonWorksheetContext(ctx) ||
     /prior\s+year\s+current\s+year|gross\s+receipts|deductions\s*:/i.test(ctx)
   );
+}
+
+/** Form 1125-A / line-5 Other costs schedules — COGS, not SG&A comparison rows. */
+function isCogsOtherCostsContext(ctx: string, line = ""): boolean {
+  const t = `${ctx} ${line}`;
+  // Require Form 1125-A or an explicit Other-costs statement header — not the bare phrase alone
+  // (comparison worksheets sometimes mention "other costs" in narrative).
+  return /form\s*1125-?a\b|other\s+costs?\s+statement|total\s+to\s+line\s*5\b/i.test(t);
+}
+
+function labelFromComparisonOcrLine(line: string, fallback: string): string {
+  const t = repairOcrLabel(line)
+    .replace(/[\d,.$()[\]-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^axes and licen/i, "taxes and licen");
+  if (t.length >= 3 && t.length <= 60 && /[a-z]/i.test(t)) return t;
+  return fallback;
 }
 
 function pushComparisonLine(
@@ -420,11 +590,11 @@ function pushComparisonLine(
     if (!COMPARISON_LEDGER_IDS.has(rule.id)) continue;
     const labelLine = repairOcrLabel(line);
     if (!lineMatchesLabelPattern(line, rule.labelRe) && !rule.labelRe.test(labelLine)) continue;
-    const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= rule.minAmount);
+    const nums = keepableWorksheetMoneyTokens(line);
     const picked = pickColumn(nums, targetYear, years);
     if (picked === undefined) continue;
     out.push({
-      label: COMPARISON_LEDGER_LABELS[rule.id] ?? rule.id,
+      label: labelFromComparisonOcrLine(line, COMPARISON_LEDGER_LABELS[rule.id] ?? rule.id),
       amount: Math.round(Math.abs(picked)),
       source: `Two-year comparison (${rule.id} row)`,
     });

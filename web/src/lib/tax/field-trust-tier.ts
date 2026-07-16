@@ -103,7 +103,7 @@ export const TRUST_TIER_LEGEND: TrustTierMeta[] = [
 const TIER_META = new Map(TRUST_TIER_LEGEND.map((item) => [item.tier, item]));
 
 const HARD_FLAG =
-  /exceeds sales|does not balance|>95% of sales|structural-mismatch|formula-disagreement|high-confidence-no-closure/i;
+  /exceeds sales|does not balance|structural-mismatch|formula-disagreement|high-confidence-no-closure/i;
 
 export function hasHardFieldFlag(flags?: string[]): boolean {
   return (flags ?? []).some((f) => HARD_FLAG.test(f));
@@ -117,6 +117,8 @@ function isTrustedSingleSource(source: string | undefined, parserConf: number): 
   if (isAuthoritativeSource(source)) return parserConf >= 65;
   if (isComparisonSource(source) && parserConf >= 84) return true;
   if (/structured financial/i.test(source ?? "")) return true;
+  if (/^Operating expenses \(top-8/i.test(source ?? "") && parserConf >= 70) return true;
+  if (/^Coherence:/i.test(source ?? "") && parserConf >= 80) return true;
   return false;
 }
 
@@ -161,6 +163,8 @@ export function resolveFieldTrustTier(input: TrustTierInput): FieldTrustTier {
   }
 
   if (isResidualOpexSource(source) || /verify|residual|post-verification|inferred/i.test(source ?? "")) {
+    // Keep residual other_opex out of trusted-green tiers so $2–$4 crumb misses are not
+    // "green dangers"; correct residuals may still show amber until stmt footers are exact.
     return trust >= 80 ? "moderate" : "low";
   }
 

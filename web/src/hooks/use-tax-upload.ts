@@ -9,7 +9,6 @@ import { finalizeTaxColumns } from "@/lib/tax/merge-years";
 import { detectDuplicateYears, summarizeReupload } from "@/lib/tax/parse-quality";
 import { clearTaxColumnsStorage, loadTaxSession, saveTaxColumns, saveTaxProgress } from "@/lib/tax/session-storage";
 import { validateClientFileList } from "@/lib/tax/validate-upload";
-import { isVercelDeploy } from "@/lib/tax/ocr-modes";
 import { applyUserFieldCorrection, applyUserFieldVerification } from "@/lib/tax/apply-user-correction";
 import type { TaxYearValues } from "@/lib/tax-workbook";
 
@@ -31,6 +30,8 @@ export function useTaxUpload() {
 
   useEffect(() => {
     const session = loadTaxSession();
+    // Re-finalize on hydrate (same as edit paths). Must stay idempotent after rank paste —
+    // see filterRankExpensePool taxes-anchor guard + benchmark-ui-upload-routes.ts.
     if (session.columns.length) setColumns(finalizeTaxColumns(session.columns));
     if (session.clientName) setClientName(session.clientName);
     // Never restore busy — in-flight fetches do not survive reload/HMR.
@@ -80,15 +81,13 @@ export function useTaxUpload() {
   const addFiles = useCallback(
     (files: FileList | null) => {
       if (!files?.length || busy) return;
-      if (columns.length > 0) {
-        setQueueError("Clear current results before uploading a new return.");
-        return;
-      }
       setQueueError("");
       setError("");
 
-      const list = Array.from(files).slice(0, 1);
-      const validation = validateClientFileList(list, { isVercel: isVercelDeploy() });
+      // Queue every selected year PDF (up to 10). Allowed while a workbook is present —
+      // same company merges; different company clears via mergeParsedTaxYears (see client-merge).
+      const list = Array.from(files);
+      const validation = validateClientFileList(list);
       if (!validation.ok) {
         const msg = validation.checks.flatMap((c) => c.errors.map((e) => `${c.filename}: ${e}`)).join(" ");
         setQueueError(msg || "Invalid file");
@@ -97,7 +96,7 @@ export function useTaxUpload() {
 
       setQueuedFiles(list);
     },
-    [busy, columns.length],
+    [busy],
   );
 
   const removeQueuedFile = useCallback((index: number) => {
@@ -154,8 +153,11 @@ export function useTaxUpload() {
         },
       );
 
+      // mergeParsedTaxYears → mergeTaxYearsByYear already runs finalizeTaxColumns.
+      // Calling finalize again re-ran align on rank-scrambled seat ids and forced the
+      // taxes pool line to whatever amount sat in the taxes_licenses paste index.
       const { columns: merged, warnings: clientWarnings } = mergeParsedTaxYears(baseColumns, json.parsed);
-      setColumns(finalizeTaxColumns(merged));
+      setColumns(merged);
       if (merged[0]?.clientName) setClientName(merged[0].clientName);
       setFileErrors(json.fileErrors ?? []);
       setPartial(Boolean(json.partial));

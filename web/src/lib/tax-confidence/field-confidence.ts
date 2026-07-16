@@ -85,17 +85,11 @@ function ocrCoverageFlags(coverage: OcrCoverageDiagnostics): ConfidenceFlag[] {
   if (!coverage.comparisonWorksheetFound) {
     flags.push("comparison_missing");
   }
-  if (coverage.opexClosureRatio !== undefined && coverage.opexClosureRatio < 0.5) {
+  if (coverage.opexClosureRatio !== undefined && coverage.opexClosureRatio < 1) {
     flags.push("formula_inconsistency");
   }
   if (coverage.ocrPageCount !== undefined && coverage.ocrPageCount < 3) {
     flags.push("page_truncation");
-  }
-  const numericDensity = coverage.ocrPageCount
-    ? (coverage.stmt2DetailSum ?? 0) / Math.max(coverage.ocrPageCount, 1)
-    : undefined;
-  if (numericDensity !== undefined && numericDensity < 5_000 && coverage.stmt2Found) {
-    flags.push("low_numeric_density");
   }
   if (
     flags.some((f) =>

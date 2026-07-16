@@ -33,11 +33,11 @@ export function applyLineScans(text: string, scans: Array<{ id: string; re: RegE
       const tail = nums.length ? nums[nums.length - 1] : undefined;
       if (tail === undefined) continue;
       if (scan.id === "cogs") {
-        const yearCols = nums.filter((n) => Math.abs(n) >= 500_000);
-        if (!yearCols.length) continue;
-        const pair = yearCols.length >= 2 ? yearCols.slice(-2) : yearCols;
-        if (pair.length >= 2 && Math.abs(pair[0]! - pair[1]!) < 2) continue;
-        hits.push({ value: Math.round(Math.max(...yearCols)), conf: scan.conf ?? 97, source: scan.source });
+        // Multi-column comparison bleed: require two distinct year columns, not a $500k floor.
+        if (nums.length < 2) continue;
+        const pair = nums.slice(-2);
+        if (Math.abs(pair[0]! - pair[1]!) < 2) continue;
+        hits.push({ value: Math.round(Math.max(...pair)), conf: scan.conf ?? 97, source: scan.source });
         continue;
       }
       hits.push({ value: Math.round(tail), conf: scan.conf ?? 97, source: scan.source });

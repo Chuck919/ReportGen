@@ -12,9 +12,10 @@ import { scanFormLine20OtherDeductionsTotal } from "@/lib/tax-return/form-anchor
 import type { TaxFormKind } from "./detect-tax-form";
 import type { FieldExtraction } from "@/lib/tax-return/form-anchors";
 import { isSuspiciousTaxValue, isWeakSource } from "@/lib/tax-return/confidence-gates";
+import { isInterestInstructionCrumb } from "@/lib/tax-return/interest-crumb";
 
 function nearEqual(a: number, b: number): boolean {
-  return Math.abs(a - b) <= Math.max(2, Math.abs(b) * 0.01);
+  return Math.round(a) === Math.round(b);
 }
 
 const NOMINAL_PAR_VALUES = new Set([100, 500, 1000, 5000, 10_000]);
@@ -103,11 +104,7 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
         resolved.values.accumulated_amortization,
         resolved.values.gross_intangible_assets,
       ];
-      const fullyAmort = isFullyAmortizedIntangibles(resolved);
-      if (
-        !traps.some((t) => t !== undefined && nearEqual(stmt.value, t)) &&
-        !(fullyAmort && stmt.value > 0 && stmt.value < 500)
-      ) {
+      if (!traps.some((t) => t !== undefined && nearEqual(stmt.value, t))) {
         resolved.values.amortization = stmt.value;
         resolved.confidence.amortization = stmt.confidence;
         resolved.sources.amortization = "Statement amortization (coherence refill)";
@@ -170,84 +167,62 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
       delete resolved.sources.other_operating_expenses;
       resolved.warnings.push(`Coherence: cleared other_operating_expenses=${opex} (structurally implausible)`);
     }
-    for (const [id, ratioMin, ratioMax] of [
-      ["cogs", 0.05, 0.95],
-      ["rent", 0.001, 0.35],
-      ["officer_compensation", 0, 0.25],
-      ["salaries_wages", 0.01, 0.45],
-    ] as const) {
-      const v = resolved.values[id];
-      if (v === undefined || v <= 1) continue;
-      const ratio = v / sales;
-      if (ratio < ratioMin || ratio > ratioMax) {
-        if (isWeakSource(resolved.sources[id])) {
-          delete resolved.values[id];
-          delete resolved.confidence[id];
-          delete resolved.sources[id];
-          resolved.warnings.push(
-            `Coherence: cleared ${id}=${v} (${(ratio * 100).toFixed(1)}% of sales — out of range)`,
-          );
-        } else {
-          resolved.warnings.push(
-            `Coherence: ${id} is ${(ratio * 100).toFixed(1)}% of sales — verify`,
-          );
-        }
-      }
-    }
+    // Sales-% “typical range” clears removed (charter) — they wiped real high-rent/payroll on weak
+    // sources. Structural COGS>sales flags live in reconcile; Form collision replaces live in parse.
   }
 
-  if (resolved.values.cash !== undefined && Math.abs(resolved.values.cash) < 5_000) {
-    if (isWeakSource(resolved.sources.cash)) {
-      const v = resolved.values.cash;
+  if (resolved.values.cash !== undefined && isWeakSource(resolved.sources.cash)) {
+    const v = resolved.values.cash;
+    // Weak OCR cash that looks like form-ref / year — not a bare dollar floor.
+    if (isSuspiciousTaxValue("cash", v, resolved.sources.cash, ctx.targetYear)) {
       delete resolved.values.cash;
       delete resolved.confidence.cash;
       delete resolved.sources.cash;
-      resolved.warnings.push(`Coherence: cleared cash=${v} (too small for operating company)`);
+      resolved.warnings.push(`Coherence: cleared cash=${v} (weak OCR / form-ref crumb)`);
     }
   }
 
   if (
     resolved.values.common_stock !== undefined &&
     resolved.values.common_stock > 0 &&
-    resolved.values.common_stock < 10_000 &&
-    (resolved.values.other_stock_equity ?? 0) > 50_000
-  ) {
-    // Keep par-value common stock when equity is in other_stock_equity
-  } else if (
-    resolved.values.common_stock !== undefined &&
-    resolved.values.common_stock > 0 &&
-    resolved.values.common_stock < 10_000 &&
     !isNominalParCommonStock(resolved.values.common_stock) &&
-    resolved.values.unclassified_equity !== undefined &&
-    resolved.values.unclassified_equity > 50_000 &&
-    (resolved.values.other_stock_equity ?? 0) < 50_000
+    isWeakSource(resolved.sources.common_stock) &&
+    (resolved.values.unclassified_equity !== undefined ||
+      resolved.values.other_stock_equity !== undefined)
   ) {
     const v = resolved.values.common_stock;
     delete resolved.values.common_stock;
     delete resolved.confidence.common_stock;
     delete resolved.sources.common_stock;
-    resolved.warnings.push(`Coherence: cleared common_stock=${v} (nominal par; equity is unclassified/retained)`);
+    resolved.warnings.push(
+      `Coherence: cleared common_stock=${v} (weak non-par; equity in unclassified/other stock)`,
+    );
   }
 
   if (
     resolved.values.preferred_stock !== undefined &&
     resolved.values.preferred_stock > 0 &&
-    resolved.values.preferred_stock < 10_000 &&
-    resolved.values.unclassified_equity !== undefined &&
-    resolved.values.unclassified_equity > 50_000
+    !isNominalParCommonStock(resolved.values.preferred_stock) &&
+    isWeakSource(resolved.sources.preferred_stock) &&
+    resolved.values.unclassified_equity !== undefined
   ) {
     const v = resolved.values.preferred_stock;
     delete resolved.values.preferred_stock;
     delete resolved.confidence.preferred_stock;
     delete resolved.sources.preferred_stock;
-    resolved.warnings.push(`Coherence: cleared preferred_stock=${v} (nominal par)`);
+    resolved.warnings.push(`Coherence: cleared preferred_stock=${v} (weak non-par)`);
   }
 
   if (
     resolved.values.unclassified_equity !== undefined &&
     resolved.values.unclassified_equity > 0 &&
-    resolved.values.unclassified_equity < 5_000 &&
-    isWeakSource(resolved.sources.unclassified_equity)
+    isWeakSource(resolved.sources.unclassified_equity) &&
+    isSuspiciousTaxValue(
+      "unclassified_equity",
+      resolved.values.unclassified_equity,
+      resolved.sources.unclassified_equity,
+      ctx.targetYear,
+    )
   ) {
     const v = resolved.values.unclassified_equity;
     delete resolved.values.unclassified_equity;
@@ -259,13 +234,14 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
   if (
     resolved.values.amortization !== undefined &&
     resolved.values.amortization > 0 &&
-    resolved.values.amortization < 500 &&
-    isFullyAmortizedIntangibles(resolved)
+    isFullyAmortizedIntangibles(resolved) &&
+    (isWeakSource(resolved.sources.amortization) ||
+      /comparison/i.test(resolved.sources.amortization ?? ""))
   ) {
     resolved.values.amortization = 0;
     resolved.confidence.amortization = 90;
     resolved.sources.amortization = "Coherence: intangibles fully amortized (P&L amort = 0)";
-    resolved.warnings.push("Coherence: cleared small amortization — intangibles fully amortized on Schedule L");
+    resolved.warnings.push("Coherence: cleared weak amortization — intangibles fully amortized on Schedule L");
   }
 
   if (
@@ -276,7 +252,8 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
       resolved.sources.unclassified_equity ?? "",
     ) &&
     resolved.values.other_stock_equity !== undefined &&
-    resolved.values.other_stock_equity > 50_000
+    (nearEqual(resolved.values.other_stock_equity, resolved.values.unclassified_equity) ||
+      /routed to other stock|comparison/i.test(resolved.sources.other_stock_equity ?? ""))
   ) {
     const v = resolved.values.other_stock_equity;
     delete resolved.values.other_stock_equity;
@@ -286,21 +263,9 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
   } else if (
     resolved.values.unclassified_equity !== undefined &&
     resolved.values.unclassified_equity > 0 &&
-    resolved.values.unclassified_equity < 50_000 &&
     resolved.values.other_stock_equity !== undefined &&
-    resolved.values.other_stock_equity > 500_000
-  ) {
-    const v = resolved.values.unclassified_equity;
-    delete resolved.values.unclassified_equity;
-    delete resolved.confidence.unclassified_equity;
-    delete resolved.sources.unclassified_equity;
-    resolved.warnings.push(`Coherence: cleared unclassified_equity=${v} (equity is other_stock_equity)`);
-  } else if (
-    resolved.values.unclassified_equity !== undefined &&
-    resolved.values.unclassified_equity > 0 &&
-    resolved.values.unclassified_equity < 100_000 &&
-    resolved.values.other_stock_equity !== undefined &&
-    resolved.values.other_stock_equity > 400_000 &&
+    /embedded schedule l \(paired-column\)/i.test(resolved.sources.other_stock_equity ?? "") &&
+    isWeakSource(resolved.sources.unclassified_equity) &&
     !/schedule\s+l.*(?:line\s*24|23\+25|retained|unappropriated)/i.test(
       resolved.sources.unclassified_equity ?? "",
     )
@@ -315,41 +280,52 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
   if (
     resolved.values.interest_expense !== undefined &&
     resolved.values.interest_expense > 0 &&
-    resolved.values.interest_expense < 5_000 &&
-    !/form 1120/i.test(resolved.sources.interest_expense ?? "")
+    isInterestInstructionCrumb(
+      resolved.values.interest_expense,
+      resolved.sources.interest_expense ?? "",
+    )
   ) {
     const v = resolved.values.interest_expense;
     delete resolved.values.interest_expense;
     delete resolved.confidence.interest_expense;
     delete resolved.sources.interest_expense;
-    resolved.warnings.push(`Coherence: cleared interest_expense=${v} (likely OCR noise)`);
+    resolved.warnings.push(`Coherence: cleared interest_expense=${v} (Form 8990 / §163(j) crumb)`);
   }
 
   if (
     resolved.values.utilities !== undefined &&
     resolved.values.utilities > 0 &&
-    resolved.values.utilities < 5_000 &&
-    resolved.values.sales !== undefined &&
-    resolved.values.sales > 100_000 &&
-    (isWeakSource(resolved.sources.utilities) ||
-      /statement\s*2|embedded detail/i.test(resolved.sources.utilities ?? ""))
+    isSuspiciousTaxValue(
+      "utilities",
+      resolved.values.utilities,
+      resolved.sources.utilities,
+      ctx.targetYear,
+    )
   ) {
     const v = resolved.values.utilities;
     delete resolved.values.utilities;
     delete resolved.confidence.utilities;
     delete resolved.sources.utilities;
-    resolved.warnings.push(`Coherence: cleared utilities=${v} (too small vs sales — refill from comparison)`);
+    resolved.warnings.push(`Coherence: cleared utilities=${v} (OCR crumb / form-ref)`);
   }
 
-  if (
-    resolved.values.amortization !== undefined &&
-    (hasNoIntangibleAssets(resolved) || Math.abs(resolved.values.amortization) > 100_000)
-  ) {
+  if (resolved.values.amortization !== undefined && resolved.values.amortization > 0) {
     const v = resolved.values.amortization;
-    if (v !== 0) {
+    const digits = String(Math.abs(Math.round(v))).length;
+    // Digit-run / OMB scrapes are not P&L amort — structural digit length, not a $100k floor.
+    if (digits > 7) {
+      delete resolved.values.amortization;
+      delete resolved.confidence.amortization;
+      delete resolved.sources.amortization;
+      resolved.warnings.push(`Coherence: cleared amortization=${v} (OCR digit-run / OMB scrape)`);
+    } else if (
+      hasNoIntangibleAssets(resolved) &&
+      (isWeakSource(resolved.sources.amortization) ||
+        /comparison|omb|4562/i.test(resolved.sources.amortization ?? ""))
+    ) {
       resolved.values.amortization = 0;
       resolved.confidence.amortization = 90;
-      resolved.sources.amortization = "Coherence: no intangibles / OCR junk cleared to zero";
+      resolved.sources.amortization = "Coherence: no intangibles — weak/comparison amort cleared";
       resolved.warnings.push(`Coherence: cleared amortization=${v} (no intangible assets on Schedule L)`);
     }
   }

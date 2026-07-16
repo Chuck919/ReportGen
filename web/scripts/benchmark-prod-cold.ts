@@ -10,7 +10,6 @@ import {
   WORKBOOK_COMPARISON_FIXTURES,
 } from "../src/lib/workbook-comparison-fixtures";
 import { TAX_WORKBOOK_ROWS } from "../src/lib/tax-workbook";
-import { VERCEL_FUNCTION_MAX_MS } from "../src/lib/tax/resolve-ocr-mode";
 import {
   PROD_CANDIDATES,
   runMultipass,
@@ -18,12 +17,10 @@ import {
   type CandidatePlan,
 } from "./lib/prod-pipeline";
 
-const BASE = process.argv[2] ?? "https://reportgen-three.vercel.app";
-if (!process.env.OCR_DEPLOY && !BASE.includes("vercel.app")) {
-  process.env.OCR_DEPLOY = "vps";
-}
+const BASE = process.argv[2] ?? "https://reportgen.duckdns.org";
 const YEARS = [2023, 2024, 2025] as const;
-const LIMIT_MS = VERCEL_FUNCTION_MAX_MS - 5000;
+/** Soft wall-clock note for summary (OVH has no hard 300s function kill). */
+const LIMIT_MS = 25 * 60_000;
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);
 
 function score(year: number, values: Record<string, number | undefined>, scope: "primary" | "all") {

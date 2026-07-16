@@ -1,14 +1,16 @@
 /**
  * Mirrors production UI OCR pipeline via HTTP (parse + ocr-plan + ocr-pages).
+ * Benchmark / CLI only — production UI is single-pass.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { OcrMode } from "../../src/lib/api/types";
-import type { MultipassGapTier, MultipassStopWhen, VercelMultipassPlan } from "../../src/lib/tax/vercel-multipass-config";
 import {
-  gapsForTier,
-  shouldStopMultipass,
-} from "../../src/lib/tax/vercel-multipass-config";
+  getMissingAttachmentFieldIds,
+  getMissingFieldsForNextTier,
+  getMissingPrimaryFieldIds,
+} from "../../src/lib/tax/gap-analysis";
+import type { TaxYearValues } from "../../src/lib/tax-workbook";
 
 export type ParsedRow = {
   year: number;
@@ -23,6 +25,42 @@ export type ParseApiResult = {
   partial?: boolean;
   error?: string;
 };
+
+/** Gap sets used by benchmark scripts only. */
+export type MultipassGapTier = "primary" | "primary+attach" | "all-input";
+export type MultipassStopWhen = "primary-complete" | "tier-complete";
+
+export type MultipassRunPlan = {
+  pass1: OcrMode;
+  pass2: OcrMode;
+  reparse: OcrMode;
+  gapTier: MultipassGapTier;
+  maxBatches: number;
+  batchSize: number;
+  forcePhase3: boolean;
+  iterateGaps: boolean;
+  stopWhen: MultipassStopWhen;
+};
+
+function gapsForTier(
+  column: Pick<TaxYearValues, "values" | "confidence" | "warnings">,
+  tier: MultipassGapTier,
+): string[] {
+  return getMissingFieldsForNextTier(column, tier);
+}
+
+function shouldStopMultipass(
+  column: Pick<TaxYearValues, "values" | "confidence" | "warnings">,
+  stopWhen: MultipassStopWhen,
+): boolean {
+  if (stopWhen === "primary-complete") {
+    return getMissingPrimaryFieldIds(column).length === 0;
+  }
+  return (
+    getMissingPrimaryFieldIds(column).length === 0 &&
+    getMissingAttachmentFieldIds(column).length === 0
+  );
+}
 
 function ocrPageNumbers(text: string): number[] {
   const nums = new Set<number>();
@@ -165,11 +203,6 @@ export async function runSinglePass(
   }
 }
 
-export type MultipassRunPlan = Pick<
-  VercelMultipassPlan,
-  "pass1" | "pass2" | "reparse" | "gapTier" | "maxBatches" | "batchSize" | "forcePhase3" | "iterateGaps" | "stopWhen"
->;
-
 export async function runMultipass(
   base: string,
   pdfPath: string,
@@ -209,7 +242,7 @@ export async function runMultipass(
         alreadyPages: ocrPageNumbers(ocrText),
         missingFields: missing,
       });
-      const batches = (ocrPlan.batches.length ? ocrPlan.batches : chunkArray(ocrPlan.targets, plan.batchSize));
+      const batches = ocrPlan.batches.length ? ocrPlan.batches : chunkArray(ocrPlan.targets, plan.batchSize);
       const pages = batches[0];
       if (!pages?.length) break;
 
@@ -257,18 +290,9 @@ export type CandidatePlan = {
   plan?: MultipassRunPlan;
 };
 
-export const VERCEL_CANDIDATES: CandidatePlan[] = [
-  { id: "fast", kind: "single", ocrMode: "vercel-fast" },
-  { id: "balanced", kind: "single", ocrMode: "vercel-balanced" },
-  { id: "thorough", kind: "single", ocrMode: "vercel-thorough" },
-];
-
-export const VPS_CANDIDATES: CandidatePlan[] = [
+/** OVH / local mode presets for production cold-start benches. */
+export const PROD_CANDIDATES: CandidatePlan[] = [
   { id: "fast", kind: "single", ocrMode: "fast" },
   { id: "balanced", kind: "single", ocrMode: "balanced" },
   { id: "thorough", kind: "single", ocrMode: "thorough" },
 ];
-
-/** Default: Vercel presets. Set OCR_DEPLOY=vps for Hetzner/Oracle. */
-export const PROD_CANDIDATES: CandidatePlan[] =
-  process.env.OCR_DEPLOY === "vps" ? VPS_CANDIDATES : VERCEL_CANDIDATES;

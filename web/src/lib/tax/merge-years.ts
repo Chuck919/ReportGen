@@ -4,10 +4,22 @@ import { applyCrossYearFlags } from "@/lib/tax/cross-year-reconcile";
 import { refreshTaxYearVerification } from "@/lib/tax/reconcile-tax-year";
 import { alignOperatingExpensesAcrossYears } from "@/lib/tax/operating-expenses";
 import { snapshotParserFormulaBaseline } from "@/lib/tax/workbook-display";
+import { flagPnlIdentityFromAnchors, applyOrdinaryIncomeReverseOpexFromAnchor } from "@/lib/tax-return/pnl-identity";
+import { isSuspiciousTaxValue } from "@/lib/tax-return/confidence-gates";
 
 const INPUT_IDS = new Set(
   TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id),
 );
+
+/** Comparison-only SG&A categories that still belong in the rank-by-amount pool. */
+const RANK_POOL_EXTRA_IDS: Record<string, string> = {
+  employee_benefits: "Employee benefit programs",
+  gasoline: "Gasoline",
+  insurance: "Insurance",
+  supplies: "Supplies",
+  repairs: "Repairs and maintenance",
+  travel: "Travel",
+};
 
 function applyCrossYearComparisonBackfill(columns: TaxYearValues[]): TaxYearValues[] {
   const byYear = new Map(columns.map((col) => [col.year, { ...col, values: { ...col.values } }]));
@@ -18,24 +30,83 @@ function applyCrossYearComparisonBackfill(columns: TaxYearValues[]): TaxYearValu
     if (!prior) continue;
 
     for (const [id, value] of Object.entries(col.comparisonPriorValues)) {
-      if (!INPUT_IDS.has(id) || value === undefined) continue;
-      const cur = prior.values[id];
-      const curConf = prior.confidence?.[id] ?? 0;
-      const curSrc = prior.fieldSources?.[id] ?? "";
-      const weak = !curSrc || /OCR label|fuzzy|label match/i.test(curSrc);
-      if (cur === undefined || (weak && curConf < 85)) {
-        prior.values[id] = value;
-        prior.confidence = { ...(prior.confidence ?? {}), [id]: 88 };
-        prior.fieldSources = {
-          ...(prior.fieldSources ?? {}),
-          [id]: `Two-year comparison (from ${col.year} return)`,
-        };
+      if (value === undefined) continue;
+      // Depreciation / amortization belong on each year's Form page-1 — comparison prior
+      // columns often carry instruction / line-noise (e.g. $114) into blank years.
+      if (id === "depreciation" || id === "amortization") continue;
+      if (INPUT_IDS.has(id)) {
+        // Never cross-year-refill income rows — tax-refund / Stmt-1 amounts are year-local.
+        if (id === "other_income" || id === "other_operating_income") continue;
+        // Skip comparison crumbs (form line numbers, Form 8990 / §163(j) interest noise, etc.).
+        if (
+          isSuspiciousTaxValue(
+            id,
+            value,
+            `Two-year comparison (from ${col.year} return)`,
+            col.comparisonPriorYear,
+          )
+        ) {
+          continue;
+        }
+        const cur = prior.values[id];
+        const curConf = prior.confidence?.[id] ?? 0;
+        const curSrc = prior.fieldSources?.[id] ?? "";
+        const weak = !curSrc || /OCR label|fuzzy|label match/i.test(curSrc);
+        if (cur === undefined || (weak && curConf < 85)) {
+          prior.values[id] = value;
+          prior.confidence = { ...(prior.confidence ?? {}), [id]: 88 };
+          prior.fieldSources = {
+            ...(prior.fieldSources ?? {}),
+            [id]: `Two-year comparison (from ${col.year} return)`,
+          };
+        }
+      }
+      const extraLabel = RANK_POOL_EXTRA_IDS[id];
+      if (extraLabel && Math.round(Math.abs(value)) >= 100) {
+        const src = `Two-year comparison (from ${col.year} return) (${id} row)`;
+        const lines = [...(prior.operatingExpenseLines ?? [])];
+        const already = lines.some(
+          (l) => Math.round(l.amount) === Math.round(Math.abs(value)) && /\([a-z_]+\s+row\)/i.test(l.source ?? ""),
+        );
+        if (!already) {
+          lines.push({ label: extraLabel, amount: Math.round(Math.abs(value)), source: src });
+          prior.operatingExpenseLines = lines;
+        }
       }
     }
     byYear.set(col.comparisonPriorYear, refreshTaxYearVerification(prior));
   }
 
   return Array.from(byYear.values()).sort((a, b) => b.year - a.year);
+}
+
+/**
+ * After opex align: Form-OI reverse plug may fill when residual fails identity —
+ * but never shrinks labeled Stmt itemized other_opex (cross-year top-8 remapping
+ * understates the plug). Then re-flag so NI/NPBT stay honest.
+ */
+function reflagPnlIdentityAfterOpexAlign(col: TaxYearValues): TaxYearValues {
+  if (col.formOrdinaryBusinessIncome === undefined && col.formGrossProfit === undefined) {
+    return col;
+  }
+  const warnings = [...(col.warnings ?? [])];
+  const resolved = {
+    values: { ...col.values },
+    confidence: { ...(col.confidence ?? {}) },
+    sources: { ...(col.fieldSources ?? {}) },
+    warnings,
+  };
+  if (col.formOrdinaryBusinessIncome !== undefined) {
+    applyOrdinaryIncomeReverseOpexFromAnchor(resolved, col.formOrdinaryBusinessIncome);
+  }
+  flagPnlIdentityFromAnchors(resolved, col.formOrdinaryBusinessIncome, col.formGrossProfit);
+  return refreshTaxYearVerification({
+    ...col,
+    values: resolved.values,
+    confidence: resolved.confidence,
+    fieldSources: resolved.sources,
+    warnings: resolved.warnings,
+  });
 }
 
 export function finalizeTaxColumns(columns: TaxYearValues[]): TaxYearValues[] {
@@ -48,7 +119,9 @@ export function finalizeTaxColumns(columns: TaxYearValues[]): TaxYearValues[] {
         snapshotParserFormulaBaseline(refreshed.parserBaseline ?? refreshed.values),
     };
   });
-  cols = alignOperatingExpensesAcrossYears(cols).map(refreshTaxYearVerification);
+  cols = alignOperatingExpensesAcrossYears(cols)
+    .map(refreshTaxYearVerification)
+    .map(reflagPnlIdentityAfterOpexAlign);
   return applyCrossYearFlags(cols);
 }
 
@@ -89,6 +162,12 @@ export function mergeTaxYearRecords(existing: TaxYearValues, incoming: TaxYearVa
     userEditedFields: existing.userEditedFields,
     userVerifiedFields: existing.userVerifiedFields ?? incoming.userVerifiedFields,
     userOpexSlotLabels: existing.userOpexSlotLabels ?? incoming.userOpexSlotLabels,
+    operatingExpenseLines: incoming.operatingExpenseLines ?? existing.operatingExpenseLines,
+    opexSlotLabels: incoming.opexSlotLabels ?? existing.opexSlotLabels,
+    stmtOtherDeductionsTotal: incoming.stmtOtherDeductionsTotal ?? existing.stmtOtherDeductionsTotal,
+    formOrdinaryBusinessIncome:
+      incoming.formOrdinaryBusinessIncome ?? existing.formOrdinaryBusinessIncome,
+    formGrossProfit: incoming.formGrossProfit ?? existing.formGrossProfit,
     parserBaseline: existing.parserBaseline ?? incoming.parserBaseline,
     parserFormulaBaseline: existing.parserFormulaBaseline ?? incoming.parserFormulaBaseline,
     formulaOverrides: existing.formulaOverrides ?? incoming.formulaOverrides,

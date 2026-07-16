@@ -2,27 +2,48 @@ import {
   TAX_ATTACHMENT_FIELD_IDS,
   WORKBOOK_COMPARISON_FIXTURES,
 } from "../../src/lib/workbook-comparison-fixtures";
-import { OPERATING_EXPENSE_SLOT_IDS, matchTop8OpexAmounts } from "../../src/lib/tax/operating-expenses";
+import { OPERATING_EXPENSE_SLOT_IDS } from "../../src/lib/tax/operating-expenses";
+import { actualTop8Amounts, resolveExpectedTop8Amounts, type FixtureWithTop8 } from "../../src/lib/tax/fixture-top8";
 import { TAX_WORKBOOK_ROWS } from "../../src/lib/tax-workbook";
 import changwenFixtures from "../changwen-fixtures.json";
+import compareTrueTop8 from "../compare-true-top8.json";
 
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);
-const OPEX_SLOT_SET = new Set<string>(OPERATING_EXPENSE_SLOT_IDS);
+/** Opex paste rows + other_operating_expenses — scored via pair benchmark, not field accuracy. */
+const OPEX_BENCHMARK_FIELD_IDS = new Set<string>([...OPERATING_EXPENSE_SLOT_IDS, "other_operating_expenses"]);
 
-const ALL_TAX_FIXTURES: Record<string, { year: number; values: Record<string, number>; top8Amounts?: number[] }> = {
-  ...WORKBOOK_COMPARISON_FIXTURES.tax,
-  ...(changwenFixtures as Record<string, { year: number; values: Record<string, number>; top8Amounts?: number[] }>),
+type RawFixture = {
+  year: number;
+  values: Record<string, number>;
+  top8Amounts?: number[];
+  top8Labels?: string[];
 };
 
-/** $1 floor or 0.5% relative — wrong values must not silently pass. */
-export function moneyTolerance(expected: number): number {
-  if (expected === 0) return 0;
-  return Math.max(1, Math.abs(expected) * 0.005);
+const ALL_TAX_FIXTURES: Record<string, RawFixture> = {
+  ...WORKBOOK_COMPARISON_FIXTURES.tax,
+  ...(changwenFixtures as Record<string, RawFixture>),
+};
+
+const TRUE_TOP8 = compareTrueTop8 as Record<string, { top8Amounts?: number[]; top8Labels?: string[] }>;
+
+export function enrichFixture(fixtureKey: string): FixtureWithTop8 {
+  const base = ALL_TAX_FIXTURES[fixtureKey];
+  if (!base) throw new Error(`No fixture for ${fixtureKey}`);
+  const extra = TRUE_TOP8[fixtureKey];
+  return {
+    values: base.values,
+    top8Amounts: base.top8Amounts ?? extra?.top8Amounts,
+    top8Labels: base.top8Labels ?? extra?.top8Labels,
+  };
+}
+
+/** Exact dollar match — tax paste must not pass on %-slack. */
+export function moneyTolerance(_expected: number): number {
+  return 0;
 }
 
 export function withinMoneyTolerance(actual: number, expected: number): boolean {
-  if (expected === 0) return actual === 0;
-  return Math.abs(actual - expected) <= moneyTolerance(expected);
+  return Math.round(actual) === Math.round(expected);
 }
 
 export type FieldMatchResult = {
@@ -242,6 +263,14 @@ function pruneRedundantMisses(
   });
 }
 
+/** Field accuracy excluding opex benchmark fields (8 paste rows + other_operating_expenses). */
+export function scoreAllFieldsExcludingOpexSlots(
+  fixtureKey: string,
+  values: Record<string, number | undefined>,
+): PrimaryScore {
+  return scoreFields(fixtureKey, values, true, { excludeOpexSlots: true });
+}
+
 function scoreFields(
   fixtureKey: string,
   values: Record<string, number | undefined>,
@@ -256,7 +285,7 @@ function scoreFields(
   const missDetails: FieldMiss[] = [];
 
   for (const id of INPUT_IDS) {
-    if (options?.excludeOpexSlots && OPEX_SLOT_SET.has(id)) continue;
+    if (options?.excludeOpexSlots && OPEX_BENCHMARK_FIELD_IDS.has(id)) continue;
     const expected = exp[id];
     if (expected === undefined) continue;
     if (!includeAttachments && TAX_ATTACHMENT_FIELD_IDS.has(id)) continue;
@@ -327,29 +356,84 @@ export function scoreAllFields(
   return scoreFields(fixtureKey, values, true);
 }
 
-/** Field accuracy excluding the 8 operating-expense paste slots (scored separately as an amount multiset). */
-export function scoreAllFieldsExcludingOpexSlots(
-  fixtureKey: string,
-  values: Record<string, number | undefined>,
-): PrimaryScore {
-  return scoreFields(fixtureKey, values, true, { excludeOpexSlots: true });
+const MIN_OPEX_BENCH_AMOUNT = 100;
+
+/** Multiset match — expected integrator amounts vs paste top-8 amounts (order / slots irrelevant). */
+export function matchTop8AmountMultiset(
+  expected: number[],
+  actual: number[],
+): { ok: number; n: number; misses: string[]; unmatchedActual: number[] } {
+  const exp = expected.filter((a) => a >= MIN_OPEX_BENCH_AMOUNT);
+  const act = actual.filter((a) => a >= MIN_OPEX_BENCH_AMOUNT);
+  const used = new Set<number>();
+  let ok = 0;
+  const misses: string[] = [];
+
+  for (const amount of exp) {
+    const idx = act.findIndex((a, i) => !used.has(i) && withinMoneyTolerance(a, amount));
+    if (idx >= 0) {
+      used.add(idx);
+      ok++;
+    } else {
+      misses.push(`opex_amount: exp ${amount}, not in top-8 paste`);
+    }
+  }
+
+  const unmatchedActual = act.filter((_, i) => !used.has(i));
+  return { ok, n: exp.length, misses, unmatchedActual };
 }
 
-/** Opex correctness: amount multiset over the eight expense rows (truth from Excel integrator). */
-export function scoreOpexAmountsOnly(
+/**
+ * Opex benchmark: eight integrator row amounts (rows 11–18) as an order-independent multiset,
+ * plus other_operating_expenses (row 19). Paste-slot IDs are irrelevant — only amounts.
+ * Readable labels are enforced separately in the UI-session unclean-label gate (not semantic slot assignment).
+ */
+export function scoreOpexBenchmark(
   fixtureKey: string,
   values: Record<string, number | undefined>,
+  _opexSlotLabels?: Record<string, string>,
 ): PrimaryScore {
-  const exp = ALL_TAX_FIXTURES[fixtureKey];
-  if (!exp) throw new Error(`No fixture for ${fixtureKey}`);
-  const match = matchTop8OpexAmounts(exp, values);
+  const fixture = enrichFixture(fixtureKey);
+  const expectedTop8 = resolveExpectedTop8Amounts(fixture);
+  const actualTop8 = actualTop8Amounts(values);
+  const top8 = matchTop8AmountMultiset(expectedTop8, actualTop8);
+  let ok = top8.ok;
+  let n = top8.n;
+  const misses = [...top8.misses];
+
+  if (expectedTop8.length > 0 && expectedTop8.length < 8) {
+    misses.push(`fixture_incomplete: top8Amounts has ${expectedTop8.length}/8 amounts`);
+  }
+
+  const otherExp = fixture.values.other_operating_expenses;
+  if (otherExp !== undefined) {
+    n += 1;
+    const actual = values.other_operating_expenses;
+    if (actual !== undefined && withinMoneyTolerance(actual, otherExp)) {
+      ok += 1;
+    } else {
+      const got = actual === undefined ? "blank" : String(actual);
+      const pct =
+        actual !== undefined && otherExp !== 0
+          ? (Math.abs(actual - otherExp) / Math.abs(otherExp)) * 100
+          : null;
+      misses.push(
+        `other_operating_expenses: exp ${otherExp}, got ${got}${pct !== null ? ` err=${pct.toFixed(1)}%` : " err=missing"}`,
+      );
+    }
+  }
+
   return {
-    ok: match.ok,
-    n: match.n,
-    pct: match.n ? (match.ok / match.n) * 100 : 0,
-    misses: match.misses,
-    missDetails: match.misses.map((m) => ({
-      field: "opex_amount",
+    ok,
+    n,
+    pct: n ? (ok / n) * 100 : 0,
+    misses,
+    missDetails: misses.map((m) => ({
+      field: m.startsWith("other_operating")
+        ? "other_operating_expenses"
+        : m.startsWith("fixture_incomplete")
+          ? "fixture"
+          : "opex_amount",
       expected: 0,
       actual: undefined,
       errorPct: null,
@@ -357,6 +441,26 @@ export function scoreOpexAmountsOnly(
       formatted: m,
     })),
   };
+}
+
+/** Surplus paste amounts not in fixture — candidate Excel discrepancies (non-blocking). */
+export function detectExcelOpexDiscrepancies(
+  fixture: FixtureWithTop8,
+  values: Record<string, number | undefined>,
+): string[] {
+  const expected = resolveExpectedTop8Amounts(fixture);
+  const actual = actualTop8Amounts(values);
+  const { unmatchedActual } = matchTop8AmountMultiset(expected, actual);
+  return unmatchedActual.map((a) => `parser_surplus_amount: ${a} (not in fixture top-8)`);
+}
+
+/** @deprecated Use scoreOpexBenchmark — kept for scripts not yet updated. */
+export function scoreOpexAmountsOnly(
+  fixtureKey: string,
+  values: Record<string, number | undefined>,
+  opexSlotLabels?: Record<string, string>,
+): PrimaryScore {
+  return scoreOpexBenchmark(fixtureKey, values, opexSlotLabels);
 }
 
 export function parsePct(primary: string): number {

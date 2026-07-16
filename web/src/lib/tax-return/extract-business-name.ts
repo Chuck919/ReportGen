@@ -2,18 +2,20 @@
 export function normalizeClientKey(name: string): string {
   return name
     .toLowerCase()
-    .replace(/\b(inc|llc|l\.l\.c|corp|corporation|co|company|ltd)\b\.?/gi, "")
+    .replace(/\b(inc|llc|l\.l\.c|pllc|p\.l\.l\.c|corp|corporation|co|company|ltd|cpa|p\.c\.|pc)\b\.?/gi, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
 
 const JUNK_NAME =
-  /^(do not send|keep for your records|officer'?s signature|under penalties|internal revenue|department of the treasury|form\s+\d|schedule\s+[a-z]|see instructions|u\.?s\.?\s+individual)/i;
+  /^(do not send|keep for your records|officer'?s signature|under penalties|internal revenue|department of the treasury|form\s+\d|schedule\s+[a-z]|see instructions|u\.?s\.?\s+individual|identification|incorporation|stock\s+owned)/i;
 
 function isPlausibleBusinessName(name: string): boolean {
   if (name.length < 4 || name.length > 80) return false;
   if (JUNK_NAME.test(name)) return false;
-  if (/^(form|schedule|u\.?s\.?|internal revenue)/i.test(name)) return false;
+  if (/^(form|schedule|u\.?s\.?|internal revenue|identification)/i.test(name)) return false;
+  // Schedule K / ownership table captions OCR'd as the taxpayer.
+  if (/identification.*incorporation|incorporation.*stock\s+owned/i.test(name)) return false;
   return true;
 }
 
@@ -27,7 +29,8 @@ function cleanBusinessName(raw: string): string {
 
 /**
  * Best-effort taxpayer name from return cover / page 1 OCR.
- * Used to prevent merging Arizona + KCF in the same workbook session.
+ * Unreliable (preparer firm / schedule captions often win) — used only as a
+ * soft identity key for same-vs-different company merge. Do not surface to users.
  */
 export function extractBusinessName(text: string, filename?: string): string | undefined {
   const head = text.slice(0, 25_000);

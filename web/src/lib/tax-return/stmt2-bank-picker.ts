@@ -1,4 +1,4 @@
-import { isReasonableMoneyAmount, substantialMoneyTokens } from "./money";
+import { isFormReferenceNumber, isReasonableMoneyAmount, substantialMoneyTokens } from "./money";
 import { isOtherDeductionsBlockHeader, endsOtherDeductionsBlock } from "./statement-extractors";
 
 export type Stmt2BankPick = {
@@ -22,10 +22,21 @@ function bankAmountsOnLine(line: string): number[] {
   for (const n of substantialMoneyTokens(line)) {
     out.push(Math.round(Math.abs(n)));
   }
-  return [...new Set(out)].filter((n) => n >= 500 && isReasonableMoneyAmount(n));
+  // Labeled OD bank lines: keepable dollars only — no bare $500 floor.
+  return [...new Set(out)].filter((n) => {
+    if (n < 1) return false;
+    if (!isReasonableMoneyAmount(n)) return false;
+    if (isFormReferenceNumber(n)) return false;
+    if (n >= 1990 && n <= 2035) return false;
+    return true;
+  });
 }
 
-/** Score bank-fee candidates by how well Stmt 2 attachment + misc residual closes the block total. */
+/**
+ * Score bank-fee candidates by labeled OD remainder + exact misc closure.
+ * Soft residual/$/% bands removed — misc must dollar-equal the leftover or the
+ * candidate is still admitted as a labeled bank line (lower score).
+ */
 function scoreBankCandidate(
   bank: number,
   prof: number,
@@ -33,28 +44,25 @@ function scoreBankCandidate(
   stmt2Total: number,
   misc: number[],
 ): number {
-  if (bank >= stmt2Total * 0.85) return 0;
+  // Structural: bank alone cannot be the whole Other-deductions total.
+  if (bank >= stmt2Total) return 0;
   const attachment = prof + util + bank;
-  const residual = stmt2Total - attachment;
-  if (residual < 500 || residual > stmt2Total * 0.45) return 0;
+  if (attachment >= stmt2Total) return 0;
+  const residual = Math.round(stmt2Total - attachment);
+  if (residual < 1) return 0;
 
-  const miscRest = misc.filter((m) => Math.abs(m - bank) > Math.max(2, bank * 0.01));
+  const miscRest = misc.filter((m) => Math.round(m) !== Math.round(bank));
   const miscSum = miscRest.reduce((s, n) => s + n, 0);
-  const miscNear =
-    miscRest.some((m) => Math.abs(m - residual) <= Math.max(500, residual * 0.04)) ||
-    (miscSum >= 500 && Math.abs(miscSum - residual) <= Math.max(800, residual * 0.06));
+  const miscExact =
+    miscRest.some((m) => Math.round(m) === residual) ||
+    (miscSum >= 1 && Math.round(miscSum) === residual);
 
-  let score = 40;
-  if (bank <= stmt2Total * 0.25) score += 25;
-  else if (bank <= stmt2Total * 0.5) score += 10;
-
-  if (miscNear) score += 45;
-  else if (residual >= 1_000 && residual <= stmt2Total * 0.25) score += 15;
-
+  let score = 50;
+  if (miscExact) score += 40;
   return Math.min(100, score);
 }
 
-/** Pick Stmt 2 bank/credit-card line using structural closure (percentage-based, no fixed dollar caps). */
+/** Pick Stmt 2 bank/credit-card line using bank-label vocabulary + Stmt total remainder. */
 export function pickStmt2BankCreditCard(
   text: string,
   ctx: {
@@ -65,7 +73,7 @@ export function pickStmt2BankCreditCard(
   },
 ): Stmt2BankPick | undefined {
   const stmt2Total = ctx.stmt2Total;
-  if (stmt2Total < 5_000) return undefined;
+  if (!(stmt2Total >= 1)) return undefined;
 
   const prof = ctx.professional_fees ?? 0;
   const util = ctx.utilities ?? 0;
@@ -95,25 +103,20 @@ export function pickStmt2BankCreditCard(
     if (!inStmt2 || !BANK_LABEL.test(line) || /payable/i.test(line)) continue;
     const isExpenseCharge = /bank\s+&?\s*credit|bank\s+charg|credit\s+card\s+charg/i.test(line);
     for (const n of bankAmountsOnLine(line)) {
-      if (n >= stmt2Total * 0.85) continue;
+      // Skip amounts that are the whole stmt total (footer echo), not a detail line.
+      if (n >= stmt2Total) continue;
       candidates.add(n);
       if (isExpenseCharge) expenseChargeBanks.add(n);
     }
   }
 
-  if (!expenseChargeBanks.size) {
-    for (const m of misc) {
-      if (m >= 500 && m <= stmt2Total * 0.25) candidates.add(m);
-    }
-  }
-
+  // Only labeled bank/merchant lines — do not promote unlabeled misc via stmt% bands.
   if (!candidates.size) return undefined;
 
   let best: { bank: number; score: number } | undefined;
   for (const bank of candidates) {
     let score = scoreBankCandidate(bank, prof, util, stmt2Total, misc);
     if (expenseChargeBanks.has(bank)) score += 30;
-    if (bank >= stmt2Total * 0.4 && bank <= stmt2Total * 0.55) score += 15;
     if (!best || score > best.score) best = { bank, score };
   }
   if (!best || best.score < 35) return undefined;

@@ -113,7 +113,7 @@ export function computeWorkbookFormulas(values: Record<string, number | undefine
   }
 
   const currentLiabIds = ["accounts_payable", "short_term_debt", "current_portion_ltd", "other_current_liabilities"];
-  // One present bucket is enough — missing siblings count as 0 (KCF only has other current liabilities).
+  // One present bucket is enough — missing siblings count as 0 when only other current liabilities are filled.
   if (anyPresent(out, currentLiabIds, 1)) {
     out.total_current_liabilities = sum(out, currentLiabIds);
   }
@@ -133,7 +133,7 @@ export function computeWorkbookFormulas(values: Record<string, number | undefine
     "other_stock_equity",
     "unclassified_equity",
   ];
-  // KCF-style returns often only fill unclassified equity.
+  // Some returns only fill unclassified equity.
   if (anyPresent(out, equityIds, 1)) {
     out.total_equity = sum(out, equityIds);
   }

@@ -4,7 +4,7 @@
  */
 import type { OcrMode } from "./types";
 
-/** Pages per serverless OCR request — tuned for Vercel Hobby ~5 min limit. */
+/** Pages per OCR request batch (benchmark / progressive experiments). */
 export const OCR_BATCH_SIZE = 7;
 
 export type OcrPlanResponse = {

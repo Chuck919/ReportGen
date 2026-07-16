@@ -1,4 +1,6 @@
 /** Independent extraction families for multi-source agreement checks. */
+import { isWeakSource } from "@/lib/tax-return/confidence-gates";
+
 export type SourceFamily = "form" | "schedule-l" | "comparison" | "statement" | "ocr" | "structured" | "other";
 
 export type SourceSnapshot = {
@@ -18,11 +20,9 @@ const FAMILY_PRIORITY: SourceFamily[] = [
   "other",
 ];
 
-/** Loose tolerance for balance-sheet totals and YoY — not for source agreement. */
-export function withinTolerance(a: number, b: number, pct = 0.02): boolean {
-  const diff = Math.abs(a - b);
-  const scale = Math.max(Math.abs(a), Math.abs(b), 1);
-  return diff <= Math.max(1000, scale * pct);
+/** Dollar-exact agreement only (charter) — legacy 2%/$1k slack removed. */
+export function withinTolerance(a: number, b: number, _pct = 0.02): boolean {
+  return Math.round(a) === Math.round(b);
 }
 
 export function valuesExactlyEqual(a: number, b: number): boolean {
@@ -32,7 +32,7 @@ export function valuesExactlyEqual(a: number, b: number): boolean {
 export function classifySourceFamily(source?: string): SourceFamily {
   const s = source ?? "";
   if (/structured financial/i.test(s)) return "structured";
-  if (/form 1120|page 1 block/i.test(s)) return "form";
+  if (/form 1120|page 1 block|NET\s+DEPRECIATION|depreciation report/i.test(s)) return "form";
   if (/schedule l|embedded schedule/i.test(s)) return "schedule-l";
   if (/comparison/i.test(s)) return "comparison";
   if (/statement|stmt \d/i.test(s)) return "statement";
@@ -205,6 +205,21 @@ export function resolveValuesFromSnapshots(
 
   for (const [id, snaps] of Object.entries(snapshots)) {
     if (!hasSourceDisagreement(snaps)) continue;
+
+    const parserVal = values[id];
+    const parserSrc = fieldSources[id];
+    // Dep/amort: keep parser cross-reference (NET DEPRECIATION / Form 4562) over blank Form 0 snapshots.
+    if (
+      (id === "depreciation" || id === "amortization") &&
+      parserVal !== undefined &&
+      Math.round(parserVal) > 0 &&
+      (/NET\s+DEPRECIATION|depreciation report|Form 4562|Statement amortization/i.test(parserSrc ?? "") ||
+        (!/blank/i.test(parserSrc ?? "") && !isWeakSource(parserSrc)))
+    ) {
+      const alternates = getAlternateReads(snaps, parserVal);
+      if (alternates.length) fieldAlternates[id] = alternates;
+      continue;
+    }
 
     const best = pickBestSnapshot(snaps);
     outValues[id] = best.value;

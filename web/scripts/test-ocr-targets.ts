@@ -67,7 +67,6 @@ async function embeddedText(bytes: Uint8Array) {
 }
 
 async function runMatrix(): Promise<Matrix> {
-  process.env.VERCEL = "";
   process.env.FREE_OCR_WORKERS = "1";
   process.env.FREE_OCR_TIMEOUT_MS = "1200000";
   const docsDir = path.resolve(process.cwd(), "..", "Documents");

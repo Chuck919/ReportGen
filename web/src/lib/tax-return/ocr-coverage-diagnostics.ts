@@ -2,14 +2,13 @@ import type { ResolvedFields } from "./merge";
 import type { TaxFormKind } from "./detect-tax-form";
 import {
   extractStatementDeductions,
-  scanDocumentWideStmt2Exclusions,
   scanStatement2Total,
   sumStmt2BlockLineItems,
 } from "./statement-extractors";
 import { scanComparisonOtherDeductionsTotal } from "./comparison-opex";
 import { knownStmt2AttachmentSum } from "./stmt2-total-inference";
 import { extractScheduleLFields } from "./schedule-l";
-import { closureTolerance } from "./structural-tolerance";
+import { exactClosureTolerance } from "./structural-tolerance";
 
 export type OcrCoverageDiagnostics = {
   stmt2Found: boolean;
@@ -38,10 +37,6 @@ function countExclusionLines(allText: string, resolved: ResolvedFields): number 
   for (const id of ids) {
     if (resolved.values[id] !== undefined || ded.values[id] !== undefined) count++;
   }
-  const wideExcl = scanDocumentWideStmt2Exclusions(allText);
-  if (wideExcl >= 500) {
-    count += Math.min(7, Math.round(wideExcl / 5_000));
-  }
   return count;
 }
 
@@ -50,7 +45,8 @@ function stmt2DetailIncompleteFlag(
   comparisonOtherDeductions: number,
 ): string | undefined {
   if (stmt2DetailSum <= 0 || comparisonOtherDeductions <= 0) return undefined;
-  if (stmt2DetailSum >= comparisonOtherDeductions * 0.4) return undefined;
+  // Structural under-coverage: itemized detail cannot reach the comparison OD total.
+  if (stmt2DetailSum >= comparisonOtherDeductions) return undefined;
   return "stmt2-detail-incomplete-vs-comparison";
 }
 
@@ -91,8 +87,8 @@ export function buildOcrCoverageDiagnostics(
     const known = knownStmt2AttachmentSum(resolved, allText);
     const sum = known + opex;
     const diff = Math.abs(sum - stmt2Total);
-    const tol = closureTolerance(stmt2Total);
-    opexClosureRatio = Math.max(0, 1 - diff / Math.max(tol * 3, stmt2Total * 0.05));
+    // Exact TOTAL closure only (0 or 1) — no soft 5% ratio bands on diagnostics.
+    opexClosureRatio = diff <= exactClosureTolerance(stmt2Total) ? 1 : 0;
   }
 
   const stmt2DetailSum =
@@ -118,15 +114,11 @@ export function buildOcrCoverageDiagnostics(
   if (!scheduleLFound && /form\s+112/i.test(allText)) {
     flags.push("schedule-l-not-detected");
   }
-  if (opex !== undefined && stmt2Total !== undefined && opexClosureRatio !== undefined && opexClosureRatio < 0.45) {
+  if (opex !== undefined && stmt2Total !== undefined && opexClosureRatio === 0) {
     flags.push("formula-inconsistency-opex-closure");
   }
   if (options?.ocrPageCount !== undefined && options.ocrPageCount > 0 && options.ocrPageCount < 4) {
     flags.push("page-truncation-suspected");
-  }
-  const moneyTokenCount = (allText.match(/\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/g) ?? []).length;
-  if (options?.ocrPageCount && options.ocrPageCount >= 2 && moneyTokenCount / options.ocrPageCount < 8) {
-    flags.push("low-numeric-density");
   }
 
   return {

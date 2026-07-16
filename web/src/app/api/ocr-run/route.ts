@@ -4,7 +4,6 @@ import { runLocalOcr } from "@/lib/tax-return/local-ocr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
 /** Full single-pass OCR for one tier (used when escalating from a fast preview pass). */
 export async function POST(req: NextRequest) {

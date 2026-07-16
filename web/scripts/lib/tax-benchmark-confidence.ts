@@ -11,8 +11,10 @@ import {
   type FieldMiss,
   type PrimaryScore,
 } from "./tax-benchmark-score";
+import { OPERATING_EXPENSE_SLOT_IDS } from "../../src/lib/tax/operating-expenses";
 
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);
+const OPEX_SLOT_SET = new Set<string>(OPERATING_EXPENSE_SLOT_IDS);
 
 /** displayConfidence at or above this is treated as "high confidence" for calibration. */
 export const HIGH_CONFIDENCE_THRESHOLD = 75;
@@ -352,6 +354,8 @@ export function computeConfidenceCalibration(
   const rows: FieldCalibrationRow[] = [];
 
   for (const id of INPUT_IDS) {
+    // Rank-path paste rows are scored as an amount multiset — per-slot fixture ids are not identity.
+    if (OPEX_SLOT_SET.has(id)) continue;
     const expected = exp[id];
     if (expected === undefined) continue;
     let correct = false;

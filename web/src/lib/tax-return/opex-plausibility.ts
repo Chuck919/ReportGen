@@ -1,5 +1,5 @@
 import type { ResolvedFields } from "./merge";
-import { closureTolerance } from "./structural-tolerance";
+import { exactClosureTolerance } from "./structural-tolerance";
 
 export type OpexContext = {
   sales?: number;
@@ -25,14 +25,14 @@ const PNL_COLLISION_IDS = [
   "utilities",
 ] as const;
 
-function nearEqual(a: number, b: number): boolean {
-  return Math.abs(a - b) <= Math.max(2, Math.abs(b) * 0.01);
+function dollarsEqual(a: number, b: number): boolean {
+  return Math.round(a) === Math.round(b);
 }
 
 export function collidesWithResolvedPnl(value: number, resolved: ResolvedFields): boolean {
   for (const id of PNL_COLLISION_IDS) {
     const v = resolved.values[id];
-    if (v !== undefined && nearEqual(value, v)) return true;
+    if (v !== undefined && dollarsEqual(value, v)) return true;
   }
   return false;
 }
@@ -40,34 +40,20 @@ export function collidesWithResolvedPnl(value: number, resolved: ResolvedFields)
 function closesStmt2Total(value: number, ctx: OpexContext): boolean {
   if (ctx.stmt2Total === undefined || ctx.stmt2Total <= 0) return false;
   const known = ctx.knownStmt2Lines ?? 0;
-  return Math.abs(known + value - ctx.stmt2Total) <= closureTolerance(ctx.stmt2Total);
+  return Math.abs(known + value - ctx.stmt2Total) <= exactClosureTolerance(ctx.stmt2Total);
 }
 
-/** Structural plausibility — percentage-based only (no fixed dollar floors). */
+/** Structural plausibility — prefer Form/Stmt exact closure over sales-size heuristics. */
 export function isPlausibleOtherOperatingExpense(value: number, ctx: OpexContext): boolean {
   const abs = Math.abs(Math.round(value));
   if (abs < 0) return false;
   // Zero other-opex is valid for some returns.
   if (abs === 0) return true;
-  if (ctx.sales !== undefined && ctx.sales > 0 && abs > ctx.sales * 0.35) return false;
-  if (ctx.stmt2Total !== undefined && ctx.stmt2Total > 0 && abs >= ctx.stmt2Total * 0.92) {
-    return false;
-  }
-  // Large opex is valid when it closes Stmt 2 (Arizona-style attachments).
-  if (
-    ctx.stmt2Total !== undefined &&
-    ctx.stmt2Total > 0 &&
-    abs >= ctx.stmt2Total * 0.4 &&
-    !closesStmt2Total(abs, ctx)
-  ) {
-    return false;
-  }
-  if (
-    ctx.knownStmt2Lines !== undefined &&
-    ctx.stmt2Total !== undefined &&
-    abs > ctx.stmt2Total - ctx.knownStmt2Lines * 0.5
-  ) {
-    if (abs >= ctx.stmt2Total * 0.85 && !closesStmt2Total(abs, ctx)) return false;
+  // Reject when the candidate is the Stmt footer itself (not a residual), unless known
+  // lines + value actually close the total.
+  if (ctx.stmt2Total !== undefined && ctx.stmt2Total > 0) {
+    const isFooter = dollarsEqual(abs, ctx.stmt2Total);
+    if (isFooter && !closesStmt2Total(abs, ctx)) return false;
   }
   return true;
 }

@@ -2,32 +2,9 @@ import type { TaxYearValues } from "@/lib/tax-workbook";
 import type { BenchmarkEntryRow } from "@/lib/benchmark-entry";
 import { defaultOcrModeForDeploy, resolveOcrModeForDeploy } from "@/lib/tax/resolve-ocr-mode";
 
-export type OcrMode =
-  | "fast"
-  | "balanced"
-  | "thorough"
-  | "vercel-fast"
-  | "vercel-balanced-scan"
-  | "vercel-pass1-wide"
-  | "vercel-balanced-retry"
-  | "vercel-balanced"
-  | "vercel-thorough-retry"
-  | "vercel-thorough-full"
-  | "vercel-thorough";
+export type OcrMode = "fast" | "balanced" | "thorough";
 
-const OCR_MODES = new Set<OcrMode>([
-  "fast",
-  "balanced",
-  "thorough",
-  "vercel-fast",
-  "vercel-balanced-scan",
-  "vercel-pass1-wide",
-  "vercel-balanced-retry",
-  "vercel-balanced",
-  "vercel-thorough-retry",
-  "vercel-thorough-full",
-  "vercel-thorough",
-]);
+const OCR_MODES = new Set<OcrMode>(["fast", "balanced", "thorough"]);
 
 export function parseOcrMode(raw: unknown): OcrMode {
   const key = typeof raw === "string" ? raw : "";

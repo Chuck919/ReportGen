@@ -133,20 +133,20 @@ export function apiDocsJson() {
     description: `Upload a ${SUPPORTED_TAX_FORMS_LABEL} PDF, run OCR, return extracted workbook values as JSON table.`,
     auth: process.env.PARSE_TAX_API_KEY
       ? "Required: Authorization: Bearer <PARSE_TAX_API_KEY> or X-API-Key header"
-      : "Optional: set PARSE_TAX_API_KEY in Vercel env to require a key",
-    limits: { maxDurationSeconds: 300, maxFilesPerRequestVercel: 1, maxPdfMb: 50 },
+      : "Optional: set PARSE_TAX_API_KEY on the OVH VPS to require a key",
+    limits: { maxFilesPerRequest: 10, maxPdfMb: 50 },
     post: {
       contentType: "multipart/form-data",
       fields: {
-        file: "PDF (required) — alias: files[] for one file on Vercel",
-        ocrMode: "vercel-fast | vercel-balanced | vercel-thorough (default: vercel-balanced on Vercel)",
+        file: "PDF (required) — alias: files[] for multi-file upload",
+        ocrMode: "fast | balanced | thorough (default: balanced)",
         targetYear: "optional 20xx override for two-year comparison worksheets",
         format: "json (default) | table | tsv | markdown",
       },
-      example: `curl -X POST "https://YOUR_APP.vercel.app/api/parse-tax-return?format=json" \\
+      example: `curl -X POST "https://reportgen.duckdns.org/api/parse-tax-return?format=json" \\
   -H "Authorization: Bearer YOUR_KEY" \\
   -F "file=@return.pdf" \\
-  -F "ocrMode=vercel-balanced"`,
+  -F "ocrMode=balanced"`,
     },
     response: {
       parsed: "array of { year, values, confidence, fieldSources, warnings, filename }",

@@ -1,27 +1,12 @@
 # ReportGen
 
-Tax return OCR and workbook extraction (`web/` is the Next.js app deployed to Vercel).
+Tax return OCR and workbook extraction (`web/` is the Next.js app). Hosted on an **OVH VPS**.
 
-## Deploy to Vercel
+## Deploy (OVH VPS)
 
-1. Push this repo to GitHub (any GitHub account — does not need to match your Cursor login email).
-2. In [Vercel](https://vercel.com) → **Add New Project** → import the GitHub repo.
-3. Set **Root Directory** to `web`.
-4. Environment variables (Production):
-   - `NEXT_PUBLIC_VERCEL=1` (required for Vercel OCR modes on `/tax`)
-   - `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` (if using Supabase)
-   - `PARSE_TAX_API_KEY` (optional — locks down `/api/parse-tax-return`)
-5. Deploy. Hobby plan: OCR functions use `maxDuration: 300` (see `web/vercel.json`).
+See **[web/deploy/vps/README.md](web/deploy/vps/README.md)** for Docker Compose setup, env vars, and `npm run deploy:vps`.
 
-### CLI (alternative to Git integration)
-
-```bash
-cd web
-npx vercel login          # sign in with your Vercel account
-npx vercel link           # link to team/project
-npx vercel env pull .env.local
-npx vercel --prod
-```
+Production URL: https://reportgen.duckdns.org
 
 ## Local dev
 
@@ -30,5 +15,3 @@ cd web
 npm install
 npm run dev
 ```
-
-See `web/PRE_DEPLOY_VERCEL.md` for the full checklist.

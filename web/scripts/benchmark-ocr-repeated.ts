@@ -129,7 +129,6 @@ async function benchMode(year: number, mode: OcrMode, runs: number, docsDir: str
 }
 
 async function main() {
-  process.env.VERCEL = "";
   process.env.FREE_OCR_TIMEOUT_MS = process.env.FREE_OCR_TIMEOUT_MS ?? "1200000";
   process.env.FREE_OCR_WORKERS = process.env.FREE_OCR_WORKERS ?? "1";
 

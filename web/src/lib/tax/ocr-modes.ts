@@ -12,51 +12,25 @@ export const LOCAL_OCR_MODE_OPTIONS: OcrModeOption[] = [
   {
     id: "fast",
     label: "Fast",
-    hint: "~1–2 min",
+    hint: "",
     detail: "Quick preview — opening pages only. Numbers may be incomplete; use Balanced for Excel paste.",
   },
   {
     id: "balanced",
     label: "Balanced",
-    hint: "~5 min",
-    detail: "Recommended. Full extraction for Excel paste (~5 min per file on typical returns).",
+    hint: "",
+    detail: "Recommended. Full extraction for Excel paste.",
   },
   {
     id: "thorough",
     label: "Thorough",
-    hint: "≤10 min",
-    detail: "Maximum accuracy on difficult scans — balanced pass plus hi-DPI on weak pages (up to ~10 min).",
+    hint: "",
+    detail: "Maximum accuracy on difficult scans — balanced pass plus hi-DPI on weak pages.",
   },
 ];
-
-/** Vercel Hobby — mirrors local tiers (workers=1). */
-export const VERCEL_OCR_MODE_OPTIONS: OcrModeOption[] = [
-  {
-    id: "vercel-fast",
-    label: "Fast",
-    hint: "",
-    detail: "Quick preview — opening pages only. Use Balanced for a complete workbook.",
-  },
-  {
-    id: "vercel-balanced",
-    label: "Balanced",
-    hint: "",
-    detail: "Recommended default for Excel paste.",
-  },
-  {
-    id: "vercel-thorough",
-    label: "Thorough",
-    hint: "",
-    detail: "Maximum accuracy. Takes longer.",
-  },
-];
-
-export function isVercelDeploy(): boolean {
-  return process.env.NEXT_PUBLIC_VERCEL === "1";
-}
 
 export function getOcrModeOptions(): OcrModeOption[] {
-  return isVercelDeploy() ? VERCEL_OCR_MODE_OPTIONS : LOCAL_OCR_MODE_OPTIONS;
+  return LOCAL_OCR_MODE_OPTIONS;
 }
 
 export function defaultOcrMode(): OcrMode {
@@ -65,12 +39,9 @@ export function defaultOcrMode(): OcrMode {
 
 /** Wall-clock estimate per PDF — progress bar reaches ~95% at this duration. */
 export function estimateOcrDurationMs(mode: OcrMode, fileCount = 1): number {
+  // Typical corporate return (≈40–80 pages). Very large packs (100+ pages) run longer.
   const perFile =
-    mode === "fast" || mode === "vercel-fast"
-      ? 90_000
-      : mode === "thorough" || mode === "vercel-thorough"
-        ? 10 * 60_000
-        : 5 * 60_000;
+    mode === "fast" ? 2.5 * 60_000 : mode === "thorough" ? 8.5 * 60_000 : 5.5 * 60_000;
   return perFile * Math.max(fileCount, 1);
 }
 

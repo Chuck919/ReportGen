@@ -4,6 +4,7 @@ import {
   isForm1120Line,
   isFormReferenceNumber,
   isHistoricalGrossReceiptsLine,
+  isReasonableMoneyAmount,
   lineMoneyTokens,
   lineMaxAmount,
   lineTailAmount,
@@ -11,6 +12,8 @@ import {
   scheduleLineAmount,
   substantialMoneyTokens,
   derailOcrLeadingOne,
+  unambiguousFormLineAmount,
+  unambiguousFormLineAmountForTag,
 } from "./money";
 import { applyLineScans } from "./form-line-scan";
 import { extractScheduleLFields, scheduleLLine1CashAmount } from "./schedule-l";
@@ -56,11 +59,16 @@ function setField(
   const prev = out.confidence[id] ?? 0;
   if (prev > conf) return;
   const rounded = Math.round(value);
+  // Don't let line-number / form-ref crumbs shrink an existing sales figure.
+  // Confidence upgrade only — no $100k / $10k size floors.
   if (
     id === "sales" &&
     out.values.sales !== undefined &&
-    out.values.sales >= 100_000 &&
-    rounded < out.values.sales * 0.05
+    rounded < out.values.sales &&
+    (conf <= (out.confidence.sales ?? 0) ||
+      isFormReferenceNumber(rounded) ||
+      Math.abs(rounded) <= 99 ||
+      !isReasonableMoneyAmount(rounded))
   ) {
     return;
   }
@@ -80,20 +88,38 @@ function repairOcrSplitThousands(s: string): string {
   });
 }
 
+/** Keepable Form sales token — form-ref / year / digit-run structure, not $50k floors. */
+function keepableSalesAmount(n: number): boolean {
+  const abs = Math.abs(Math.round(n));
+  if (abs < 1 || !isReasonableMoneyAmount(abs)) return false;
+  if (isFormReferenceNumber(abs)) return false;
+  if (abs >= 1990 && abs <= 2035) return false;
+  if (abs <= 99) return false;
+  return true;
+}
+
 function salesFromLine(line: string): number | undefined {
   if (/balance.*subtract.*line\s*1b.*line\s*1[ac]/i.test(line)) {
     const amt = lineMaxAmount(line) ?? scheduleLineAmount(line);
-    if (amt !== undefined && amt >= 50_000) return derailOcrLeadingOne(amt);
+    if (amt !== undefined && keepableSalesAmount(amt)) return derailOcrLeadingOne(amt);
   }
 
   if (!/gross\s+receipt|gross receipts or sales|line\s+1c|\b1c\b/i.test(line)) {
-    return bracketLineAmount(line, "1c") ?? lineMaxAmount(line) ?? consensusFromLine(line);
+    const tagged = bracketLineAmount(line, "1c");
+    if (tagged !== undefined && keepableSalesAmount(tagged)) return derailOcrLeadingOne(tagged);
+    const one = unambiguousFormLineAmount(line);
+    if (one !== undefined && keepableSalesAmount(one)) return derailOcrLeadingOne(one);
+    const fallback = lineMaxAmount(line) ?? consensusFromLine(line);
+    return fallback !== undefined && keepableSalesAmount(fallback)
+      ? derailOcrLeadingOne(fallback)
+      : undefined;
   }
 
   const repaired = repairOcrSplitThousands(line);
+  // Prefer comma-grouped money runs on the gross-receipts caption (layout grammar).
   const commaAmounts = (repaired.match(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?\b/g) ?? [])
     .map((r) => parseMoney(r))
-    .filter((n): n is number => n !== null && n >= 100_000 && n < 50_000_000);
+    .filter((n): n is number => n !== null && keepableSalesAmount(n));
   if (commaAmounts.length) return Math.max(...commaAmounts);
 
   const labelMatch = repaired.match(/gross\s+receipts?\s+or\s*sales/i);
@@ -102,9 +128,10 @@ function salesFromLine(line: string): number | undefined {
     const moneyRun = segment.match(/\d[\d,]{4,}/);
     if (moneyRun) {
       const joined = moneyRun[0].replace(/[^\d]/g, "");
+      // Digit-run length = OCR cell shape (not a dollar floor).
       if (joined.length >= 6 && joined.length <= 8) {
         const n = Number(joined);
-        if (Number.isFinite(n) && n >= 50_000) return derailOcrLeadingOne(n);
+        if (Number.isFinite(n) && keepableSalesAmount(n)) return derailOcrLeadingOne(n);
       }
     }
   }
@@ -114,17 +141,19 @@ function salesFromLine(line: string): number | undefined {
   const digitsOnly = afterSales.replace(/[^\d]/g, "");
   if (digitsOnly.length >= 6 && digitsOnly.length <= 8) {
     const n = Number(digitsOnly);
-    if (Number.isFinite(n) && n >= 50_000) return derailOcrLeadingOne(n);
+    if (Number.isFinite(n) && keepableSalesAmount(n)) return derailOcrLeadingOne(n);
   }
 
   const bracket = bracketLineAmount(repaired, "1c");
-  if (bracket !== undefined && bracket >= 50_000 && bracket < 50_000_000) {
+  if (bracket !== undefined && keepableSalesAmount(bracket)) {
     return derailOcrLeadingOne(bracket);
   }
 
+  const one = unambiguousFormLineAmount(repaired);
+  if (one !== undefined && keepableSalesAmount(one)) return derailOcrLeadingOne(one);
+
   const tail = lineMaxAmount(repaired) ?? consensusFromLine(repaired);
-  if (tail !== undefined && tail >= 10_000) return derailOcrLeadingOne(tail);
-  if (tail !== undefined && /gross\s+receipt|1c/i.test(line) && tail >= 100_000) return derailOcrLeadingOne(tail);
+  if (tail !== undefined && keepableSalesAmount(tail)) return derailOcrLeadingOne(tail);
   return undefined;
 }
 
@@ -138,11 +167,22 @@ function form1120Line5Interest(line: string): number | undefined {
   const pipe = line.match(/(?:^|[\s|])\s*5\s*\|[^\d]{0,80}(\d{1,3}(?:,\d{3})*|\d+)/i);
   if (pipe?.[1]) {
     const n = parseMoney(pipe[1]);
-    if (n !== null && n < 10_000) return n;
+    // Form line 5 interest income — keepable token; reject the bare line tag itself.
+    if (n !== null && isReasonableMoneyAmount(n) && Math.abs(n) !== 5 && !isFormReferenceNumber(Math.abs(n))) {
+      return n;
+    }
   }
   if (isForm1120Line(line, 5) && !/expense|investment/i.test(line)) {
-    const oi = formLineAmount(line, "5") ?? scheduleLineAmount(line);
-    if (oi !== undefined && oi < 10_000 && Math.abs(oi) !== 5) return oi;
+    const oi =
+      unambiguousFormLineAmountForTag(line, "5") ?? formLineAmount(line, "5") ?? scheduleLineAmount(line);
+    if (
+      oi !== undefined &&
+      isReasonableMoneyAmount(oi) &&
+      Math.abs(oi) !== 5 &&
+      !isFormReferenceNumber(Math.abs(oi))
+    ) {
+      return oi;
+    }
   }
   return undefined;
 }
@@ -242,8 +282,10 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
         setField(out, "interest_expense", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120-S line 13");
       }
       if (isForm1120Line(line, 14) && /depreciation/i.test(line) && !/accum|schedule\s*l|post-1986/i.test(line)) {
-        const dep = scheduleLineAmount(line);
-        if (dep !== undefined && (Math.abs(dep) > 99 || substantialMoneyTokens(line).length)) {
+        // Multi-column bleed (e.g. "14 DEPRECIATION 3,035 2,665 5,700") is not a Form cell —
+        // leave unset so NET DEPRECIATION / reconcile can win.
+        const dep = unambiguousFormLineAmount(line);
+        if (dep !== undefined) {
           setField(out, "depreciation", dep, "Form 1120-S line 14");
         } else if (!substantialMoneyTokens(line).length) {
           setField(out, "depreciation", 0, "Form 1120-S line 14", 96);
@@ -291,7 +333,7 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
         setField(out, "interest_expense", scheduleLineAmount(line) ?? lineTailAmount(line), "Form 1120 line 18");
       }
       if (isForm1120Line(line, 20) && /depreciation/i.test(line) && !/accum/i.test(line)) {
-        const dep = scheduleLineAmount(line);
+        const dep = unambiguousFormLineAmount(line);
         if (dep !== undefined) setField(out, "depreciation", dep, "Form 1120 line 20");
       }
       if (isForm1120Line(line, 22) && /advertis/i.test(line)) {
@@ -359,7 +401,7 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
         source: "Schedule L line 20 (tail scan)",
         conf: 97,
       },
-      { id: "unclassified_equity", re: /24\s+retained|retained\s+e\w*rnings/i, source: "Schedule L line 24 (tail scan)", conf: 97 },
+      { id: "unclassified_equity", re: /schedule\s+l[,\s]+line\s*24[,\s]+column\s*\(D\)|24\s+retained|retained\s+e\w*rnings/i, source: "Schedule L line 24 (tail scan)", conf: 97 },
     ]),
   );
 
@@ -419,7 +461,10 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
         setField(out, "interest_expense", formLineAmount(line, "18") ?? scheduleLineAmount(line), "Form 1120 line 18 (page 1 block)", 99);
       }
       if (isForm1120Line(line, 20) && /depreciation/i.test(line) && !/accum/i.test(line)) {
-        setField(out, "depreciation", formLineAmount(line, "20") ?? scheduleLineAmount(line), "Form 1120 line 20 (page 1 block)", 99);
+        const dep = unambiguousFormLineAmountForTag(line, "20");
+        if (dep !== undefined) {
+          setField(out, "depreciation", dep, "Form 1120 line 20 (page 1 block)", 99);
+        }
       }
       if (isForm1120Line(line, 22) && /advertis/i.test(line)) {
         setField(out, "advertising", formLineAmount(line, "22") ?? scheduleLineAmount(line), "Form 1120 line 22 (page 1 block)", 99);
@@ -454,12 +499,13 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
       }
     }
     if (isForm1120Line(line, 14) && /depreciation/i.test(line) && !/accum|schedule\s*l/i.test(line)) {
-      const dep = formLineAmount(line, "14") ?? scheduleLineAmount(line);
-      if (dep !== undefined && substantialMoneyTokens(line).length) {
+      const dep = unambiguousFormLineAmountForTag(line, "14");
+      if (dep !== undefined) {
         setField(out, "depreciation", dep, "Form 1120-S line 14 (page 1 block)", 99);
-      } else {
+      } else if (!substantialMoneyTokens(line).length) {
         setField(out, "depreciation", 0, "Form 1120-S line 14 (page 1 block)", 99);
       }
+      // Multi-column OCR bleed: leave unset (do not guess last token).
     }
     if ((isForm1120Line(line, 2) || /\[\s*2\s*\]/i.test(line)) && isCogsLine(line) && !/gross profit/i.test(line)) {
       const cogs = formLineAmount(line, "2");
@@ -504,7 +550,7 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!/sales\s+of\s+tangible\s+personal\s+property/i.test(line)) continue;
     const nums = lineMoneyTokens(line)
-      .filter((n) => Math.abs(n) >= 100_000)
+      .filter((n) => keepableSalesAmount(n))
       .map((n) => derailOcrLeadingOne(Math.abs(n)));
     if (!nums.length) continue;
     const best = Math.max(...nums);
@@ -513,7 +559,9 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
     }
   }
 
-  if (formKind === "1120" || formKind === "unknown") {
+  // Strict 1120 only — `unknown` was admitting Line-5 interest into S-corp returns
+  // (false other_income → Form-OI reverse other_opex drift). No $10k size gate.
+  if (formKind === "1120") {
     let bestInterest: number | undefined;
     for (const rawLine of text.split(/\n/)) {
       const line = rawLine.replace(/\s+/g, " ").trim();
@@ -543,19 +591,30 @@ function scanOrphanPage1DeductionAmounts(formPage1: string): FieldExtraction {
     if (!afterLine8) continue;
     if (isForm1120Line(line, 7) || isForm1120Line(line, 8) || isForm1120Line(line, 13)) continue;
 
-    const nums = substantialMoneyTokens(line).filter((n) => Math.abs(n) >= 5_000);
+    // Keepable Form money only — no $1k/$5k/$10k floors for garbled caption rows.
+    const keepable = (n: number) => {
+      const abs = Math.abs(Math.round(n));
+      return (
+        abs > 99 &&
+        isReasonableMoneyAmount(abs) &&
+        !isFormReferenceNumber(abs) &&
+        !(abs >= 1990 && abs <= 2035)
+      );
+    };
+    const one = unambiguousFormLineAmount(line);
+    const nums = (one !== undefined ? [one] : substantialMoneyTokens(line)).filter(keepable);
     if (!nums.length) continue;
 
     const tail = Math.round(nums[nums.length - 1]!);
-    if (/\w{0,2}ires\b/i.test(line) && tail >= 10_000) {
+    if (/\w{0,2}ires\b/i.test(line)) {
       setField(out, "rent", tail, "Form 1120-S page 1 (garbled Rents row)", 91);
       continue;
     }
-    if (/\badvert/i.test(line) && tail >= 1_000) {
+    if (/\badvert/i.test(line)) {
       setField(out, "advertising", tail, "Form 1120-S page 1 (garbled Advertising row)", 91);
       continue;
     }
-    if (/taxes\s*and\s*lic/i.test(line) && tail >= 1_000) {
+    if (/taxes\s*and\s*lic/i.test(line)) {
       setField(out, "taxes_licenses", tail, "Form 1120-S page 1 (garbled Taxes row)", 91);
       continue;
     }
@@ -564,9 +623,9 @@ function scanOrphanPage1DeductionAmounts(formPage1: string): FieldExtraction {
     }
   }
 
-  const rentCandidates = orphans.filter((n) => n >= 50_000 && n <= 800_000);
-  if (out.values.rent === undefined && rentCandidates.length) {
-    setField(out, "rent", Math.max(...rentCandidates), "Form 1120-S page 1 (orphan deduction amount)", 90);
+  // Orphan rent only when a single keepable amount remains between salaries and interest.
+  if (out.values.rent === undefined && orphans.length === 1) {
+    setField(out, "rent", orphans[0]!, "Form 1120-S page 1 (orphan deduction amount)", 90);
   }
 
   return out;
@@ -626,13 +685,21 @@ function scanFormLine5OtherIncome(block: string): number | undefined {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!isForm1120Line(line, 5) || !/other\s+income/i.test(line)) continue;
     if (/statement\s*[2-9]|stmt\s*[2-9]|discount|description/i.test(line)) continue;
+    // Attachment pointer ("See Stmt 1") — do not paste Form box dollars here.
+    // Leave unset so Stmt-1 / comparison / zero-summary paths decide.
     if (/attach|see\s+stmt|federal\s+statem/i.test(line)) {
-      const stmtAmt = formLineAmount(line, "5") ?? scheduleLineAmount(line) ?? lineTailAmount(line);
-      if (stmtAmt !== undefined) return stmtAmt;
       return undefined;
     }
+    const one = unambiguousFormLineAmountForTag(line, "5");
+    if (one !== undefined) {
+      if (isFormReferenceNumber(Math.abs(one)) || Math.abs(one) <= 99) return undefined;
+      return Math.round(one);
+    }
     const amt = formLineAmount(line, "5") ?? scheduleLineAmount(line) ?? lineTailAmount(line);
-    if (amt !== undefined) return amt;
+    if (amt !== undefined) {
+      if (isFormReferenceNumber(Math.abs(amt)) || Math.abs(amt) <= 99) return undefined;
+      return Math.round(amt);
+    }
     if (!substantialMoneyTokens(line).length) return 0;
   }
   return undefined;
@@ -645,15 +712,33 @@ export function scanFormLine20OtherDeductionsTotal(text: string, kind?: TaxFormK
     kind === "1120-s" ? [19, 20] : kind === "1120" ? [26] : [19, 20, 26];
   const lineNumPattern =
     kind === "1120-s" ? /\b(?:19|20)\b/i : kind === "1120" ? /\b(?:26)\b/i : /\b(?:19|20|26)\b/i;
+
+  const keepableOdToken = (n: number): boolean => {
+    const abs = Math.abs(Math.round(n));
+    if (abs < 1 || !isReasonableMoneyAmount(abs)) return false;
+    if (isFormReferenceNumber(abs)) return false;
+    if (abs >= 1990 && abs <= 2035) return false;
+    return true;
+  };
+
+  const pickFromLine = (line: string): number | undefined => {
+    // Prefer unambiguous single cell (multi-column bleed → refuse).
+    const one = unambiguousFormLineAmount(line);
+    if (one !== undefined && keepableOdToken(one)) return Math.round(Math.abs(one));
+    const tokens = substantialMoneyTokens(line).filter(keepableOdToken);
+    if (tokens.length) return Math.round(Math.max(...tokens.map(Math.abs)));
+    const amt = scheduleLineAmount(line) ?? lineTailAmount(line);
+    if (amt !== undefined && keepableOdToken(amt)) return Math.round(Math.abs(amt));
+    return undefined;
+  };
+
   for (const rawLine of formPage1.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!/other\s+deduct/i.test(line)) continue;
     const matchesLine = lineNums.some((n) => isForm1120Line(line, n));
     if (!matchesLine && !lineNumPattern.test(line)) continue;
-    const tokens = substantialMoneyTokens(line).filter((n) => Math.abs(n) >= 5000);
-    if (tokens.length) return Math.round(Math.max(...tokens.map(Math.abs)));
-    const amt = scheduleLineAmount(line) ?? lineTailAmount(line);
-    if (amt !== undefined && Math.abs(amt) >= 5000) return Math.round(amt);
+    const picked = pickFromLine(line);
+    if (picked !== undefined) return picked;
   }
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
@@ -665,8 +750,8 @@ export function scanFormLine20OtherDeductionsTotal(text: string, kind?: TaxFormK
       continue;
     }
     if (/two\s*year\s*comparison|comparison\s+worksheet/i.test(line)) continue;
-    const tokens = substantialMoneyTokens(line).filter((n) => Math.abs(n) >= 5000);
-    if (tokens.length) return Math.round(Math.max(...tokens.map(Math.abs)));
+    const picked = pickFromLine(line);
+    if (picked !== undefined) return picked;
   }
   return undefined;
 }
@@ -704,11 +789,25 @@ export function scanFormPageRent(text: string, formKind?: TaxFormKind): number |
       if (!/\brents?\b/i.test(line) || /gross\s+rent/i.test(line)) continue;
       if (kind === "1120" && isForm1120Line(line, 16)) {
         const amt = formLineAmount(line, "16") ?? scheduleLineAmount(line) ?? lineTailAmount(line);
-        if (amt !== undefined && Math.abs(amt) >= 10_000) return Math.round(Math.abs(amt));
+        if (
+          amt !== undefined &&
+          isReasonableMoneyAmount(amt) &&
+          !isFormReferenceNumber(Math.abs(amt)) &&
+          !(Math.abs(amt) >= 1990 && Math.abs(amt) <= 2035)
+        ) {
+          return Math.round(Math.abs(amt));
+        }
       }
       if ((kind === "1120-s" || kind === "1065") && isForm1120Line(line, 11)) {
         const amt = formLineAmount(line, "11") ?? scheduleLineAmount(line) ?? lineTailAmount(line);
-        if (amt !== undefined && Math.abs(amt) >= 10_000) return Math.round(Math.abs(amt));
+        if (
+          amt !== undefined &&
+          isReasonableMoneyAmount(amt) &&
+          !isFormReferenceNumber(Math.abs(amt)) &&
+          !(Math.abs(amt) >= 1990 && Math.abs(amt) <= 2035)
+        ) {
+          return Math.round(Math.abs(amt));
+        }
       }
     }
   }

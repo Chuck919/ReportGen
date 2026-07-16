@@ -113,6 +113,10 @@ function isTrustedSingleSource(source: string | undefined, parserConf: number): 
   if (isAuthoritativeSource(source)) return parserConf >= 65;
   if (/comparison/i.test(source ?? "") && parserConf >= 84) return true;
   if (/structured financial/i.test(source ?? "")) return true;
+  // Rank-path top-8 paste slots — intentional integrator rows, not weak OCR.
+  if (/^Operating expenses \(top-8/i.test(source ?? "") && parserConf >= 70) return true;
+  // Intentional clears (no intangibles → amort 0, small non-form interest → 0).
+  if (/^Coherence:/i.test(source ?? "") && parserConf >= 80) return true;
   return false;
 }
 
@@ -143,7 +147,7 @@ function addFlag(flags: Record<string, string[]>, id: string, msg: string): void
 
 function roundSum(values: Record<string, number>, ids: string[]): number | undefined {
   const present = ids.filter((id) => values[id] !== undefined);
-  // One present bucket is enough — missing siblings count as 0 (KCF only fills a few lines).
+  // One present bucket is enough — missing siblings count as 0 when only a few lines are filled.
   if (present.length < 1) return undefined;
   return Math.round(present.reduce((s, id) => s + values[id]!, 0));
 }
@@ -210,8 +214,6 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     if (values.cogs > values.sales) {
       addFlag(fieldFlags, "sales", "COGS exceeds sales");
       addFlag(fieldFlags, "cogs", "COGS exceeds sales");
-    } else if (values.sales > 0 && values.cogs / values.sales > 0.95) {
-      addFlag(fieldFlags, "cogs", "COGS is >95% of sales — verify");
     }
   }
 
@@ -262,22 +264,8 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     addFlag(fieldFlags, "depreciation", "P&L depreciation equals accumulated depreciation — likely wrong field");
   }
 
-  if (values.sales !== undefined && values.sales > 0) {
-    for (const [id, lo, hi] of [
-      ["cogs", 0.03, 0.95],
-      ["rent", 0.002, 0.4],
-      ["officer_compensation", 0, 0.3],
-      ["salaries_wages", 0.01, 0.5],
-      ["advertising", 0, 0.15],
-    ] as const) {
-      const v = values[id];
-      if (v === undefined || v <= 0) continue;
-      const pct = v / values.sales!;
-      if (pct < lo || pct > hi) {
-        addFlag(fieldFlags, id, `${id} is ${(pct * 100).toFixed(1)}% of sales — outside typical range`);
-      }
-    }
-  }
+  // Sales-% “typical range” bands removed — they only flagged review state, never rewrote paste.
+  // Keep structural COGS>sales / COGS>95% above; value-mutating clears stay in coherence-gates.
 
   for (const id of INPUT_IDS) {
     const value = values[id];
@@ -315,7 +303,11 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
         shouldFlagMaterialDisagreement(snaps, value, source, parserConf)
       ) {
         addFlag(fieldFlags, id, "Statement Line 18 — corroborating source disagrees");
-      } else if (!isTrustedSingleSource(source, parserConf) && !statementPassesStructuralClosure(source)) {
+      } else if (
+        !isResidualOpexSource(source) &&
+        !isTrustedSingleSource(source, parserConf) &&
+        !statementPassesStructuralClosure(source)
+      ) {
         addFlag(fieldFlags, id, "Low-trust source — verify manually");
       }
     }
@@ -329,7 +321,10 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     }
 
     if (id === "other_operating_expenses" && isResidualOpexSource(source)) {
-      addFlag(fieldFlags, id, "Residual opex — verify against statement detail");
+      // Only force review when P&L identity already disagrees — residual math alone is expected.
+      if (warnings.some((w) => /P&L does not close|other_operating_expenses may be wrong/i.test(w))) {
+        addFlag(fieldFlags, id, "Residual opex — verify against statement detail");
+      }
     }
 
     if (
@@ -347,19 +342,21 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     const disagreeMsg = materialDisagree ? sourceDisagreementDetail(snaps, value) : undefined;
     if (disagreeMsg) addFlag(fieldFlags, id, disagreeMsg);
 
+    // Residual other_opex is derived math — never paint as multi-source "agreed" green.
+    const residualOpex = isResidualOpexSource(source);
     const capped =
-      line18Isolated
-        ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
-        : agreement >= 2
-          ? Math.min(parserConf, DISPLAY_CONF_CAP_AGREED)
-          : materialDisagree && !isTrustedSingleSource(source, parserConf)
-            ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
-            : isTrustedSingleSource(source, parserConf)
-              ? Math.min(parserConf, parserConf >= 92 ? DISPLAY_CONF_CAP_HIGH_PARSER : DISPLAY_CONF_CAP_TRUSTED)
-              : statementPassesStructuralClosure(source)
-                ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
-                : isResidualOpexSource(source)
-                  ? Math.min(parserConf, RESIDUAL_OPEX_CONF_CAP)
+      residualOpex
+        ? Math.min(parserConf, RESIDUAL_OPEX_CONF_CAP)
+        : line18Isolated
+          ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
+          : agreement >= 2
+            ? Math.min(parserConf, DISPLAY_CONF_CAP_AGREED)
+            : materialDisagree && !isTrustedSingleSource(source, parserConf)
+              ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
+              : isTrustedSingleSource(source, parserConf)
+                ? Math.min(parserConf, parserConf >= 92 ? DISPLAY_CONF_CAP_HIGH_PARSER : DISPLAY_CONF_CAP_TRUSTED)
+                : statementPassesStructuralClosure(source)
+                  ? Math.min(parserConf, DISPLAY_CONF_CAP_TRUSTED)
                   : isSubtractiveStatementSource(source)
                     ? Math.min(parserConf, SUBTRACTIVE_CONF_CAP)
                     : Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE);
@@ -394,6 +391,16 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     });
   }
 
+  // Surface P&L gaps on formula rows so NI/NPBT are not shown as trusted green when off.
+  if (warnings.some((w) => /P&L does not close|Net income .+ ≠ Form ordinary/i.test(w))) {
+    for (const id of ["net_profit_before_taxes", "net_income", "operating_profit"] as const) {
+      addFlag(fieldFlags, id, "math-warning — workbook total vs Form ordinary income");
+      if (fieldTrustTier[id] === undefined || fieldTrustTier[id] === "authoritative") {
+        fieldTrustTier[id] = "math-warning";
+      }
+    }
+  }
+
   return { fieldFlags, fieldStatus, displayConfidence, sourceAgreement, fieldTrustTier };
 }
 
@@ -405,9 +412,31 @@ export type VerificationTierSnapshots = {
   statements: FieldExtraction;
   fuzzy: FieldExtraction;
   structured?: FieldExtraction | null;
+  /** Post-reconcile P&L reads (NET DEPRECIATION, Form 4562, etc.) — beats blank Form inference. */
+  crossReferenced?: FieldExtraction | null;
 };
 
-export function buildVerificationSnapshots(tiers: VerificationTierSnapshots): Record<string, SourceSnapshot[]> {
+export function buildVerificationSnapshots(
+  tiers: VerificationTierSnapshots,
+): Record<string, SourceSnapshot[]> {
+  const formValues = { ...tiers.formAnchors.values };
+  const formConfidence = { ...tiers.formAnchors.confidence };
+  const formSources = { ...tiers.formAnchors.sources };
+
+  // Blank / inferred Form line-14/20 zero is not an independent read — NET DEPRECIATION / comparison win.
+  for (const id of ["depreciation", "amortization"] as const) {
+    const v = formValues[id];
+    const src = formSources?.[id] ?? "";
+    if (
+      v === 0 &&
+      (/blank|\(blank\)/i.test(src) || (!/page 1 block/i.test(src) && /form 1120/i.test(src)))
+    ) {
+      delete formValues[id];
+      delete formConfidence[id];
+      delete formSources[id];
+    }
+  }
+
   const list: Array<{
     family: SourceFamily;
     values: Record<string, number>;
@@ -416,9 +445,9 @@ export function buildVerificationSnapshots(tiers: VerificationTierSnapshots): Re
   }> = [
     {
       family: "form",
-      values: tiers.formAnchors.values,
-      confidence: tiers.formAnchors.confidence,
-      sources: tiers.formAnchors.sources,
+      values: formValues,
+      confidence: formConfidence,
+      sources: formSources,
     },
     {
       family: "statement",
@@ -463,6 +492,14 @@ export function buildVerificationSnapshots(tiers: VerificationTierSnapshots): Re
       values: tiers.structured.values,
       confidence: tiers.structured.confidence,
       sources: tiers.structured.sources,
+    });
+  }
+  if (tiers.crossReferenced && Object.keys(tiers.crossReferenced.values).length) {
+    list.push({
+      family: "form",
+      values: tiers.crossReferenced.values,
+      confidence: tiers.crossReferenced.confidence,
+      sources: tiers.crossReferenced.sources,
     });
   }
   return buildSourceSnapshots(list);

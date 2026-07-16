@@ -7,7 +7,6 @@ import { hintsFromPdfInspect } from "@/lib/tax/validate-upload";
 import { inspectPdfBuffer } from "@/lib/tax/pdf-inspect";
 import { isProcessTimeoutError, ocrTimeoutUserMessage } from "@/lib/tax/ocr-errors";
 import { maxFilesPerApiRequest } from "@/lib/tax/upload-policy";
-import { isVercelRuntime } from "@/lib/tax/resolve-ocr-mode";
 
 export type ProcessFileResult =
   | { status: "ok"; parsed: ParsedTaxYear; ocrText?: string }
@@ -15,9 +14,9 @@ export type ProcessFileResult =
   | { status: "error"; filename: string; message: string };
 
 export function enforceFileCountLimit(fileCount: number): string | null {
-  const max = maxFilesPerApiRequest(isVercelRuntime());
+  const max = maxFilesPerApiRequest();
   if (fileCount > max) {
-    return `Upload one PDF at a time on Vercel (received ${fileCount}). Process years sequentially from the client.`;
+    return `Too many files (received ${fileCount}, max ${max}). Upload fewer PDFs per request.`;
   }
   return null;
 }
@@ -53,7 +52,7 @@ export async function processTaxPdfFile(
     return { status: "error", filename: file.name, message: "Could not extract text from PDF." };
   }
 
-  const hintWarnings = hintsFromPdfInspect(inspect, isVercelRuntime());
+  const hintWarnings = hintsFromPdfInspect(inspect);
 
   try {
     const result = await parseTaxReturn(

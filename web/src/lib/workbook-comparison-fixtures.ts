@@ -22,6 +22,8 @@ export type WorkbookComparisonFixture = {
     {
       year: number;
       values: Record<string, number>;
+      top8Amounts?: number[];
+      top8Labels?: string[];
     }
   >;
 };
@@ -44,6 +46,17 @@ export const WORKBOOK_COMPARISON_FIXTURES: WorkbookComparisonFixture = {
   tax: {
     "KCF MAIN CURRENT EXCEL.xlsx / 2025": {
       year: 2025,
+      top8Labels: [
+        "Officer compensation",
+        "Salaries and wages",
+        "Advertising",
+        "Rent",
+        "Taxes and Licenses",
+        "Bank and credit card",
+        "Professional fees",
+        "Utilities",
+      ],
+      top8Amounts: [91000, 193583, 19341, 125016, 27275, 28041, 31897, 7584],
       values: {
         sales: 1027658,
         cogs: 329674,
@@ -91,6 +104,17 @@ export const WORKBOOK_COMPARISON_FIXTURES: WorkbookComparisonFixture = {
     },
     "KCF MAIN CURRENT EXCEL.xlsx / 2024": {
       year: 2024,
+      top8Labels: [
+        "Officer compensation",
+        "Salaries and wages",
+        "Advertising",
+        "Rent",
+        "Taxes and Licenses",
+        "Bank and credit card",
+        "Professional fees",
+        "Utilities",
+      ],
+      top8Amounts: [87000, 182187, 19737, 122219, 26919, 32099, 35513, 8749],
       values: {
         sales: 1066455,
         cogs: 313334,
@@ -138,6 +162,17 @@ export const WORKBOOK_COMPARISON_FIXTURES: WorkbookComparisonFixture = {
     },
     "KCF MAIN CURRENT EXCEL.xlsx / 2023": {
       year: 2023,
+      top8Labels: [
+        "Officer compensation",
+        "Salaries and wages",
+        "Advertising",
+        "Rent",
+        "Taxes and Licenses",
+        "Bank and credit card",
+        "Professional fees",
+        "Utilities",
+      ],
+      top8Amounts: [65000, 178811, 19882, 146427, 28773, 66722, 33200, 7787],
       values: {
         sales: 1086475,
         cogs: 372306,

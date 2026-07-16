@@ -1,4 +1,4 @@
-import { lineMoneyTokens } from "./money";
+import { keepableWorksheetMoneyTokens, lineMoneyTokens } from "./money";
 import {
   pickComparisonColumnIndex,
   shrinkToYearColumns,
@@ -8,6 +8,7 @@ import { scanStmt2MiscLineAmounts, scanDocumentWideStmt2Exclusions } from "./sta
 import { scanFormLine20OtherDeductionsTotal, scanFormLineOtherDeductionsTotalBest } from "./form-anchors";
 import type { TaxFormKind } from "./detect-tax-form";
 import { detectTaxForm } from "./detect-tax-form";
+import { exactClosureTolerance } from "./structural-tolerance";
 
 const COMP_CTX =
   /(?:\bg\s*)?ross\s+receipts?\s+or\s+sales|two\s*year\s*comparison|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i;
@@ -40,27 +41,36 @@ function headerYearsNearLine(allText: string, line: string): [number, number] | 
   return [Number(m[1]), Number(m[2])];
 }
 
-/** Value that makes attachmentSum + opex ≈ OCR-truncated Stmt 2 total — prior-year column trap. */
+/** Value that completes attachmentSum + opex = Stmt 2 TOTAL (prior-year column trap). */
 export function closesTruncatedStmt2Total(
   opex: number,
   attachmentSum: number,
   stmt2Total: number,
 ): boolean {
-  return Math.abs(attachmentSum + opex - stmt2Total) <= Math.max(500, stmt2Total * 0.015);
+  return (
+    Math.abs(Math.round(attachmentSum + opex) - Math.round(stmt2Total)) <=
+    exactClosureTolerance(stmt2Total)
+  );
 }
 
-/** Comparison picked Stmt 2 attachment total instead of residual opex (common on small S-corp Stmt 2). */
+/** Comparison picked attachment total instead of residual opex. */
 export function looksLikeStmt2CombinedTotal(value: number, attachmentSum: number): boolean {
-  if (attachmentSum < 5_000) return false;
-  const ratio = Math.abs(value) / attachmentSum;
-  return ratio >= 0.65 && ratio <= 1.2;
+  if (attachmentSum < 1) return false;
+  return (
+    Math.abs(Math.round(Math.abs(value)) - Math.round(attachmentSum)) <=
+    exactClosureTolerance(attachmentSum)
+  );
 }
 
 export function rejectComparisonOpexValue(
   value: number,
   hints?: ComparisonOpexHints,
 ): boolean {
-  if (hints?.stmt2Total !== undefined && Math.abs(value - hints.stmt2Total) <= Math.max(500, hints.stmt2Total * 0.04)) {
+  if (
+    hints?.stmt2Total !== undefined &&
+    Math.abs(Math.round(value) - Math.round(hints.stmt2Total)) <=
+      exactClosureTolerance(hints.stmt2Total)
+  ) {
     return true;
   }
   if (
@@ -70,7 +80,8 @@ export function rejectComparisonOpexValue(
   ) {
     return false;
   }
-  if (hints?.stmt2Total !== undefined && value >= hints.stmt2Total * 0.85) {
+  // Reject footer echo: value is the stmt total itself (or ≥ total).
+  if (hints?.stmt2Total !== undefined && value >= hints.stmt2Total) {
     return true;
   }
   if (hints?.attachmentSum !== undefined && looksLikeStmt2CombinedTotal(value, hints.attachmentSum)) {
@@ -86,7 +97,12 @@ function pickYearColumn(
   line: string,
   hints?: ComparisonOpexHints,
 ): number | undefined {
-  const filtered = nums.filter((n) => Math.abs(n) >= 1_000);
+  const filtered = nums.filter((n) => {
+    const abs = Math.abs(n);
+    if (abs < 1) return false;
+    if (abs >= 1990 && abs <= 2035) return false;
+    return true;
+  });
   if (!filtered.length) return undefined;
   const pair = shrinkToYearColumns(filtered);
   if (!pair) return filtered.length >= 2 ? filtered[1] : filtered[0];
@@ -133,7 +149,7 @@ export function scanComparisonOtherDeductionsTotal(
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!isOtherDeductionsComparisonLine(line)) continue;
     if (/\b20\b/i.test(line) && /attach|stmt\s*2|see\s+stmt/i.test(line)) continue;
-    const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 1_000);
+    const nums = keepableWorksheetMoneyTokens(line);
     const pair = shrinkToYearColumns(nums);
     if (!pair) continue;
     const years = headerYearsNearLine(allText, line);
@@ -173,58 +189,46 @@ export function computeComparisonOpexResidual(
   let attachment = attachmentSum > 0 ? attachmentSum : prof + util + bank;
 
   const wideExcl = scanDocumentWideStmt2Exclusions(allText);
-  // On small S-corp Stmt 2 attachments, wide exclusions (insurance, dues, etc.) are
-  // workbook other_opex — not independent subtractions from the Stmt 2 total.
-  if (wideExcl >= 5_000 && stmt2Total >= 150_000) {
-    const extended = prof + util + bank + wideExcl;
-    if (extended > attachment && extended < stmt2Total * 0.92) {
+  // Fold document-wide exclusions only while a proper remainder remains (< TOTAL).
+  // Replaces legacy $5k / $150k size gates — same charter remainder rule as ranking.
+  if (wideExcl >= 1) {
+    const extended = Math.round(prof + util + bank + wideExcl);
+    if (extended > attachment && extended < stmt2Total) {
       attachment = extended;
     }
   }
 
+  // Misc bank guesses: exclude year tokens and the stmt footer itself — not a stmt×% cap.
   const misc = scanStmt2MiscLineAmounts(allText).filter(
-    (n) => n >= 500 && n <= stmt2Total * 0.4 && (!targetYear || n !== targetYear),
+    (n) => n >= 1 && n < stmt2Total && (!targetYear || n !== targetYear),
   );
   let residual = Math.round(stmt2Total - attachment);
-  if (residual >= stmt2Total * 0.25 || residual < 1_000) {
+  if (residual >= 1 && residual > Math.max(prof, util, bank, 0)) {
     const existingBank = resolved?.values.bank_credit_card;
     for (const bankGuess of misc.sort((a, b) => b - a)) {
+      if (bankGuess >= stmt2Total) continue;
       const trial = Math.round(stmt2Total - prof - util - bankGuess);
-      if (trial < 1_000 || trial > stmt2Total * 0.35) continue;
+      if (trial < 1) continue;
       // Misc-line amounts already in attachmentSum are not independent bank substitutes.
       if (
         existingBank !== undefined &&
-        attachmentSum > prof + util + existingBank * 0.85 &&
-        Math.abs(bankGuess - existingBank) > Math.max(500, existingBank * 0.08)
+        attachmentSum > prof + util + Math.round(Math.abs(existingBank)) &&
+        Math.round(bankGuess) !== Math.round(Math.abs(existingBank))
       ) {
         continue;
       }
-      const trialAttach = prof + util + bankGuess;
-      if (
-        Math.abs(trialAttach + trial - stmt2Total) >
-        Math.max(500, stmt2Total * 0.015)
-      ) {
-        continue;
-      }
+      const trialAttach = Math.round(prof + util + bankGuess);
+      // Dollar-exact close (trial is constructed as TOTAL − trialAttach).
+      if (trialAttach + trial !== Math.round(stmt2Total)) continue;
       attachment = trialAttach;
       residual = trial;
       break;
     }
   }
 
-  if (attachment < 1_000) return undefined;
-  if (residual < 1_000 || residual >= stmt2Total * 0.85) return undefined;
-  if (residual >= stmt2Total - Math.max(500, stmt2Total * 0.04) && attachment < stmt2Total * 0.25) {
-    return undefined;
-  }
-  // Small Stmt 2: comparison OTHER DEDUCTIONS is the attachment total, not misc-after-slots.
-  if (stmt2Total < 100_000 && residual >= stmt2Total * 0.18) return undefined;
-  const closesStmt =
-    Math.abs(attachment + residual - stmt2Total) <= Math.max(500, stmt2Total * 0.015);
-  // Large Stmt 2 with many categorized lines — residual ≈ stmt total minus 3 lines is not workbook opex.
-  if (stmt2Total >= 100_000 && residual >= stmt2Total * 0.35 && !closesStmt && wideExcl < 5_000) {
-    return undefined;
-  }
+  if (attachment < 1) return undefined;
+  // Residual is the footer itself, or empty — must leave a proper remainder.
+  if (residual < 1 || residual >= stmt2Total) return undefined;
   if (looksLikeStmt2CombinedTotal(residual, attachment)) return undefined;
   return { value: residual, confidence: 91 };
 }

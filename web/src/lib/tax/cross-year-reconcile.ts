@@ -52,6 +52,8 @@ export function applyCrossYearFlags(columns: TaxYearValues[]): TaxYearValues[] {
 
       const maxAbs = Math.max(Math.abs(current), Math.abs(prior));
       if (maxAbs < YOY_MIN_ABS) continue;
+      // 0 → first real amount (or reverse) is common across years; ratio is infinite noise.
+      if (current === 0 || prior === 0) continue;
 
       const ratio = yoyRatio(current, prior);
       const signFlip = (current < 0) !== (prior < 0) && current !== 0 && prior !== 0;

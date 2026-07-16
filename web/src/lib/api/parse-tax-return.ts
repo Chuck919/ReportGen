@@ -1,10 +1,9 @@
 import type { OcrMode, ParseTaxReturnResponse, ParsedTaxYear, ParseFileError } from "./types";
-import { defaultOcrMode, estimateOcrDurationMs, isVercelDeploy, OCR_PROGRESS_CAP } from "@/lib/tax/ocr-modes";
-import { VERCEL_OCR_BUDGET_MS } from "@/lib/tax/resolve-ocr-mode";
+import { defaultOcrMode, estimateOcrDurationMs, OCR_PROGRESS_CAP } from "@/lib/tax/ocr-modes";
 import { validateClientFileList } from "@/lib/tax/validate-upload";
 
 async function postParseTaxReturn(body: FormData): Promise<Response> {
-  const timeoutMs = isVercelDeploy() ? VERCEL_OCR_BUDGET_MS + 15_000 : 25 * 60_000;
+  const timeoutMs = 25 * 60_000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -52,11 +51,7 @@ async function postParseTaxReturnWithProgress(
     const elapsed = Date.now() - start;
     const slice = Math.min(OCR_PROGRESS_CAP, elapsed / perFileMs);
     const modeLabel =
-      meta.ocrMode === "fast" || meta.ocrMode === "vercel-fast"
-        ? "Fast"
-        : meta.ocrMode === "thorough" || meta.ocrMode === "vercel-thorough"
-          ? "Thorough"
-          : "Balanced";
+      meta.ocrMode === "fast" ? "Fast" : meta.ocrMode === "thorough" ? "Thorough" : "Balanced";
     onProgress?.({
       fileIndex: meta.fileIndex,
       fileCount: meta.fileCount,
@@ -88,7 +83,7 @@ export async function parseTaxReturnFiles(
   onProgress?: (progress: ParseTaxReturnProgress) => void,
 ): Promise<ParseTaxReturnBatchResult> {
   const ocrMode = options?.ocrMode ?? defaultOcrMode();
-  const validation = validateClientFileList(files, { isVercel: isVercelDeploy() });
+  const validation = validateClientFileList(files);
   if (!validation.ok) {
     const msg = validation.checks.flatMap((c) => c.errors.map((e) => `${c.filename}: ${e}`)).join(" ");
     throw new Error(msg || "Invalid upload");
@@ -123,7 +118,21 @@ export async function parseTaxReturnFiles(
         { fileIndex: i, fileCount: files.length, filename: file.name, ocrMode },
         onProgress,
       );
-      const json = (await res.json()) as ParseTaxReturnResponse;
+      const raw = await res.text();
+      let json: ParseTaxReturnResponse;
+      try {
+        json = (raw ? JSON.parse(raw) : {}) as ParseTaxReturnResponse;
+      } catch {
+        fileErrors.push({
+          filename: file.name,
+          message:
+            raw.trim().length === 0
+              ? `Empty response from server (HTTP ${res.status}) — retry this year`
+              : `Invalid JSON from server (HTTP ${res.status}): ${raw.slice(0, 120)}`,
+        });
+        partial = true;
+        continue;
+      }
       if (!res.ok && !json.parsed?.length) {
         fileErrors.push({ filename: file.name, message: parseApiError(res, json) });
         continue;

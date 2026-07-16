@@ -9,9 +9,6 @@ export const PROGRESSIVE_TIERS: Partial<Record<OcrMode, OcrMode[]>> = {
   fast: ["fast"],
   balanced: ["fast", "balanced"],
   thorough: ["balanced", "thorough"],
-  "vercel-fast": ["vercel-fast"],
-  "vercel-balanced": ["vercel-fast", "vercel-balanced"],
-  "vercel-thorough": ["vercel-fast", "vercel-balanced", "vercel-thorough"],
 };
 
 export type ProgressiveTierResult = {
@@ -115,7 +112,7 @@ export async function runProgressiveOcrLocal(
         });
         if (!plan.targets.length) break;
 
-        const usePhase3 = tierMode !== "vercel-fast";
+        const usePhase3 = tierMode !== "fast";
         const delta = await ocrPageBatch(bytes, tierMode, plan.targets, usePhase3);
         tierMs += delta.ms;
         tierPages = Array.from(new Set([...tierPages, ...plan.targets])).sort((a, b) => a - b);

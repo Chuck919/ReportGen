@@ -145,7 +145,6 @@ async function benchYear(year: number, docsDir: string, cachedOnly: boolean) {
     const modes: Array<{ label: string; file: string }> = [
       { label: "local-fast", file: `${year}-fast.txt` },
       { label: "local-balanced", file: `${year}-balanced.txt` },
-      { label: "vercel-balanced-single", file: `${year}-vercel-balanced.txt` },
     ];
     for (const { label, file } of modes) {
       try {
@@ -156,13 +155,13 @@ async function benchYear(year: number, docsDir: string, cachedOnly: boolean) {
       }
     }
   } else if (progressiveOnly) {
-    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "vercel-fast"));
-    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "vercel-balanced"));
+    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "fast"));
+    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "balanced"));
   } else {
     rows.push(await benchSingle("local-fast", bytes, embedded, pdfName, year, "fast"));
-    rows.push(await benchSingle("vercel-balanced-single", bytes, embedded, pdfName, year, "vercel-balanced"));
-    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "vercel-fast"));
-    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "vercel-balanced"));
+    rows.push(await benchSingle("balanced-single", bytes, embedded, pdfName, year, "balanced"));
+    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "fast"));
+    rows.push(await benchProgressive(bytes, embedded, pdfName, year, "balanced"));
   }
 
   console.log("\nlabel                      | time   | primary        | pages | tiers");
@@ -174,13 +173,13 @@ async function benchYear(year: number, docsDir: string, cachedOnly: boolean) {
     if (r.misses.length) console.log(`  misses: ${r.misses.slice(0, 4).join("; ")}`);
   }
 
-  const single = rows.find((r) => r.label === "vercel-balanced-single");
-  const prog = rows.find((r) => r.label === "progressive-vercel-balanced");
+  const single = rows.find((r) => r.label === "balanced-single");
+  const prog = rows.find((r) => r.label === "progressive-balanced");
   if (single && prog) {
     const speedDelta = ((single.ms - prog.ms) / single.ms) * 100;
     const accDelta = prog.pct - single.pct;
     console.log(
-      `\nprogressive vs single vercel-balanced: ${speedDelta >= 0 ? `${speedDelta.toFixed(0)}% faster` : `${(-speedDelta).toFixed(0)}% slower`}, accuracy ${accDelta >= 0 ? "+" : ""}${accDelta.toFixed(1)}pp`,
+      `\nprogressive vs single balanced: ${speedDelta >= 0 ? `${speedDelta.toFixed(0)}% faster` : `${(-speedDelta).toFixed(0)}% slower`}, accuracy ${accDelta >= 0 ? "+" : ""}${accDelta.toFixed(1)}pp`,
     );
   }
 

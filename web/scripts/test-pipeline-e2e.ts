@@ -2,9 +2,9 @@
  * End-to-end pipeline: PDF upload → OCR → parse → table export → merge.
  * Mirrors the server path used by POST /api/parse-tax-return (no browser).
  *
- *   npm run test:pipeline              # 2024, vercel-balanced (full OCR ~3–4 min)
+ *   npm run test:pipeline              # 2024, balanced (full OCR ~3–4 min)
  *   npm run test:pipeline -- --quick   # cached OCR text; validates parse/export only
- *   npm run test:pipeline -- 2023 vercel-fast
+ *   npm run test:pipeline -- 2023 fast
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -94,7 +94,7 @@ const args = process.argv.slice(2);
 const quick = args.includes("--quick");
 const positional = args.filter((a) => !a.startsWith("--"));
 const year = Number(positional[0] ?? 2024);
-const mode = (positional[1] ?? "vercel-balanced") as OcrMode;
+const mode = (positional[1] ?? "balanced") as OcrMode;
 const docsDir = path.resolve(process.cwd(), process.env.DOCS_DIR ?? "../Documents");
 const minPrimaryPct = Number(process.env.PIPELINE_MIN_PRIMARY_PCT ?? 85);
 

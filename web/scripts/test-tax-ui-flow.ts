@@ -3,6 +3,7 @@
  * Run: npm run test:tax-ui
  */
 import { buildTaxTable } from "../src/lib/tax/export-table";
+import { mergeParsedTaxYears } from "../src/lib/tax/client-merge";
 import { mergeTaxYearsByYear } from "../src/lib/tax/merge-years";
 import { buildPasteTsv, type TaxYearValues } from "../src/lib/tax-workbook";
 
@@ -25,6 +26,8 @@ const year2024: TaxYearValues = {
   year: 2024,
   values: { sales: 1066455, cogs: 313334, cash: 280309 },
   confidence: { sales: 98, cogs: 99, cash: 97 },
+  clientKey: "kc fudge",
+  clientName: "KC Fudge LLC",
   source: "test",
 };
 
@@ -68,6 +71,35 @@ assert(tsv.includes("1066455") || tsv.includes("1027658"), "tsv contains sales v
 const restored = storageRoundTrip(twoYears);
 assert(restored[0]?.year === 2025 || restored[1]?.year === 2025, "storage round-trip preserves years");
 assert(STORAGE_KEY.length > 0, "storage key defined");
+
+// UI: table already present — queue another year and merge.
+const withTable = mergeParsedTaxYears(
+  [
+    {
+      year: 2024,
+      values: { sales: 100 },
+      clientKey: "kc fudge",
+      clientName: "KC Fudge LLC",
+      source: "existing-table",
+    },
+  ],
+  [
+    {
+      year: 2025,
+      values: { sales: 200 },
+      clientKey: "kc fudge",
+      clientName: "KC Fudge LLC",
+      filename: "kcf-2025.pdf",
+      source: "new-upload",
+    },
+  ],
+);
+assert(withTable.columns.length === 2, "upload with existing table merges new year");
+assert(
+  withTable.columns.some((c) => c.year === 2024) && withTable.columns.some((c) => c.year === 2025),
+  "keeps prior year and adds new year",
+);
+assert(withTable.warnings.length === 0, "same company add-year has no wipe warning");
 
 console.log(`\n=== tax UI flow: ${passed} passed, ${failed} failed ===`);
 process.exit(failed > 0 ? 1 : 0);

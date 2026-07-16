@@ -1,5 +1,5 @@
 /**
- * Hit deployed /api/parse-tax-return with real PDFs (all Vercel OCR modes).
+ * Hit deployed /api/parse-tax-return with real PDFs (all OCR modes).
  * Run: npx tsx scripts/test-prod-api.ts [baseUrl] [year]
  */
 import { readFile } from "node:fs/promises";
@@ -13,8 +13,8 @@ import {
 import { TAX_WORKBOOK_ROWS } from "../src/lib/tax-workbook";
 
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);
-const MODES: OcrMode[] = ["vercel-fast", "vercel-balanced", "vercel-thorough"];
-const BASE = process.argv[2] ?? "https://reportgen-three.vercel.app";
+const MODES: OcrMode[] = ["fast", "balanced", "thorough"];
+const BASE = process.argv[2] ?? "https://reportgen.duckdns.org";
 const YEAR = Number(process.argv[3] ?? 2024);
 const MIN_PCT = Number(process.env.PROD_MIN_PRIMARY_PCT ?? 85);
 

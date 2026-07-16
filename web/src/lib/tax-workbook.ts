@@ -78,6 +78,14 @@ export type TaxYearValues = {
   comparisonPriorValues?: Record<string, number>;
   /** PDF-derived operating expense detail lines (for cross-year shared top-8 selection). */
   operatingExpenseLines?: Array<{ label: string; amount: number; source?: string }>;
+  /** Stmt / comparison "Other deductions" total anchor for top-8 + other_opex partition. */
+  stmtOtherDeductionsTotal?: number;
+  /**
+   * Form page-1 anchors scanned at parse time — used to re-flag P&L closure after
+   * multi-year opex alignment (OCR text is not available at merge).
+   */
+  formOrdinaryBusinessIncome?: number;
+  formGrossProfit?: number;
   /** Display labels for the eight operating expense rows after shared top-8 alignment. */
   opexSlotLabels?: Record<string, string>;
   /** OCR coverage / missing-block diagnostics (debug + confidence tooling). */

@@ -1,11 +1,19 @@
 import type { ResolvedFields } from "./merge";
+import { computeWorkbookFormulas } from "@/lib/tax/workbook-formulas";
 
-function isScheduleLRetainedSource(source: string | undefined): boolean {
-  return /schedule\s+l/i.test(source ?? "") && /line\s*24|23\+25|retained|unappropriated|apic \+ retained/i.test(source ?? "");
+function dollarsEqual(a: number, b: number): boolean {
+  return Math.round(a) === Math.round(b);
 }
 
-function isArizonaEmbeddedOseSource(source: string | undefined): boolean {
-  return /embedded schedule l \(arizona\)/i.test(source ?? "");
+function isScheduleLRetainedSource(source: string | undefined): boolean {
+  return (
+    /schedule\s+l/i.test(source ?? "") &&
+    /line\s*24|23\+25|retained|unappropriated|apic \+ retained/i.test(source ?? "")
+  );
+}
+
+function isPairedColumnEmbeddedOseSource(source: string | undefined): boolean {
+  return /embedded schedule l \(paired-column\)/i.test(source ?? "");
 }
 
 function isWeakEquityBleedSource(source: string | undefined, confidence?: number): boolean {
@@ -14,7 +22,46 @@ function isWeakEquityBleedSource(source: string | undefined, confidence?: number
   if (/schedule\s+l.*line\s*24|unappropriated/i.test(source ?? "")) {
     return (confidence ?? 70) < 95;
   }
-  return /ocr label|label match|fuzzy/i.test(source ?? "");
+  return /ocr label|label match|fuzzy|two-year comparison/i.test(source ?? "");
+}
+
+/** IRS-common nominal par values for capital stock (layout convention, not company-specific). */
+const NOMINAL_PAR = new Set([100, 500, 1000, 5000, 10_000]);
+
+function isNominalPar(value: number): boolean {
+  return NOMINAL_PAR.has(Math.round(Math.abs(value)));
+}
+
+function clearUnclassified(resolved: ResolvedFields): void {
+  delete resolved.values.unclassified_equity;
+  delete resolved.confidence.unclassified_equity;
+  delete resolved.sources.unclassified_equity;
+}
+
+/**
+ * When Sched L col-D RE sits in unclassified and every stock seat is blank, a BS gap that is
+ * exactly an IRS nominal-par amount is the missing capital-stock roll (integrator books RE+par
+ * in the equity seat). Evidence = BS identity + par vocabulary — not a company size floor.
+ */
+function rollMissingNominalParFromBalanceSheet(resolved: ResolvedFields): void {
+  const uni = resolved.values.unclassified_equity;
+  if (uni === undefined || uni <= 0) return;
+  if (!isScheduleLRetainedSource(resolved.sources.unclassified_equity)) return;
+  if ((resolved.values.common_stock ?? 0) !== 0) return;
+  if ((resolved.values.preferred_stock ?? 0) !== 0) return;
+  if ((resolved.values.other_stock_equity ?? 0) !== 0) return;
+  if ((resolved.values.additional_paid_in_capital ?? 0) !== 0) return;
+
+  const computed = computeWorkbookFormulas(resolved.values);
+  if (computed.total_assets === undefined || computed.total_liabilities_equity === undefined) return;
+  const gap = Math.round(computed.total_assets - computed.total_liabilities_equity);
+  if (gap <= 0 || !isNominalPar(gap)) return;
+
+  resolved.values.unclassified_equity = Math.round(uni + gap);
+  resolved.confidence.unclassified_equity = Math.max(resolved.confidence.unclassified_equity ?? 90, 92);
+  resolved.sources.unclassified_equity =
+    (resolved.sources.unclassified_equity ?? "Schedule L equity") +
+    " + nominal capital stock (BS identity)";
 }
 
 /** Route Schedule L equity into workbook buckets (common / other_stock / unclassified). */
@@ -27,30 +74,24 @@ export function normalizeEquityBuckets(resolved: ResolvedFields): void {
   const oseSrc = resolved.sources.other_stock_equity ?? "";
   const uniConf = resolved.confidence.unclassified_equity ?? 0;
   const oseConf = resolved.confidence.other_stock_equity ?? 0;
+  const hasNominalCommon = cs !== undefined && isNominalPar(cs);
+  const csRound = cs !== undefined ? Math.round(cs) : undefined;
 
-  // Strong equity bucket already populated — drop weak Schedule L line-24 bleed.
+  // Authoritative other-stock + weak/line-24 unclassified bleed — source structure wins (no $ floors).
   if (
     uni !== undefined &&
     ose !== undefined &&
     ose > 0 &&
-    Math.abs(uni) <= Math.max(500, ose * 0.02) &&
-    (isArizonaEmbeddedOseSource(oseSrc) ||
-      (oseConf >= uniConf && (oseConf >= 90 || isArizonaEmbeddedOseSource(oseSrc)))) &&
+    (isPairedColumnEmbeddedOseSource(oseSrc) || (oseConf >= uniConf && oseConf >= 90)) &&
     (isWeakEquityBleedSource(uniSrc, uniConf) ||
-      (isArizonaEmbeddedOseSource(oseSrc) && /schedule\s+l.*line\s*24/i.test(uniSrc)))
+      (isPairedColumnEmbeddedOseSource(oseSrc) && /schedule\s+l.*line\s*24/i.test(uniSrc)))
   ) {
-    delete resolved.values.unclassified_equity;
-    delete resolved.confidence.unclassified_equity;
-    delete resolved.sources.unclassified_equity;
+    clearUnclassified(resolved);
     return;
   }
-  const nominalPar = new Set([100, 500, 1000, 5000, 10_000]);
-  const hasNominalCommon = cs !== undefined && nominalPar.has(Math.round(cs));
-  const csRound = cs !== undefined ? Math.round(cs) : undefined;
 
   if (uni !== undefined && uni > 0 && isScheduleLRetainedSource(uniSrc)) {
-    // KCF-style: $100 capital stock is rolled into unclassified equity (RE + capital),
-    // not shown as Common Stock. Always exactly $100 low if we omit it.
+    // $100 capital stock often rolled into unclassified equity (RE + capital).
     if (csRound === 100 && (ose === undefined || ose === 0)) {
       resolved.values.unclassified_equity = Math.round(uni + csRound);
       resolved.confidence.unclassified_equity = Math.max(
@@ -64,112 +105,69 @@ export function normalizeEquityBuckets(resolved: ResolvedFields): void {
       delete resolved.sources.common_stock;
       return;
     }
-    // Integrator convention: nominal-par common stock → Other Stock/Equity (Carithers-style LLC).
-    // No common stock → keep unclassified (KCF / SSSI).
-    if (hasNominalCommon && (ose === undefined || ose === 0) && uni > 50_000) {
+    // Integrator convention: nominal-par common → Other Stock/Equity.
+    if (hasNominalCommon && (ose === undefined || ose === 0)) {
       resolved.values.other_stock_equity = uni;
       resolved.confidence.other_stock_equity = resolved.confidence.unclassified_equity ?? 90;
       resolved.sources.other_stock_equity =
         (resolved.sources.unclassified_equity ?? "Schedule L equity") + " (routed to other stock)";
-      delete resolved.values.unclassified_equity;
-      delete resolved.confidence.unclassified_equity;
-      delete resolved.sources.unclassified_equity;
+      clearUnclassified(resolved);
       return;
     }
+    // Duplicate other_stock that mirrors retained unclassified — drop the weaker ose copy.
     if (
       ose !== undefined &&
-      !isArizonaEmbeddedOseSource(oseSrc) &&
-      (Math.abs(ose - uni) <= Math.max(500, uni * 0.02) ||
-        /routed to other stock/i.test(oseSrc))
+      !isPairedColumnEmbeddedOseSource(oseSrc) &&
+      (dollarsEqual(ose, uni) || /routed to other stock/i.test(oseSrc))
     ) {
       delete resolved.values.other_stock_equity;
       delete resolved.confidence.other_stock_equity;
       delete resolved.sources.other_stock_equity;
     }
+    rollMissingNominalParFromBalanceSheet(resolved);
     return;
   }
 
-  // Arizona-style: common + APIC + large equity line already in other_stock_equity — drop duplicate uni.
+  // Paired-column ose already present — drop weak/non-retained unclassified bleed only.
   if (
     uni !== undefined &&
     ose !== undefined &&
-    ose > 400_000 &&
-    isArizonaEmbeddedOseSource(oseSrc) &&
-    Math.abs(uni) < 50_000
+    isPairedColumnEmbeddedOseSource(oseSrc) &&
+    !isScheduleLRetainedSource(uniSrc) &&
+    isWeakEquityBleedSource(uniSrc, uniConf)
   ) {
-    delete resolved.values.unclassified_equity;
-    delete resolved.confidence.unclassified_equity;
-    delete resolved.sources.unclassified_equity;
+    clearUnclassified(resolved);
     return;
   }
 
-  // Large C-corp with common stock + other_stock_equity — tiny Schedule L line-24 bleed is noise.
-  if (
-    uni !== undefined &&
-    Math.abs(uni) < 50_000 &&
-    ose !== undefined &&
-    ose > 400_000 &&
-    cs !== undefined &&
-    cs >= 100_000 &&
-    !isScheduleLRetainedSource(uniSrc)
-  ) {
-    delete resolved.values.unclassified_equity;
-    delete resolved.confidence.unclassified_equity;
-    delete resolved.sources.unclassified_equity;
-    return;
-  }
-
+  // Corporate with APIC + common stock but equity landed in unclassified — route to other_stock.
   if (
     uni !== undefined &&
     uni > 0 &&
-    ose !== undefined &&
-    ose > 400_000 &&
-    uni < 100_000
-  ) {
-    delete resolved.values.unclassified_equity;
-    delete resolved.confidence.unclassified_equity;
-    delete resolved.sources.unclassified_equity;
-  }
-
-  if (
-    cs !== undefined &&
-    cs > 0 &&
-    cs < 10_000 &&
-    (resolved.values.other_stock_equity ?? 0) > 50_000 &&
-    (resolved.values.unclassified_equity ?? 0) === 0
-  ) {
-    return;
-  }
-
-  // Corporate with APIC + common stock but equity landed in unclassified — route to other_stock_equity.
-  if (
-    uni !== undefined &&
-    uni > 50_000 &&
     (ose === undefined || ose === 0) &&
     apic !== undefined &&
-    apic >= 100 &&
+    apic >= 1 &&
     cs !== undefined &&
-    cs >= 1_000 &&
+    cs >= 1 &&
     !isScheduleLRetainedSource(uniSrc)
   ) {
     resolved.values.other_stock_equity = uni;
     resolved.confidence.other_stock_equity = resolved.confidence.unclassified_equity ?? 90;
     resolved.sources.other_stock_equity =
       resolved.sources.unclassified_equity ?? "Schedule L equity (routed to other stock)";
-    delete resolved.values.unclassified_equity;
-    delete resolved.confidence.unclassified_equity;
-    delete resolved.sources.unclassified_equity;
+    clearUnclassified(resolved);
     return;
   }
 
-  // Nominal-par common stock (LLC / S-corp style): integrator puts RE in Other Stock/Equity.
-  if (uni !== undefined && uni > 50_000 && (ose === undefined || ose === 0) && hasNominalCommon) {
+  // Nominal-par common: integrator puts RE in Other Stock/Equity.
+  if (uni !== undefined && uni > 0 && (ose === undefined || ose === 0) && hasNominalCommon) {
     resolved.values.other_stock_equity = uni;
     resolved.confidence.other_stock_equity = resolved.confidence.unclassified_equity ?? 90;
     resolved.sources.other_stock_equity =
       (resolved.sources.unclassified_equity ?? "Schedule L equity") + " (routed to other stock)";
-    delete resolved.values.unclassified_equity;
-    delete resolved.confidence.unclassified_equity;
-    delete resolved.sources.unclassified_equity;
+    clearUnclassified(resolved);
+    return;
   }
+
+  rollMissingNominalParFromBalanceSheet(resolved);
 }

@@ -1,11 +1,26 @@
 import type { ResolvedFields } from "./merge";
 import type { TaxFormKind } from "./detect-tax-form";
 import { scanFormLine20OtherDeductionsTotal } from "./form-anchors";
-import { extractStatementDeductions, scanStatement2Total, sumStmt2BlockLineItems, scanStmt2MiscLineAmounts } from "./statement-extractors";
+import {
+  extractStatementDeductions,
+  scanStatement2Total,
+  sumStmt2BlockLineItems,
+  scanStmt2MiscLineAmounts,
+} from "./statement-extractors";
 import { scanComparisonOtherDeductionsTotal } from "./comparison-opex";
+import { isFormReferenceNumber, isReasonableMoneyAmount } from "./money";
 
-function nearEqual(a: number, b: number): boolean {
-  return Math.abs(a - b) <= Math.max(2, Math.abs(b) * 0.01);
+function exactAgree(a: number, b: number): boolean {
+  return Math.round(a) === Math.round(b);
+}
+
+function keepableOdTotal(n: number): boolean {
+  const abs = Math.round(Math.abs(n));
+  if (abs < 1) return false;
+  if (!isReasonableMoneyAmount(abs)) return false;
+  if (isFormReferenceNumber(abs)) return false;
+  if (abs >= 1990 && abs <= 2035) return false;
+  return true;
 }
 
 /** Sum of Stmt 2 lines already extracted elsewhere (bank, professional, utilities, amortization). */
@@ -19,8 +34,8 @@ export function knownStmt2AttachmentSum(resolved: ResolvedFields, allText?: stri
 }
 
 /**
- * Infer Stmt 2 / Form line 19–20 attachment total from multiple independent signals.
- * OCR often truncates the Stmt 2 "Total" line; reconstructed totals from detail lines are preferred when higher.
+ * Infer Stmt 2 / Form line 19–20 attachment total from structural signals.
+ * Prefer Form footer / exact agreement across sources — no $10k floors or 0.98–1.15/% miscCap envelopes.
  */
 export function inferStmt2AttachmentTotal(
   allText: string,
@@ -45,59 +60,83 @@ export function inferStmt2AttachmentTotal(
   ].filter((n): n is number => n !== undefined && n > 0);
 
   const attachmentSum = attachmentLines.reduce((s, n) => s + Math.abs(n), 0);
+  const miscSum = scanStmt2MiscLineAmounts(allText).reduce((s, n) => s + n, 0);
 
-  const candidates: number[] = [];
-  if (compStmt2 !== undefined && compStmt2 >= 10_000) candidates.push(compStmt2);
-  if (scanned !== undefined && scanned >= 10_000) {
-    if (compStmt2 === undefined || scanned <= compStmt2 * 1.25) candidates.push(scanned);
-  }
-  if (form !== undefined && form >= 10_000) candidates.push(form);
-  if (itemized !== undefined && itemized >= 10_000) {
-    if (scanned === undefined) {
-      candidates.push(itemized);
-    } else if (
-      itemized > scanned &&
-      itemized <= scanned * 1.15 &&
-      itemized >= attachmentSum + 1_000
+  const candidates = new Set<number>();
+  const push = (n: number | undefined) => {
+    if (n !== undefined && keepableOdTotal(n)) candidates.add(Math.round(n));
+  };
+
+  push(form);
+  push(compStmt2);
+  push(scanned);
+
+  // Itemized: admit when it exact-agrees with Form/scanned, or when footer is missing/truncated.
+  if (itemized !== undefined && keepableOdTotal(itemized)) {
+    if (
+      (form !== undefined && exactAgree(itemized, form)) ||
+      (scanned !== undefined && exactAgree(itemized, scanned)) ||
+      (scanned === undefined && form === undefined) ||
+      (scanned !== undefined && itemized > scanned && attachmentSum > 0 && itemized >= attachmentSum)
     ) {
-      candidates.push(itemized);
+      push(itemized);
     }
   }
 
-  if (attachmentSum >= 10_000) {
-    const compOpex = hints?.comparisonOpex;
-    if (compOpex !== undefined && compOpex >= 1_000) {
-      candidates.push(attachmentSum + compOpex);
+  // attach + comparison other_opex only when it exact-agrees with an independent TOTAL.
+  const compOpex = hints?.comparisonOpex;
+  if (attachmentSum >= 1 && compOpex !== undefined && keepableOdTotal(compOpex)) {
+    const reconstructed = Math.round(attachmentSum + compOpex);
+    if (
+      (form !== undefined && exactAgree(reconstructed, form)) ||
+      (scanned !== undefined && exactAgree(reconstructed, scanned)) ||
+      (compStmt2 !== undefined && exactAgree(reconstructed, compStmt2))
+    ) {
+      push(reconstructed);
     }
-    const miscSum = scanStmt2MiscLineAmounts(allText).reduce((s, n) => s + n, 0);
-    const miscCap = scanned !== undefined ? scanned * 0.35 : attachmentSum * 0.5;
-    if (miscSum >= 1_000 && miscSum <= miscCap) {
-      candidates.push(attachmentSum + miscSum);
-    }
-    candidates.push(attachmentSum + 1_000);
   }
 
-  if (!candidates.length) return undefined;
-
-  let best = Math.max(...candidates);
-
-  if (scanned !== undefined && best > scanned * 1.15) {
-    const capped = candidates.filter((c) => c <= scanned * 1.15 && c >= scanned * 0.98);
-    if (capped.length) best = Math.max(...capped);
-    else best = scanned;
+  // attach + misc only on dollar-exact agreement with Form/footer (no ×0.35 miscCap).
+  if (attachmentSum >= 1 && miscSum >= 1) {
+    const reconstructed = Math.round(attachmentSum + miscSum);
+    if (
+      (form !== undefined && exactAgree(reconstructed, form)) ||
+      (scanned !== undefined && exactAgree(reconstructed, scanned))
+    ) {
+      push(reconstructed);
+    }
   }
 
-  // When OCR total is below the sum of known Stmt 2 lines, trust reconstruction.
-  if (scanned !== undefined && scanned < attachmentSum + 500) {
-    const reconstructed = candidates.filter((c) => c >= attachmentSum + 500);
-    if (reconstructed.length) best = Math.max(...reconstructed);
+  if (!candidates.size) {
+    const fallback = [form, scanned, itemized, compStmt2].find(
+      (n): n is number => n !== undefined && keepableOdTotal(n),
+    );
+    return fallback !== undefined ? Math.round(fallback) : undefined;
+  }
+
+  // Prefer Form-20 when any candidate exact-agrees with it.
+  if (form !== undefined && keepableOdTotal(form)) {
+    const formRound = Math.round(form);
+    if ([...candidates].some((c) => exactAgree(c, formRound))) return formRound;
+  }
+
+  // Prefer scanned footer when it exact-agrees with itemized/comp.
+  if (scanned !== undefined && keepableOdTotal(scanned)) {
+    const scannedRound = Math.round(scanned);
+    if (
+      (itemized !== undefined && exactAgree(itemized, scannedRound)) ||
+      (compStmt2 !== undefined && exactAgree(compStmt2, scannedRound))
+    ) {
+      return scannedRound;
+    }
   }
 
   // Drop candidates that are clearly just a single attachment line mis-read as total.
-  if (attachmentLines.some((line) => nearEqual(best, line))) {
-    const alt = candidates.filter((c) => !attachmentLines.some((line) => nearEqual(c, line)));
-    if (alt.length) best = Math.max(...alt);
+  let list = [...candidates];
+  if (attachmentLines.some((line) => list.some((c) => exactAgree(c, line)))) {
+    const alt = list.filter((c) => !attachmentLines.some((line) => exactAgree(c, line)));
+    if (alt.length) list = alt;
   }
 
-  return Math.round(best);
+  return Math.round(Math.max(...list));
 }

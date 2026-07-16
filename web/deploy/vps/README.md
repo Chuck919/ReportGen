@@ -21,7 +21,7 @@ sudo mkdir -p /opt/reportgen-src && sudo chown -R ubuntu:ubuntu /opt/reportgen-s
 git clone -b master https://github.com/Chuck919/ReportGen.git /opt/reportgen-src
 cd /opt/reportgen-src/web
 cp deploy/vps/.env.production.example .env.production
-# edit .env.production if using Supabase
+# edit .env.production if needed (API key, OCR workers)
 chmod +x deploy/vps/install-on-vm.sh
 bash deploy/vps/install-on-vm.sh
 ```
@@ -88,7 +88,7 @@ sudo docker compose restart
 - Runs `next start`, not `next dev`.
 - `FREE_OCR_WORKERS=2` on the 2-vCPU VPS (set in `docker-compose.yml` + `.env.production`).
 - Copy/paste works on HTTPS via the browser clipboard API; HTTP IP uses a fallback in `CopyButton`.
-- One PDF per browser session in the Tax UI — use **Clear all** before uploading another return.
+- Multi-year PDF uploads merge into one workbook. Use **Clear all** before uploading a different company.
 
 ## API smoke test (all benchmark clients)
 

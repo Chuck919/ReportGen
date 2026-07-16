@@ -618,8 +618,7 @@ async function main() {
           logs.push(`hi-dpi page ${page.pageNumber} skipped (full pass already has key Schedule L amounts)`);
           continue;
         }
-        const isThorough =
-          ocrMode.name === "thorough" || ocrMode.name === "vercel-thorough";
+        const isThorough = ocrMode.name === "thorough";
         const keepHi =
           hiScore > fullScore + (isThorough ? 2 : 0) ||
           (hiScore === fullScore && hiConf > fullConf + (isThorough ? 8 : 3)) ||

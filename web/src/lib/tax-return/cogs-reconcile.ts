@@ -16,9 +16,10 @@ export type CogsReconcileResult = {
 };
 
 /**
- * Comparison worksheets sometimes capture gross profit (sales − COGS) instead of COGS.
- * Form 1120-S line 2 can also land in the wrong year column — prefer comparison only
- * when the disagreement is not a gross-profit misread and form confidence is weak.
+ * Identity-only COGS reconcile — no sales-% or dollar floors.
+ * - Comparison ≈ sales − form → comparison was gross profit; keep Form.
+ * - Form much larger than comparison (comparison ≤ half) → comparison is a crumb; keep Form.
+ * - Otherwise prefer comparison (two-year column / worksheet is usually the target year).
  */
 export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconcileResult | null {
   const formCogs = input.formCogs;
@@ -27,13 +28,13 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
   const formSource = input.formSource ?? "Form 1120-S line 2";
   const sales = input.sales;
 
-  if (comparisonCogs !== undefined && comparisonCogs >= 10_000 && formCogs !== undefined) {
-    const relDiff = Math.abs(formCogs - comparisonCogs) / Math.max(comparisonCogs, 1);
-    if (relDiff <= 0.015) return null;
+  if (comparisonCogs !== undefined && formCogs !== undefined) {
+    const scale = Math.max(Math.abs(formCogs), Math.abs(comparisonCogs), 1);
+    if (Math.abs(formCogs - comparisonCogs) <= Math.max(1, scale * 0.001)) return null;
 
     if (sales !== undefined && sales > formCogs) {
       const grossProfit = sales - formCogs;
-      if (Math.abs(comparisonCogs - grossProfit) / Math.max(grossProfit, 1) < 0.025) {
+      if (Math.abs(comparisonCogs - grossProfit) <= Math.max(1, Math.abs(grossProfit) * 0.001)) {
         return {
           value: formCogs,
           confidence: formConfidence || 97,
@@ -42,19 +43,16 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
       }
     }
 
-    // Form line 2 can OCR to a tiny fraction of sales while comparison has the real COGS row.
-    if (sales !== undefined && sales > 0) {
-      const formRatio = formCogs / sales;
-      const compRatio = comparisonCogs / sales;
-      if (formRatio < 0.08 && compRatio >= 0.12 && compRatio <= 0.95) {
-        return {
-          value: comparisonCogs,
-          confidence: input.comparisonConfidence ?? 92,
-          source: "Two-year comparison (COGS row — form line 2 implausibly low)",
-        };
-      }
+    // Comparison is a partial read vs Form (e.g. worksheet vs 1125-A) — structural, not sales-%.
+    if (formCogs > 0 && comparisonCogs > 0 && comparisonCogs * 2 <= formCogs) {
+      return {
+        value: formCogs,
+        confidence: Math.max(formConfidence, 96),
+        source: `${formSource} (preferred over comparison crumb)`,
+      };
     }
 
+    // Close or same-order disagreement: comparison year column wins (AZ prior vs current).
     return {
       value: comparisonCogs,
       confidence: input.comparisonConfidence ?? 92,
@@ -62,7 +60,7 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
     };
   }
 
-  if (formCogs !== undefined && formCogs >= 10_000 && formConfidence >= 96) {
+  if (formCogs !== undefined && formConfidence >= 96) {
     return {
       value: formCogs,
       confidence: formConfidence,
@@ -70,7 +68,7 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
     };
   }
 
-  if (comparisonCogs !== undefined && comparisonCogs >= 10_000) {
+  if (comparisonCogs !== undefined) {
     return {
       value: comparisonCogs,
       confidence: input.comparisonConfidence ?? 90,

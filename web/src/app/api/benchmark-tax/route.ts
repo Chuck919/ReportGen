@@ -14,7 +14,6 @@ import type { OcrMode } from "@/lib/tax-return/local-ocr";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 800;
 
 export async function POST(req: NextRequest) {
   if (process.env.NODE_ENV === "production") {

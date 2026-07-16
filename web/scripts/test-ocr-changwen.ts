@@ -207,7 +207,6 @@ function selectClients(): TaxBenchmarkClient[] {
 }
 
 async function runMatrix(): Promise<Matrix> {
-  process.env.VERCEL = "";
   process.env.FREE_OCR_WORKERS = "1";
   process.env.FREE_OCR_TIMEOUT_MS = "1200000";
 

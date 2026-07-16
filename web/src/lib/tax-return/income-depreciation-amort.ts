@@ -1,6 +1,7 @@
 import type { FieldExtraction } from "./form-anchors";
 import {
   isForm1120Line,
+  isReasonableMoneyAmount,
   scheduleLineAmount,
   substantialMoneyTokens,
 } from "./money";
@@ -12,13 +13,13 @@ import {
 import { isWeakSource } from "./confidence-gates";
 
 function nearEqual(a: number, b: number): boolean {
-  return Math.abs(a - b) <= Math.max(2, Math.abs(b) * 0.01);
+  return Math.round(a) === Math.round(b);
 }
 
 export function isFullyAmortizedIntangibles(resolved: ResolvedFields): boolean {
   const gross = resolved.values.gross_intangible_assets;
   const acc = resolved.values.accumulated_amortization;
-  if (gross === undefined || acc === undefined || gross < 10_000) return false;
+  if (gross === undefined || acc === undefined || gross <= 0) return false;
   return nearEqual(acc, gross);
 }
 
@@ -112,9 +113,11 @@ export function scanForm4562Amortization(text: string): { value: number; confide
     if (!/amortization/i.test(line) || /accumulated|less\s+acc|gross\s+intangible|beginning|ending/i.test(line)) {
       continue;
     }
+    if (/omb\s*no|paperwork\s+reduction/i.test(line)) continue;
     const amt = scheduleLineAmount(line);
     if (amt === undefined) continue;
     if (amt >= 2020 && amt <= 2035) continue;
+    if (!isReasonableMoneyAmount(amt)) continue;
     return { value: Math.round(amt), confidence: 94 };
   }
 
@@ -138,7 +141,7 @@ export function scanStatementAmortization(text: string): { value: number; confid
       }
       const amt = scheduleLineAmount(line);
       if (amt === undefined || (amt >= 2020 && amt <= 2035)) continue;
-      if (amt >= 50_000_000 || amt > 100_000) continue;
+      if (!isReasonableMoneyAmount(amt)) continue;
       return { value: Math.round(amt), confidence: conf };
     }
     return undefined;
@@ -160,9 +163,12 @@ export function scanStatementAmortization(text: string): { value: number; confid
     ) {
       continue;
     }
+    if (/omb\s*no|form\s*4562|paperwork\s+reduction/i.test(line)) continue;
     const amt = scheduleLineAmount(line);
     if (amt === undefined || (amt >= 2020 && amt <= 2035)) continue;
-    return { value: Math.round(amt), confidence: 92 };
+    const abs = Math.round(Math.abs(amt));
+    if (!isReasonableMoneyAmount(abs)) continue;
+    return { value: abs, confidence: 92 };
   }
   return undefined;
 }
@@ -194,9 +200,7 @@ function isPlausibleComparisonCandidate(
   if (abs >= 2020 && abs <= 2035) return false;
   if (abs === 1986 || abs === 1987) return false;
   if (abs <= 99 && value !== 0) return false;
-  if (field === "amortization" && abs > 0 && abs < 500) return false;
-  if (field === "amortization" && abs > 100_000) return false;
-  if (field === "depreciation" && abs > 500_000) return false;
+  if (value !== 0 && !isReasonableMoneyAmount(value)) return false;
   return true;
 }
 
@@ -208,41 +212,43 @@ function pickCrossReferenced(
 ): CrossRefCandidate | undefined {
   const valid = candidates.filter(
     (c) =>
+      (c.value === 0 || isReasonableMoneyAmount(c.value)) &&
       !matchesBalanceSheetTrap(c.value, resolved, balanceTraps) &&
       (c.family !== "comparison" || isPlausibleComparisonCandidate(field, c.value)),
   );
   if (!valid.length) return undefined;
 
   if (field === "amortization" && isFullyAmortizedIntangibles(resolved)) {
+    // Book Schedule L can look fully amortized while Form/Stmt still has current-year P&L amort.
+    const formOrStmt = valid.find(
+      (c) =>
+        (c.family === "form" || c.family === "form4562" || c.family === "statement") &&
+        c.value > 0,
+    );
+    if (formOrStmt) return formOrStmt;
     const zero = valid.find((c) => c.value === 0);
     if (zero) return zero;
-    const nonNoise = valid.filter((c) => c.family !== "statement" || c.value >= 500);
-    if (nonNoise.length) {
-      const comparison = nonNoise.find((c) => c.family === "comparison");
-      if (comparison) return comparison;
-      return nonNoise.sort((a, b) => b.confidence - a.confidence)[0];
-    }
-    return undefined;
+    return valid.sort((a, b) => b.confidence - a.confidence)[0];
   }
 
   if (field === "amortization" && hasNoIntangibleAssets(resolved)) {
     const zero = valid.find((c) => c.value === 0);
     if (zero) return zero;
-    const small = valid.filter((c) => Math.abs(c.value) < 100_000);
-    if (small.length) return small.sort((a, b) => b.confidence - a.confidence)[0];
-    return undefined;
+    return valid.sort((a, b) => b.confidence - a.confidence)[0];
   }
 
-  const comparison = valid.find((c) => c.family === "comparison");
+  // Prefer Form / statement / Form-4562 / NET DEPRECIATION over comparison worksheet.
+  // Comparison often doubles or picks the wrong year column — not a soft-% veto.
+  const formNet = valid.find(
+    (c) => c.family === "form" && /NET\s+DEPRECIATION/i.test(c.source),
+  );
+  if (formNet) return formNet;
+  const form = valid.find((c) => c.family === "form");
+  if (form) return form;
+  const form4562 = valid.find((c) => c.family === "form4562");
+  if (form4562) return form4562;
   const statement = valid.find((c) => c.family === "statement");
-
-  if (field === "amortization" && statement && statement.value > 500) {
-    if (!comparison || comparison.value === 0 || comparison.value < 500) {
-      return statement;
-    }
-  }
-
-  if (comparison) return comparison;
+  if (statement) return statement;
 
   const agreeing = valid.filter((c) =>
     valid.some((other) => other !== c && nearEqual(c.value, other.value)),
@@ -251,15 +257,32 @@ function pickCrossReferenced(
     return agreeing.sort((a, b) => b.confidence - a.confidence)[0];
   }
 
-  const form = valid.find((c) => c.family === "form");
-  if (form) return form;
+  const comparison = valid.find((c) => c.family === "comparison");
+  if (comparison) return comparison;
 
   return valid.sort((a, b) => b.confidence - a.confidence)[0];
 }
 
+/** Book / tax depreciation report footer — independent of Form page-1 OCR. */
+function scanNetDepreciationReport(text: string): { value: number; confidence: number } | undefined {
+  let best: { value: number; confidence: number } | undefined;
+  for (const raw of text.split(/\n/)) {
+    const line = raw.replace(/\s+/g, " ").trim();
+    if (!/NET\s+DEPRECIATION\b/i.test(line)) continue;
+    if (/accumulated|allowance/i.test(line)) continue;
+    const amt = scheduleLineAmount(line);
+    if (amt === undefined) continue;
+    const abs = Math.round(Math.abs(amt));
+    if (abs < 1 || (abs >= 1990 && abs <= 2035)) continue;
+    // Prefer the smallest positive NET (report total); avoid rolling multi-entity sums.
+    if (!best || abs < best.value) best = { value: abs, confidence: 96 };
+  }
+  return best;
+}
+
 /**
  * Cross-reference P&L depreciation & amortization.
- * Two-year comparison worksheet wins when present; never pick by dollar magnitude.
+ * Form / NET DEPRECIATION / statement beat comparison worksheets (no dollar-magnitude pick).
  */
 export function reconcileDepreciationAmortization(
   resolved: ResolvedFields,
@@ -276,23 +299,6 @@ export function reconcileDepreciationAmortization(
   const amortTraps = ["accumulated_amortization", "gross_intangible_assets"] as const;
 
   const depCandidates: CrossRefCandidate[] = [];
-  if (compOk && ctx.comparison?.values.depreciation !== undefined) {
-    depCandidates.push({
-      value: ctx.comparison.values.depreciation,
-      source: "Two-year comparison (DEPRECIATION)",
-      confidence: ctx.comparison.confidence.depreciation ?? 90,
-      family: "comparison",
-    });
-  }
-  const scannedDep = scanComparisonIsExpense(ctx.allText, ctx.targetYear, "depreciation");
-  if (scannedDep && !depCandidates.some((c) => nearEqual(c.value, scannedDep.value))) {
-    depCandidates.push({
-      value: scannedDep.value,
-      source: "Two-year comparison (DEPRECIATION row)",
-      confidence: scannedDep.confidence,
-      family: "comparison",
-    });
-  }
   if (ctx.formAnchors.values.depreciation !== undefined) {
     depCandidates.push({
       value: ctx.formAnchors.values.depreciation,
@@ -313,6 +319,32 @@ export function reconcileDepreciationAmortization(
         family: "form",
       });
     }
+  }
+  const netDep = scanNetDepreciationReport(ctx.allText);
+  if (netDep && !depCandidates.some((c) => nearEqual(c.value, netDep.value))) {
+    depCandidates.push({
+      value: netDep.value,
+      source: "Depreciation report (NET DEPRECIATION)",
+      confidence: netDep.confidence,
+      family: "form",
+    });
+  }
+  if (compOk && ctx.comparison?.values.depreciation !== undefined) {
+    depCandidates.push({
+      value: ctx.comparison.values.depreciation,
+      source: "Two-year comparison (DEPRECIATION)",
+      confidence: ctx.comparison.confidence.depreciation ?? 90,
+      family: "comparison",
+    });
+  }
+  const scannedDep = scanComparisonIsExpense(ctx.allText, ctx.targetYear, "depreciation");
+  if (scannedDep && !depCandidates.some((c) => nearEqual(c.value, scannedDep.value))) {
+    depCandidates.push({
+      value: scannedDep.value,
+      source: "Two-year comparison (DEPRECIATION row)",
+      confidence: scannedDep.confidence,
+      family: "comparison",
+    });
   }
 
   const depPick = pickCrossReferenced("depreciation", depCandidates, depTraps, resolved);

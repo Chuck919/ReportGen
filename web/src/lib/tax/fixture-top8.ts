@@ -4,8 +4,10 @@ const MIN_OPEX_AMOUNT = 100;
 
 export type FixtureWithTop8 = {
   values: Record<string, number>;
-  /** Eight integrator row amounts (rows 11–18) — order irrelevant for multiset scoring. */
+  /** Eight integrator row amounts (rows 11–18) — order irrelevant for pair multiset. */
   top8Amounts?: number[];
+  /** Integrator row labels (rows 11–18) — paired with top8Amounts by index. */
+  top8Labels?: string[];
 };
 
 /** Expected top-8 dollar amounts for benchmark multiset (not tied to slot IDs). */

@@ -80,10 +80,10 @@ export function getMissingFieldsForNextTier(
   if (nextTierMode === "all-input") {
     return getMissingInputFieldIds(column);
   }
-  if (nextTierMode === "vercel-balanced" || nextTierMode === "balanced") {
+  if (nextTierMode === "balanced") {
     return getMissingPrimaryFieldIds(column);
   }
-  if (nextTierMode === "vercel-thorough" || nextTierMode === "thorough") {
+  if (nextTierMode === "thorough") {
     const primary = getMissingPrimaryFieldIds(column);
     const attach = getMissingAttachmentFieldIds(column);
     return Array.from(new Set([...primary, ...attach]));

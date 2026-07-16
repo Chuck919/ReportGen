@@ -54,6 +54,16 @@
       7755,
       24390,
       14059
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Salaries and wages",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Legal and professional",
+      "Utilities"
     ]
   },
   "carithers-liquor/integrator.xls / 2022": {
@@ -111,6 +121,16 @@
       5249,
       18890,
       20468
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Salaries and wages",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Legal and professional",
+      "Utilities"
     ]
   },
   "carithers-liquor/integrator.xls / 2023": {
@@ -168,6 +188,16 @@
       11650,
       19446,
       18880
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Salaries and wages",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Legal and professional",
+      "Utilities"
     ]
   },
   "carithers-liquor/integrator.xls / 2024": {
@@ -225,6 +255,16 @@
       9284,
       18700,
       19153
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Salaries and wages",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Legal and professional",
+      "Utilities"
     ]
   },
   "carithers-liquor/integrator.xls / 2025": {
@@ -282,6 +322,16 @@
       11894,
       27443,
       16362
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Salaries and wages",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Legal and professional",
+      "Utilities"
     ]
   },
   "strategic-solution-services/integrator.xls / 2022": {
@@ -338,6 +388,16 @@
       70185,
       63509,
       49289
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Job supplies",
+      "Utilities",
+      "Professional services"
     ]
   },
   "strategic-solution-services/integrator.xls / 2023": {
@@ -394,6 +454,16 @@
       0,
       27159,
       53833
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Job supplies",
+      "Utilities",
+      "Professional services"
     ]
   },
   "strategic-solution-services/integrator.xls / 2024": {
@@ -450,6 +520,16 @@
       90718,
       5066,
       28282
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Job supplies",
+      "Utilities",
+      "Professional services"
     ]
   },
   "strategic-solution-services/integrator.xls / 2025": {
@@ -506,6 +586,16 @@
       28455,
       1544,
       32528
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Job supplies",
+      "Utilities",
+      "Professional services"
     ]
   },
   "strategic-solution-services/integrator.xls / 2026": {
@@ -562,6 +652,16 @@
       28054,
       1705,
       28958
+    ],
+    "top8Labels": [
+      "Compensation of officers",
+      "Repairs and maintenance",
+      "Rents",
+      "Taxes and licenses",
+      "Insurance",
+      "Job supplies",
+      "Utilities",
+      "Professional services"
     ]
   },
   "arizona-sun-supply/integrator.xls / 2022": {
@@ -576,7 +676,7 @@
       "rent": 274000,
       "taxes_licenses": 119483,
       "other_operating_income": 0,
-      "other_operating_expenses": 339607,
+      "other_operating_expenses": 272707,
       "interest_expense": 0,
       "other_income": 0,
       "other_expenses": 0,
@@ -615,6 +715,16 @@
       83585,
       44787,
       39998
+    ],
+    "top8Labels": [
+      "Officer compensation",
+      "Salaries and wages",
+      "Rents",
+      "Taxes and licenses",
+      "Gasoline",
+      "Misc office expense",
+      "Employee benefits",
+      "Vehicle insurance"
     ]
   },
   "arizona-sun-supply/integrator.xls / 2023": {
@@ -629,7 +739,7 @@
       "rent": 300000,
       "taxes_licenses": 133081,
       "other_operating_income": 0,
-      "other_operating_expenses": 262517,
+      "other_operating_expenses": 204562,
       "interest_expense": 0,
       "other_income": 14474,
       "other_expenses": 0,
@@ -668,6 +778,16 @@
       87401,
       55514,
       45162
+    ],
+    "top8Labels": [
+      "Officer compensation",
+      "Salaries and wages",
+      "Rents",
+      "Taxes and licenses",
+      "Gasoline",
+      "Misc office expense",
+      "Employee benefits",
+      "Vehicle insurance"
     ]
   },
   "arizona-sun-supply/integrator.xls / 2024": {
@@ -682,7 +802,7 @@
       "rent": 300000,
       "taxes_licenses": 134983,
       "other_operating_income": 0,
-      "other_operating_expenses": 357244,
+      "other_operating_expenses": 260319,
       "interest_expense": 0,
       "other_income": 16366,
       "other_expenses": 0,
@@ -721,6 +841,16 @@
       88881,
       47676,
       53688
+    ],
+    "top8Labels": [
+      "Officer compensation",
+      "Salaries and wages",
+      "Rents",
+      "Taxes and licenses",
+      "Gasoline",
+      "Misc office expense",
+      "Employee benefits",
+      "Vehicle insurance"
     ]
   },
   "arizona-sun-supply/integrator.xls / 2025": {
@@ -735,7 +865,7 @@
       "rent": 504000,
       "taxes_licenses": 141702,
       "other_operating_income": 0,
-      "other_operating_expenses": 320323,
+      "other_operating_expenses": 253536,
       "interest_expense": 0,
       "other_income": 404,
       "other_expenses": 0,
@@ -774,6 +904,16 @@
       102370,
       50842,
       57434
+    ],
+    "top8Labels": [
+      "Officer compensation",
+      "Salaries and wages",
+      "Rents",
+      "Taxes and licenses",
+      "Gasoline",
+      "Misc office expense",
+      "Employee benefits",
+      "Vehicle insurance"
     ]
   },
   "arizona-sun-supply/integrator.xls / 2026": {
@@ -827,6 +967,16 @@
       103926,
       48461,
       58034
+    ],
+    "top8Labels": [
+      "Officer compensation",
+      "Salaries and wages",
+      "Rents",
+      "Taxes and licenses",
+      "Gasoline",
+      "Misc office expense",
+      "Employee benefits",
+      "Vehicle insurance"
     ]
   }
 }

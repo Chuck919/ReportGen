@@ -16,7 +16,6 @@ import {
   validateClientFileList,
   validatePdfFileSize,
 } from "../src/lib/tax/validate-upload";
-import { VERCEL_MULTIPASS } from "../src/lib/tax/vercel-multipass-config";
 import { maxFilesPerApiRequest } from "../src/lib/tax/upload-policy";
 
 let passed = 0;
@@ -40,17 +39,14 @@ assert(!isLikelyScannedPdf(500), "500 chars = not scanned threshold");
 assert(isLikelyTaxReturnText("Form 1120-S Schedule L"), "detects tax return");
 assert(!isLikelyTaxReturnText("Hello world"), "rejects non-tax text");
 
-const multi = validateClientFileList(
-  [
-    { name: "a.pdf", size: 1000, type: "application/pdf" } as File,
-    { name: "b.pdf", size: 1000, type: "application/pdf" } as File,
-  ],
-  { isVercel: true },
-);
-assert(multi.batchWarnings.length > 0, "vercel multi-file warns");
+const multi = validateClientFileList([
+  { name: "a.pdf", size: 1000, type: "application/pdf" } as File,
+  { name: "b.pdf", size: 1000, type: "application/pdf" } as File,
+]);
+assert(multi.ok, "multi-file upload accepted");
+assert(multi.batchWarnings.length === 0, "two files do not warn");
 
-assert(maxFilesPerApiRequest(true) === 1, "vercel max 1 per request");
-assert(maxFilesPerApiRequest(false) === 10, "local allows 10");
+assert(maxFilesPerApiRequest() === 10, "allows 10 files per request");
 
 console.log("\n=== merge / re-upload ===");
 const merged = mergeTaxYearRecords(
@@ -77,39 +73,31 @@ console.log("\n=== ocr errors ===");
 assert(isProcessTimeoutError({ killed: true, message: "x" }), "killed = timeout");
 assert(isProcessTimeoutError(new Error("timed out")), "message timeout");
 
-console.log("\n=== vercel mode resolve (local env) ===");
-const prev = process.env.VERCEL;
-process.env.VERCEL = "1";
-assert(resolveOcrModeForDeploy("thorough") === "vercel-thorough", "thorough -> vercel-thorough");
-assert(resolveOcrModeForDeploy("fast") === "vercel-balanced", "fast -> vercel-balanced");
-process.env.VERCEL = prev;
+console.log("\n=== ocr mode resolve ===");
+assert(resolveOcrModeForDeploy("thorough") === "thorough", "thorough stays thorough");
+assert(resolveOcrModeForDeploy("fast") === "fast", "fast stays fast");
+assert(resolveOcrModeForDeploy("balanced") === "balanced", "balanced stays balanced");
+assert(resolveOcrModeForDeploy("nope") === "balanced", "unknown -> balanced");
+assert(resolveOcrModeForDeploy("") === "balanced", "empty -> balanced");
 
-console.log("\n=== vercel OCR preset diff ===");
+console.log("\n=== OCR presets ===");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { resolveOcrMode } = require("./ocr-modes.cjs") as typeof import("./ocr-modes.cjs");
-process.env.VERCEL = "1";
-const vFast = resolveOcrMode("vercel-fast");
-const vBalanced = resolveOcrMode("vercel-balanced");
-const vThorough = resolveOcrMode("vercel-thorough");
-process.env.VERCEL = prev;
+const prevWorkers = process.env.FREE_OCR_WORKERS;
+delete process.env.FREE_OCR_WORKERS;
 const localFast = resolveOcrMode("fast");
 const localBalanced = resolveOcrMode("balanced");
 const localThorough = resolveOcrMode("thorough");
-assert(vFast.maxPhase2Pages === localFast.maxPhase2Pages, "vercel-fast mirrors local fast pages");
-assert(vBalanced.skipPhase1QuickScan === true, "vercel-balanced skips phase1 quick scan for Hobby budget");
-assert(!vBalanced.useFastHeuristicPages, "vercel-balanced must not skip pages via fast heuristic");
-assert(localBalanced.skipPhase1QuickScan === false, "local balanced keeps phase1 keyword scan for accuracy");
-assert(!localBalanced.useFastHeuristicPages, "local balanced must not use fast page subset");
-assert(vFast.maxPhase2Pages === 14, "fast caps at 14 pages");
-assert(vFast.maxHiDpiPages === 0, "fast skips hi-DPI");
-assert(localFast.maxHiDpiPages === 0, "local fast skips hi-DPI");
+if (prevWorkers !== undefined) process.env.FREE_OCR_WORKERS = prevWorkers;
+assert(localFast.maxHiDpiPages === 0, "fast skips hi-DPI");
+assert(localBalanced.skipPhase1QuickScan === false, "balanced keeps phase1 keyword scan for accuracy");
+assert(!localBalanced.useFastHeuristicPages, "balanced must not use fast page subset");
 assert(localBalanced.maxPhase2Pages === 36, "balanced scans up to 36 pages");
 assert(localBalanced.maxHiDpiPages > 0, "balanced has selective hi-DPI");
 assert(localThorough.maxPhase2Pages >= localBalanced.maxPhase2Pages, "thorough scans at least as many pages as balanced");
-assert(
-  localFast.workers === 1 && localBalanced.workers === 1 && localThorough.workers === 1,
-  "local workers=1",
-);
+assert(localFast.workers === 1, "fast workers=1");
+assert(localBalanced.workers === 2, "balanced workers=2");
+assert(localThorough.workers === 2, "thorough workers=2");
 
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);
 process.exit(failed > 0 ? 1 : 0);

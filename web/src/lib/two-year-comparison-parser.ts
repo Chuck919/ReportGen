@@ -6,6 +6,16 @@ import { TAX_WORKBOOK_ROWS } from "@/lib/tax-workbook";
 import { isFormReferenceNumber } from "@/lib/tax-return/money";
 
 const INPUT_IDS = new Set(TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id));
+/** Extra SG&A categories present on comparison worksheets but not fixed workbook slots. */
+const COMPARISON_VALUE_IDS = new Set([
+  ...INPUT_IDS,
+  "employee_benefits",
+  "gasoline",
+  "insurance",
+  "supplies",
+  "repairs",
+  "travel",
+]);
 
 function parseMoneyToken(raw: string): number | null {
   let s = raw.trim().replace(/[$,]/g, "");
@@ -63,6 +73,8 @@ export function classifyComparisonLine(line: string): string | null {
   if (/bank|credit\s+card/.test(t)) return "bank_credit_card";
   if (/professional|legal\s+and/.test(t)) return "professional_fees";
   if (/utilities|utilit/.test(t)) return "utilities";
+  if (/employee\s+benefit/i.test(t)) return "employee_benefits";
+  if (/gasoline|\bfuel\b/i.test(t) && !/biofuel|heating/i.test(t)) return "gasoline";
   if (/taxes\s+paid/.test(t) && !/net income|per books|per return|ordinary business/i.test(t)) return "taxes_paid";
   if (/\bcash\b/.test(t) && !/charit|contribut|flow|over\/short|chartable|method/i.test(t)) return "cash";
   if (/receivable|trade receiv/i.test(t) && !/note|year|overpayment|balance at|beginning|ending/i.test(t)) return "accounts_receivable";
@@ -92,10 +104,19 @@ export function shrinkToYearColumns(nums: number[]): [number, number] | null {
   if (nums.length === 0) return null;
   let v = nums.slice();
   if (v.length >= 3) {
-    const a = v[v.length - 3];
-    const b = v[v.length - 2];
-    const c = v[v.length - 1];
-    if (Math.abs(Math.abs(b) - Math.abs(a) - Math.abs(c)) <= Math.max(2, Math.abs(c) * 0.03)) {
+    const a = v[v.length - 3]!;
+    const b = v[v.length - 2]!;
+    const c = v[v.length - 1]!;
+    // Drop trailing YoY change column when present (e.g. 3525, 857, -2668).
+    const looksLikeChange =
+      Math.abs(Math.abs(a - b) - Math.abs(c)) <= Math.max(2, Math.abs(c) * 0.03);
+    // Legacy: middle equals sum of neighbors (OCR sometimes emits total mid-row).
+    const looksLikeSum =
+      Math.abs(Math.abs(b) - Math.abs(a) - Math.abs(c)) <= Math.max(2, Math.abs(c) * 0.03);
+    // Trailing rollup total (year1 + year2 = total) — keep the two year columns.
+    const looksLikeTrailingTotal =
+      Math.abs(Math.abs(c) - Math.abs(a) - Math.abs(b)) <= Math.max(2, Math.abs(c) * 0.03);
+    if (looksLikeChange || looksLikeSum || looksLikeTrailingTotal) {
       v = v.slice(0, -1);
     }
   }
@@ -115,14 +136,26 @@ function isStructurallyValid(id: string, value: number, line: string, headerYear
   if ((id === "depreciation" || id === "amortization") && (value === 1986 || value === 1987)) return false;
   if (id === "accounts_receivable" && /balance at|beginning|ending|year/i.test(line)) return false;
   if ((id === "other_income" || id === "taxes_paid" || id === "depreciation" || id === "amortization") && Math.abs(value) < 100) return false;
-  if (id === "other_operating_expenses" && Math.abs(value) < 1000) return false;
+  // Form 8990 / IRC §163(j) instruction crumbs — context only, no bare dollar floors.
+  if (
+    id === "interest_expense" &&
+    /million|form\s*8990|see instructions|163\s*\(\s*j\s*\)|section\s*163|business\s+interest\s+(?:expense\s+)?limitation|irc\s*§?\s*163/i.test(
+      line,
+    )
+  ) {
+    return false;
+  }
+  if (
+    id === "interest_expense" &&
+    Math.abs(value) === 163 &&
+    /(?:^|[^\d])163(?:[^\d]|$)|limitation|form\s*8990/i.test(line)
+  ) {
+    return false;
+  }
   if (id === "other_operating_expenses" && Math.abs(value) > 5_000_000) return false;
-  if ((id === "bank_credit_card" || id === "professional_fees" || id === "utilities") && Math.abs(value) < 500) return false;
   if (id === "other_income" && /subtraction|subtract|sch\.?\s*k|schedule\s*k|from federal/i.test(line)) return false;
-  if (id === "cash" && Math.abs(value) < 5_000) return false;
   if (id === "notes_minus_short_term" && Math.abs(value) < 100) return false;
-  if (id === "cogs" && Math.abs(value) < 10_000) return false;
-  if (id === "taxes_licenses" && Math.abs(value) < 1000) return false;
+  // COGS/rent: no size floor — year/line-number/negative checks above are enough.
   if (
     (id === "rent" || id === "taxes_licenses" || id === "cogs" || id === "sales") &&
     value < 0
@@ -147,6 +180,7 @@ const PENDING_COMPARISON_LABELS = new Set([
 export function parseTwoYearComparisonBlock(
   fullText: string,
   targetYear: number,
+  opts?: { assumeHeaderYears?: [number, number] },
 ): {
   values: Record<string, number>;
   confidence: Record<string, number>;
@@ -165,7 +199,7 @@ export function parseTwoYearComparisonBlock(
 
   let best: ReturnType<typeof parseTwoYearComparisonAt> = null;
   for (const start of starts) {
-    const parsed = parseTwoYearComparisonAt(fullText, targetYear, start);
+    const parsed = parseTwoYearComparisonAt(fullText, targetYear, start, opts?.assumeHeaderYears);
     if (!parsed) continue;
     if (!best || parsed.linesMatched > best.linesMatched) best = parsed;
   }
@@ -176,6 +210,7 @@ function parseTwoYearComparisonAt(
   fullText: string,
   targetYear: number,
   start: number,
+  assumeHeaderYears?: [number, number],
 ): {
   values: Record<string, number>;
   confidence: Record<string, number>;
@@ -193,6 +228,10 @@ function parseTwoYearComparisonAt(
   if (headerM) {
     yL = Number(headerM[1]);
     yR = Number(headerM[2]);
+    col = pickComparisonColumnIndex(yL, yR, targetYear);
+  } else if (assumeHeaderYears) {
+    yL = assumeHeaderYears[0];
+    yR = assumeHeaderYears[1];
     col = pickComparisonColumnIndex(yL, yR, targetYear);
   }
 
@@ -283,12 +322,17 @@ function parseTwoYearComparisonAt(
         continue;
       }
     }
-    if (!id || !INPUT_IDS.has(id)) {
+    if (!id || !COMPARISON_VALUE_IDS.has(id)) {
       prevLine = line;
       continue;
     }
 
     const nums = moneyFromLine(line, id);
+    // Payroll needs a real two-column worksheet row — skip single-token form-page bleed.
+    if ((id === "salaries_wages" || id === "officer_compensation") && nums.length < 2) {
+      prevLine = line;
+      continue;
+    }
     const pair = shrinkToYearColumns(nums);
     if (!pair) {
       prevLine = line;
@@ -319,7 +363,7 @@ function parseTwoYearComparisonAt(
       prevLine = line;
       continue;
     }
-    if (!isStructurallyValid(id, picked, line, headerM ? [yL, yR] : undefined)) {
+    if (!isStructurallyValid(id, picked, line, headerM || assumeHeaderYears ? [yL, yR] : undefined)) {
       prevLine = line;
       continue;
     }
@@ -331,6 +375,12 @@ function parseTwoYearComparisonAt(
         Math.abs(picked) >= 10_000
       ) {
         // Replace garbled first match with a stronger later row
+      } else if (
+        (id === "salaries_wages" || id === "officer_compensation") &&
+        nums.length >= 2 &&
+        Math.abs(prev) >= 2 * Math.min(Math.abs(pair[0]), Math.abs(pair[1]))
+      ) {
+        // Replace single-column form rollup with worksheet year columns
       } else {
         prevLine = line;
         continue;
@@ -348,7 +398,7 @@ function parseTwoYearComparisonAt(
   return {
     values,
     confidence,
-    headerYears: headerM ? [yL, yR] : undefined,
+    headerYears: headerM || assumeHeaderYears ? [yL, yR] : undefined,
     columnUsed: col,
     linesMatched,
   };

@@ -78,7 +78,7 @@ def excel_year_columns(sh: xlrd.sheet.Sheet) -> dict[int, int]:
     return out
 
 
-def extract_top8_amounts(sh: xlrd.sheet.Sheet, col: int) -> list[int]:
+def extract_top8_rows(sh: xlrd.sheet.Sheet, col: int) -> tuple[list[str], list[int]]:
     """Eight expense rows immediately above Overhead or S,G,&A (integrator rows 11–18)."""
     overhead_row: int | None = None
     for row in range(sh.nrows):
@@ -87,14 +87,24 @@ def extract_top8_amounts(sh: xlrd.sheet.Sheet, col: int) -> list[int]:
             overhead_row = row
             break
     if overhead_row is None or overhead_row < 8:
-        return []
-    out: list[int] = []
+        return [], []
+    labels: list[str] = []
+    amounts: list[int] = []
     for row in range(overhead_row - 8, overhead_row):
+        raw_label = str(sh.cell_value(row, 0)).strip()
         raw = sh.cell_value(row, col)
         if raw == "" or raw is None or not isinstance(raw, (int, float)):
+            amounts.append(0)
+            labels.append(raw_label or f"row_{row + 1}")
             continue
-        out.append(int(round(raw)))
-    return out
+        labels.append(raw_label)
+        amounts.append(int(round(raw)))
+    return labels, amounts
+
+
+def extract_top8_amounts(sh: xlrd.sheet.Sheet, col: int) -> list[int]:
+    _, amounts = extract_top8_rows(sh, col)
+    return amounts
 
 
 def extract_file(path: Path, fixture_prefix: str) -> dict[str, dict]:
@@ -121,11 +131,12 @@ def extract_file(path: Path, fixture_prefix: str) -> dict[str, dict]:
                 num = abs(num)
             values[field_id] = num
 
-        top8 = extract_top8_amounts(sh, col)
+        top8_labels, top8 = extract_top8_rows(sh, col)
         key = f"{fixture_prefix} / {year}"
         entry: dict = {"year": year, "values": values}
         if len(top8) == 8:
             entry["top8Amounts"] = top8
+            entry["top8Labels"] = top8_labels
         fixtures[key] = entry
 
     return fixtures

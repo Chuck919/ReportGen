@@ -38,6 +38,8 @@ const LABEL_ALIASES: Record<string, string> = {
   "officer compensation": "officer_compensation",
   "compensation of officers": "officer_compensation",
   "salaries and wages": "salaries_wages",
+  "wages and salaries": "salaries_wages",
+  "general and administrative wages and salaries": "salaries_wages",
   advertising: "advertising",
   rent: "rent",
   "taxes and licenses": "taxes_licenses",
@@ -90,9 +92,10 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   if (id === "accumulated_amortization" && (/other\s+assets|\b14\b/i.test(line) && !/amort|accumulated/i.test(line))) return true;
   if (id === "accumulated_amortization" && /other\s+ass/i.test(line) && !/less\s+accumulated\s+amort/i.test(line)) return true;
   if (id === "other_current_assets" && (/accounts\s+payable|\b16\b/i.test(line) && !/other\s+current\s+asset|line\s*6|\b6\b/i.test(line))) return true;
-  if (id === "other_current_assets" && Math.abs(value) < 1000 && !/other\s+current\s+ass|line\s*6|\b6\b/i.test(line)) return true;
-  if (id === "unclassified_equity" && (value < 0 || (Math.abs(value) < 1000 && !/retained|equity|line\s*24|\b24\b/i.test(line)))) return true;
-  if (id === "other_assets" && Math.abs(value) < 10000 && !/\b14\b/i.test(line)) return true;
+  // Caption / line-anchor required — no bare <$1000 size floor.
+  if (id === "other_current_assets" && !/other\s+current\s+ass|line\s*6|\b6\b/i.test(line)) return true;
+  if (id === "unclassified_equity" && value < 0) return true;
+  if (id === "unclassified_equity" && !/retained|equity|line\s*24|\b24\b/i.test(line)) return true;
   if (
     id === "other_income" &&
     (/\b10\b.*other\s+income|schedule\s*k-?1|shareholder|1045\s+other\s+income/i.test(line) ||
@@ -100,7 +103,8 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   ) {
     return true;
   }
-  if (id === "other_income" && Math.abs(value) < 100) return true;
+  // Line-number crumbs only when no substantial money cell (not a bare <$100 floor).
+  if (id === "other_income" && Math.abs(value) <= 99 && !substantialMoneyTokens(line).length) return true;
   if (
     id === "other_operating_income" &&
     /other\s+income/i.test(line) &&
@@ -108,8 +112,9 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   ) {
     return true;
   }
-  if (id === "sales" && Math.abs(value) < 1000 && !/receipt|sales|1a|1c/i.test(line)) return true;
-  if (id === "cogs" && Math.abs(value) < 10_000) return true;
+  // Sales / COGS: caption structure — no bare <$1000 size floor.
+  if (id === "sales" && !/receipt|sales|1a|1c/i.test(line)) return true;
+  if (id === "cogs" && Math.abs(value) <= 99 && !/cost\s+of|cogs|goods\s+sold/i.test(line)) return true;
   if ((id === "sales" || id === "cogs" || id === "rent") && Math.abs(value) <= 1) return true;
   if (id === "rent" && /gross\s+profit|total\s+income|ordinary\s+income/i.test(line)) return true;
   if (lead !== undefined && Math.abs(value) === lead) return true;
@@ -123,7 +128,8 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   ) {
     return true;
   }
-  if (id === "other_assets" && Math.abs(value) >= 100000 && !/\b14\b/i.test(line)) return true;
+  // Line 14 / other-assets caption required — no <$10k / ≥$100k size bands.
+  if (id === "other_assets" && !/\b14\b/i.test(line) && !/other\s+ass/i.test(line)) return true;
   const needsSubstantial =
     id === "other_current_liabilities" ||
     id === "accounts_payable" ||

@@ -13,10 +13,13 @@ import type { ResolvedFields } from "./merge";
 import {
   formLineAmount,
   isForm1120Line,
+  isFormReferenceNumber,
+  isReasonableMoneyAmount,
   lineMoneyTokens,
   lineTailAmount,
   scheduleLineAmount,
   substantialMoneyTokens,
+  unambiguousFormLineAmount,
 } from "./money";
 import { computeWorkbookFormulas } from "@/lib/tax/workbook-formulas";
 import {
@@ -41,9 +44,8 @@ function n(values: Record<string, number | undefined>, id: string): number {
 }
 
 /** Percentage-based money match (no fixed dollar floors). */
-export function pnlAmountsClose(a: number, b: number, pct = 0.005): boolean {
-  const scale = Math.max(Math.abs(a), Math.abs(b), 1);
-  return Math.abs(a - b) <= Math.max(1, scale * pct);
+export function pnlAmountsClose(a: number, b: number, _pct = 0.005): boolean {
+  return Math.round(a) === Math.round(b);
 }
 
 function parseComparisonHeaderYears(text: string): { yL: number; yR: number } | undefined {
@@ -171,29 +173,73 @@ function scoreOrdinaryIncomeLine(line: string): number {
   if (/section\s+199a/i.test(line)) w += 1;
   if (/reconcil|schedule\s+m/i.test(line)) w -= 2;
   if (/\b1\s+ordinary\s+business/i.test(line)) w -= 1;
+  // Form page-1 line 22 / subtract-line anchors beat bare comparison captions.
+  if (
+    /subtract\s+line\s*21/i.test(line) ||
+    /\[\s*22\s*\]/.test(line) ||
+    isForm1120Line(line, 22) ||
+    /page\s*1,?\s*line\s*22/i.test(line)
+  ) {
+    w += 8;
+  }
   return w;
+}
+
+function isFormTaggedOrdinaryIncomeLine(line: string): boolean {
+  return (
+    isForm1120Line(line, 22) ||
+    isForm1120Line(line, 21) ||
+    isForm1120Line(line, 30) ||
+    /\[\s*(?:21|22|30)\s*\]/.test(line) ||
+    /subtract\s+line\s*21/i.test(line) ||
+    /page\s*1,?\s*line\s*22/i.test(line) ||
+    /from\s+page\s+1\.?\s*line\s*22/i.test(line)
+  );
+}
+
+/** Amount on a Form-tagged ordinary-income line — never year-column / comparison picking. */
+function pickFormOrdinaryIncomeAmount(line: string): number | undefined {
+  const keepable = (n: number) => {
+    const abs = Math.abs(Math.round(n));
+    if (abs < 1 || !isReasonableMoneyAmount(abs)) return false;
+    if (isFormReferenceNumber(abs)) return false;
+    if (abs >= 1990 && abs <= 2035) return false;
+    if (abs <= 99) return false; // line-number crumbs
+    return true;
+  };
+  const tagged =
+    formLineAmount(line, "22") ??
+    formLineAmount(line, "21") ??
+    formLineAmount(line, "30") ??
+    unambiguousFormLineAmount(line) ??
+    scheduleLineAmount(line) ??
+    lineTailAmount(line);
+  if (tagged !== undefined && keepable(tagged)) return Math.round(Math.abs(tagged));
+  const tokens = substantialMoneyTokens(line).filter(keepable);
+  if (tokens.length === 1) return Math.round(Math.abs(tokens[0]!));
+  if (tokens.length) return Math.round(Math.abs(tokens[tokens.length - 1]!));
+  return undefined;
 }
 
 /** Form 1120-S line 22 / 1120 line 30 — Ordinary business income (loss). */
 export function scanFormOrdinaryBusinessIncome(text: string, targetYear?: number): number | undefined {
+  void targetYear; // year-column picking misreads Form line numbers (e.g. 22) as dollars
   const weighted: OrdinaryIncomeHit[] = [];
   for (const raw of text.split(/\n/)) {
     const line = raw.replace(/\s+/g, " ").trim();
     if (!/ordinary\s+(?:business\s+)?income/i.test(line)) continue;
-    if (/net\s+rental|per\s+books|from\s+page\s+1/i.test(line) && !/subtract\s+line/i.test(line)) {
+    if (/net\s+rental|per\s+books|from\s+page\s+1/i.test(line) && !/subtract\s+line|line\s*22/i.test(line)) {
       continue;
     }
     if (/two\s*year\s*comparison|comparison\s+worksheet/i.test(line)) continue;
-    const hasLine =
-      isForm1120Line(line, 22) ||
-      isForm1120Line(line, 21) ||
-      isForm1120Line(line, 30) ||
-      /\[\s*(?:21|22|30)\s*\]/.test(line) ||
-      /subtract\s+line\s*21/i.test(line);
-    if (!hasLine && !/^ordinary\s+(?:business\s+)?income/i.test(line)) continue;
-    const amt = pickEndColumnAmount(line, text, targetYear);
+    // Require Form line evidence — bare "Ordinary business income … N" rows are usually
+    // prior-year comparison captions winning over Form ordinary income.
+    if (!isFormTaggedOrdinaryIncomeLine(line)) continue;
+    const amt = pickFormOrdinaryIncomeAmount(line);
     if (amt === undefined || amt <= 0) continue;
-    if (!/business/i.test(line) && amt < 10_000) continue;
+    // Bare "ordinary income" without "business" is usually Schedule K comparison noise;
+    // Form-tagged lines already required above — no $10k floor.
+    if (!/business/i.test(line) && !isFormTaggedOrdinaryIncomeLine(line)) continue;
     const w = scoreOrdinaryIncomeLine(line);
     if (w <= 0) continue;
     weighted.push({ amount: amt, weight: w });
@@ -273,7 +319,10 @@ export function candidateClosesOrdinaryIncome(
 
 /**
  * Prefer reverse-math other_opex when top-8 is strong and form ordinary income is present.
- * Returns true if the field was set/replaced.
+ * Writes **only** `other_operating_expenses` — never top-8 paste amounts.
+ * Fallback only: applies when the current stmt residual fails Form ordinary-income identity
+ * and the derived plug closes it. Prefer stmt residual when it already closes Form OI.
+ * Integrator fixtures sometimes store this P&L plug (not itemized stmt remainder).
  */
 export function applyOrdinaryIncomeReverseOpex(
   resolved: ResolvedFields,
@@ -282,48 +331,57 @@ export function applyOrdinaryIncomeReverseOpex(
 ): { ordinaryIncome?: number; grossProfit?: number; applied: boolean } {
   const ordinaryIncome = scanFormOrdinaryBusinessIncome(allText, targetYear);
   const grossProfit = scanFormGrossProfit(allText, targetYear);
-  const sources = resolved.sources;
-  const derived =
-    ordinaryIncome !== undefined
-      ? deriveOtherOpexFromOrdinaryIncome(resolved.values, ordinaryIncome, sources)
-      : undefined;
+  const applied =
+    ordinaryIncome !== undefined &&
+    applyOrdinaryIncomeReverseOpexFromAnchor(resolved, ordinaryIncome);
+  return { ordinaryIncome, grossProfit, applied };
+}
 
-  if (derived === undefined || ordinaryIncome === undefined) {
-    return { ordinaryIncome, grossProfit, applied: false };
+/**
+ * Labeled Stmt itemized residual (office/supplies/telephone/travel/…).
+ * Cross-year top-8 remapping often inflates paste overhead so Form-OI reverse
+ * understates other_opex — never *shrink* that inventory with the plug. A larger
+ * plug may still apply when itemized under-counted crumbs (Form identity filled).
+ */
+function isLabeledStmtDetailOtherOpexSource(source?: string): boolean {
+  return /office\/supplies|telephone\/travel|statement other deductions/i.test(source ?? "");
+}
+
+/**
+ * Correct other_opex from Form ordinary income when the current residual fails identity.
+ * Never touches top-8 slots. Guarded: only when derived closes Form OI and current does not.
+ * Never shrink labeled Stmt itemized residuals with a smaller Form-OI plug.
+ */
+export function applyOrdinaryIncomeReverseOpexFromAnchor(
+  resolved: ResolvedFields,
+  ordinaryIncome: number,
+  _opts?: { allowOverwriteStmtResidual?: boolean },
+): boolean {
+  if (countFilledTop8(resolved.values) < 6) return false;
+  const derived = deriveOtherOpexFromOrdinaryIncome(
+    resolved.values,
+    ordinaryIncome,
+    resolved.sources,
+  );
+  if (derived === undefined) return false;
+  if (!candidateClosesOrdinaryIncome(resolved.values, derived, ordinaryIncome, resolved.sources)) {
+    return false;
   }
 
   const cur = resolved.values.other_operating_expenses;
-  if (cur !== undefined && pnlAmountsClose(cur, derived)) {
-    return { ordinaryIncome, grossProfit, applied: false };
-  }
-
-  const sales = resolved.values.sales ?? 0;
+  if (cur !== undefined && pnlAmountsClose(cur, derived)) return false;
   if (
     cur !== undefined &&
-    cur > 0 &&
-    derived > cur * 1.25 &&
-    !pnlAmountsClose(cur, derived) &&
-    (sales === 0 || derived > sales * 0.12 || cur < sales * 0.02)
+    candidateClosesOrdinaryIncome(resolved.values, cur, ordinaryIncome, resolved.sources)
   ) {
-    return { ordinaryIncome, grossProfit, applied: false };
+    return false;
   }
-
-  // Only override when reverse math closes identity and top-8 coverage is solid.
-  if (countFilledTop8(resolved.values) < 6) {
-    return { ordinaryIncome, grossProfit, applied: false };
-  }
-  if (!candidateClosesOrdinaryIncome(resolved.values, derived, ordinaryIncome, sources)) {
-    return { ordinaryIncome, grossProfit, applied: false };
-  }
-
   if (
     cur !== undefined &&
-    cur > 0 &&
-    /statement|stmt\s*2|summed detail|attachment/i.test(sources?.other_operating_expenses ?? "") &&
-    derived > cur * 1.5 &&
-    !pnlAmountsClose(cur, derived)
+    isLabeledStmtDetailOtherOpexSource(resolved.sources?.other_operating_expenses) &&
+    Math.round(derived) < Math.round(cur)
   ) {
-    return { ordinaryIncome, grossProfit, applied: false };
+    return false;
   }
 
   resolved.values.other_operating_expenses = derived;
@@ -331,9 +389,9 @@ export function applyOrdinaryIncomeReverseOpex(
   resolved.sources.other_operating_expenses =
     "P&L reverse math (Form ordinary income − top-8 − known lines)";
   resolved.warnings.push(
-    `Other opex ${derived} from Form ordinary income ${ordinaryIncome} (top-8 reverse math)`,
+    `Other opex ${derived} from Form ordinary income ${ordinaryIncome} (identity close; residual did not)`,
   );
-  return { ordinaryIncome, grossProfit, applied: true };
+  return true;
 }
 
 /** Flag workbook inputs when computed formulas disagree with Form page-1 anchors. */
@@ -342,8 +400,30 @@ export function flagPnlIdentityMismatches(
   allText: string,
   targetYear?: number,
 ): void {
-  const ordinaryIncome = scanFormOrdinaryBusinessIncome(allText, targetYear);
-  const formGp = scanFormGrossProfit(allText, targetYear);
+  flagPnlIdentityFromAnchors(
+    resolved,
+    scanFormOrdinaryBusinessIncome(allText, targetYear),
+    scanFormGrossProfit(allText, targetYear),
+  );
+}
+
+/**
+ * Same closure checks as {@link flagPnlIdentityMismatches}, using stored form anchors
+ * (for post-merge re-flag when OCR text is no longer available).
+ */
+export function flagPnlIdentityFromAnchors(
+  resolved: ResolvedFields,
+  ordinaryIncome: number | undefined,
+  formGp: number | undefined,
+): void {
+  // Drop stale pre-merge P&L warnings so post-align re-flag is authoritative.
+  resolved.warnings = (resolved.warnings ?? []).filter(
+    (w) =>
+      !/P&L does not close|other_operating_expenses may be wrong|Gross profit mismatch|Net income .+ ≠ Form ordinary/i.test(
+        w,
+      ),
+  );
+
   const formulas = computeWorkbookFormulas(resolved.values);
 
   if (
@@ -363,9 +443,10 @@ export function flagPnlIdentityMismatches(
 
   const npbt = formulas.net_profit_before_taxes;
   const ni = formulas.net_income;
+  const overhead = TOP8_IDS.reduce((s, id) => s + n(resolved.values, id), 0);
   if (npbt !== undefined && !pnlAmountsClose(npbt, ordinaryIncome)) {
     const gap = npbt - ordinaryIncome;
-    const msg = `P&L does not close to Form ordinary income (workbook NPBT ${npbt.toLocaleString()} vs form ${ordinaryIncome.toLocaleString()}, gap ${gap.toLocaleString()})`;
+    const msg = `P&L does not close to Form ordinary income (workbook NPBT ${npbt.toLocaleString()} vs form ${ordinaryIncome.toLocaleString()}, gap ${gap.toLocaleString()}; top-8 sum ${overhead.toLocaleString()}, other_opex ${n(resolved.values, "other_operating_expenses").toLocaleString()})`;
     resolved.warnings.push(msg);
     if (resolved.values.other_operating_expenses !== undefined) {
       resolved.warnings.push(`other_operating_expenses may be wrong (gap ${gap.toLocaleString()})`);
@@ -379,7 +460,7 @@ export function flagPnlIdentityMismatches(
       (resolved.values.adjusted_owner_compensation ?? 0);
     if (taxes === 0 && extras === 0) {
       resolved.warnings.push(
-        `Net income ${ni.toLocaleString()} ≠ Form ordinary income ${ordinaryIncome.toLocaleString()}`,
+        `Net income ${ni.toLocaleString()} ≠ Form ordinary income ${ordinaryIncome.toLocaleString()} (top-8 sum ${overhead.toLocaleString()}, other_opex ${n(resolved.values, "other_operating_expenses").toLocaleString()})`,
       );
     }
   }

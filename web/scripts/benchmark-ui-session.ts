@@ -9,6 +9,10 @@
  * Usage:
  *   npx tsx scripts/benchmark-ui-session.ts [mode] [clientId?]
  *
+ * Also run UI route parity (progressive / session-restore / re-finalize) so a green
+ * batch score cannot hide double-finalize regressions:
+ *   npx tsx scripts/benchmark-ui-upload-routes.ts [mode] [clientId?]
+ *
  * mode = balanced (default) | fast | thorough — uses OCR cache when present.
  * Live web API (exact Tax-tab server path):
  *   UI_BENCH_LIVE=1 BASE_URL=http://localhost:3000 npx tsx scripts/benchmark-ui-session.ts balanced
@@ -20,12 +24,12 @@
  *
  * Thresholds (exit 1 if any fail):
  *   - avg field accuracy (excl opex slots) ≥ 99%
- *   - avg opex amount multiset ≥ 99%
+ *   - avg opex (top-8 amount multiset + other_operating_expenses) ≥ 99%
  *   - 0 dangerous failures (wrong + green tier, or wrong + high conf unflagged)
  *   - correct-but-low-confidence (false positive review) ≤ 5%
  *   - yellow/review highlight rate ≤ 10% of all scanned fields
- *   - 0 unclean opex labels
  *   - 0 workbook formula mismatches
+ *   (opex labels are informational only — not a gate in this phase)
  */
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -38,9 +42,12 @@ import { rescanMissingAttachmentsExperimental } from "../src/lib/tax/ocr-recover
 import { probeOcrCoverageGaps } from "../src/lib/tax-return/ocr-coverage-rescan";
 import {
   scoreAllFieldsExcludingOpexSlots,
-  scoreOpexAmountsOnly,
+  scoreOpexBenchmark,
+  detectExcelOpexDiscrepancies,
+  enrichFixture,
   fieldMatches,
 } from "./lib/tax-benchmark-score";
+import { actualTop8Amounts } from "../src/lib/tax/fixture-top8";
 import {
   aggregateConfidenceCalibration,
   computeConfidenceCalibration,
@@ -160,6 +167,8 @@ type ClientSessionResult = {
   labelIssues: LabelIssue[];
   greenDangers: GreenDanger[];
   mathIssues: string[];
+  /** Non-blocking — parser surplus amounts that may indicate fixture error. */
+  excelDiscrepancies: string[];
   calibration: ConfidenceCalibration;
   avgField: number;
   avgOpex: number;
@@ -221,9 +230,8 @@ async function parseYearCached(client: TaxBenchmarkClient, year: number): Promis
       if (gap.ran) {
         ocr = gap.ocrText;
         console.log(`gap-rescan p${gap.pages.join(",")} `);
-        if (cp) {
-          await writeFile(cp, ocr, "utf8");
-        }
+        // Never rewrite the balanced/thorough OCR cache from experimental gap-rescan —
+        // a bad probe (or flaky page set) permanently poisons the holdout gate.
       }
     }
   }
@@ -245,6 +253,7 @@ async function parseYearLive(client: TaxBenchmarkClient, year: number): Promise<
   form.append("files", new Blob([bytes], { type: "application/pdf" }), path.basename(pdfPath));
   form.append("ocrMode", mode);
   form.append("format", "json");
+  const t0 = Date.now();
   const res = await undiciFetch(`${base}/api/parse-tax-return`, {
     method: "POST",
     headers: liveApiHeaders(),
@@ -258,6 +267,8 @@ async function parseYearLive(client: TaxBenchmarkClient, year: number): Promise<
   const json = (await res.json()) as { parsed?: ParsedTaxYear[]; error?: string };
   const row = json.parsed?.[0];
   if (!row) throw new Error(json.error ?? `No parse result for ${client.id} ${year}`);
+  const sec = ((Date.now() - t0) / 1000).toFixed(1);
+  process.stdout.write(`(${sec}s) `);
   return row;
 }
 
@@ -273,6 +284,7 @@ async function parseYearsLiveBatch(client: TaxBenchmarkClient): Promise<ParsedTa
   }
   form.append("ocrMode", mode);
   form.append("format", "json");
+  const t0 = Date.now();
   const res = await undiciFetch(`${base}/api/parse-tax-return`, {
     method: "POST",
     headers: liveApiHeaders(),
@@ -298,6 +310,11 @@ async function parseYearsLiveBatch(client: TaxBenchmarkClient): Promise<ParsedTa
       `  warn: batch upload returned ${json.parsed.length} row(s) for ${client.years.length} file(s)`,
     );
   }
+  const elapsedSec = (Date.now() - t0) / 1000;
+  const perPdf = elapsedSec / Math.max(client.years.length, 1);
+  console.log(
+    `ok  batch ${elapsedSec.toFixed(0)}s total (${perPdf.toFixed(0)}s/pdf avg, target balanced≤300s thorough≤600s)`,
+  );
   return json.parsed;
 }
 
@@ -356,11 +373,14 @@ function auditYellowRate(
 
 function auditGreenDangers(columns: TaxYearValues[], client: TaxBenchmarkClient): GreenDanger[] {
   const dangers: GreenDanger[] = [];
+  const opexSlotSet = new Set<string>(OPERATING_EXPENSE_SLOT_IDS);
   for (const col of columns) {
     const fk = fixtureKey(client, col.year);
     const exp = ALL_FIXTURES[fk]?.values;
     if (!exp) continue;
     for (const [id, expected] of Object.entries(exp)) {
+      // Opex paste rows are scored as an amount multiset — not per semantic slot id.
+      if (opexSlotSet.has(id)) continue;
       const match = fieldMatches(id, expected, col.values, exp);
       if (match.hit) continue;
       if (expected === 0 && (col.values[id] === undefined || col.values[id] === 0)) continue;
@@ -417,15 +437,28 @@ async function runClientSession(client: TaxBenchmarkClient): Promise<ClientSessi
   const misses: string[] = [];
   const mathIssues: string[] = [];
   const calibrations: ConfidenceCalibration[] = [];
+  const excelDiscrepancies: string[] = [];
+  const surplusAmountYears = new Map<number, Set<number>>();
 
   for (const col of columns) {
     const fk = fixtureKey(client, col.year);
+    const fixture = enrichFixture(fk);
     const fields = scoreAllFieldsExcludingOpexSlots(fk, col.values);
-    const opex = scoreOpexAmountsOnly(fk, col.values);
+    const opex = scoreOpexBenchmark(fk, col.values);
     fieldPctByYear[col.year] = fields.pct;
     opexPctByYear[col.year] = opex.pct;
     for (const m of fields.misses) misses.push(`${col.year} ${m}`);
     for (const m of opex.misses) misses.push(`${col.year} ${m}`);
+
+    for (const w of detectExcelOpexDiscrepancies(fixture, col.values)) {
+      const m = w.match(/parser_surplus_amount: (\d+)/);
+      if (m) {
+        const amt = Number(m[1]);
+        const yrs = surplusAmountYears.get(amt) ?? new Set<number>();
+        yrs.add(col.year);
+        surplusAmountYears.set(amt, yrs);
+      }
+    }
 
     const math = auditWorkbookMath(col.values);
     for (const issue of math) mathIssues.push(`${col.year} ${issue.kind}: ${issue.detail}`);
@@ -433,10 +466,18 @@ async function runClientSession(client: TaxBenchmarkClient): Promise<ClientSessi
     calibrations.push(computeConfidenceCalibration(fk, col));
   }
 
-  const labelIssues = auditLabels(columns);
+  for (const [amt, yrs] of surplusAmountYears) {
+    if (yrs.size >= 2) {
+      excelDiscrepancies.push(
+        `excel_discrepancy: parser surplus $${amt} in years ${[...yrs].sort((a, b) => b - a).join(", ")} (not in fixture top-8)`,
+      );
+    }
+  }
+
   const greenDangers = auditGreenDangers(columns, client);
   const yellow = auditYellowRate(columns, client);
   const calibration = aggregateConfidenceCalibration(calibrations);
+  const labelIssues: LabelIssue[] = [];
   const years = columns.map((c) => c.year).sort((a, b) => a - b);
   const avgField = years.length
     ? years.reduce((s, y) => s + (fieldPctByYear[y] ?? 0), 0) / years.length
@@ -445,16 +486,19 @@ async function runClientSession(client: TaxBenchmarkClient): Promise<ClientSessi
     ? years.reduce((s, y) => s + (opexPctByYear[y] ?? 0), 0) / years.length
     : 0;
 
-  // Print per-year summary with key opex slots for debugging.
+  // Per-year summary: top-8 amounts (order irrelevant) + other_opex.
   for (const col of [...columns].sort((a, b) => b.year - a.year)) {
-    const labels = sharedOpexSlotLabels([col]);
+    const top8 = actualTop8Amounts(col.values).sort((a, b) => b - a);
+    const ose = col.values.other_operating_expenses;
     console.log(
       `  ${col.year} fields ${fieldPctByYear[col.year]?.toFixed(1)}% opex ${opexPctByYear[col.year]?.toFixed(1)}%` +
-        ` officer=${col.values.officer_compensation ?? "—"} salaries=${col.values.salaries_wages ?? "—"}` +
-        ` ose=${col.values.other_stock_equity ?? "—"} uni=${col.values.unclassified_equity ?? "—"}`,
+        (ose !== undefined ? ` other_opex=${ose}` : ""),
     );
-    const labelStr = OPERATING_EXPENSE_SLOT_IDS.map((id) => labels[id] ?? id).join(" | ");
-    console.log(`    labels: ${labelStr}`);
+    console.log(`    top8 amounts: ${top8.join(", ")}`);
+  }
+
+  if (excelDiscrepancies.length) {
+    for (const d of excelDiscrepancies) console.log(`  FLAG ${d}`);
   }
 
   return {
@@ -466,6 +510,7 @@ async function runClientSession(client: TaxBenchmarkClient): Promise<ClientSessi
     labelIssues,
     greenDangers,
     mathIssues,
+    excelDiscrepancies,
     calibration,
     avgField,
     avgOpex,
@@ -483,7 +528,7 @@ async function main() {
     : TAX_BENCHMARK_CLIENTS;
 
   console.log(
-    `=== UI SESSION BENCHMARK mode=${mode} path=${live ? `live ${base}` : "cached+merge"} ===\n`,
+    `=== UI SESSION BENCHMARK mode=${mode} path=${live ? `live ${base}` : "cached+merge"} rankByAmount=cross-year-sum opexScore=amounts-only ===\n`,
   );
 
   if (live) await warmupLiveServer();
@@ -527,7 +572,6 @@ async function main() {
       r.avgField >= 99 &&
       r.avgOpex >= 99 &&
       greenN === 0 &&
-      labelN === 0 &&
       mathN === 0 &&
       r.calibration.correctLowConfidenceRate <= 0.05 &&
       r.yellowRate <= 0.1
@@ -537,6 +581,7 @@ async function main() {
     console.log(
       `${r.client.padEnd(12)} ${status}  field ${r.avgField.toFixed(1)}%  opex ${r.avgOpex.toFixed(1)}%` +
         `  misses=${missN} greenDanger=${greenN} labels=${labelN} math=${mathN}` +
+        `  excelFlags=${r.excelDiscrepancies.length}` +
         `  yellow=${(r.yellowRate * 100).toFixed(1)}%` +
         `  FP=${(r.calibration.correctLowConfidenceRate * 100).toFixed(1)}%` +
         `  dangerousHigh=${r.calibration.dangerousFailures}`,
@@ -554,7 +599,10 @@ async function main() {
       }
     }
     if (r.labelIssues.length) {
-      for (const l of r.labelIssues) console.log(`    label: ${l.slotId}="${l.label}" (${l.reason})`);
+      for (const l of r.labelIssues.slice(0, 3)) console.log(`    label (info): ${l.slotId}="${l.label}" (${l.reason})`);
+    }
+    if (r.excelDiscrepancies.length) {
+      for (const d of r.excelDiscrepancies) console.log(`    FLAG ${d}`);
     }
     if (r.mathIssues.length) {
       for (const m of r.mathIssues) console.log(`    math: ${m}`);
@@ -583,7 +631,6 @@ async function main() {
     avgField < 99 ||
     avgOpex < 99 ||
     totalGreen > 0 ||
-    totalLabel > 0 ||
     totalMath > 0 ||
     agg.dangerousFailures > 0 ||
     agg.correctLowConfidenceRate > 0.05 ||

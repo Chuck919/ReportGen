@@ -45,7 +45,19 @@ async function main() {
   }
   console.log(`\n${pass}/${TAX_BENCHMARK_CLIENTS.length} clients passed gate`);
 
-  forceExit(Object.values(codes).some((c) => c !== 0) ? 1 : 0);
+  // Progressive / session-restore / re-finalize parity (form anchors + flags + top-8).
+  console.log(`\n\n########## UI UPLOAD ROUTES PARITY mode=${mode} ##########\n`);
+  const routesCode = await new Promise<number>((resolve) => {
+    const child = spawn(
+      "npx",
+      ["tsx", path.join("scripts", "benchmark-ui-upload-routes.ts"), mode],
+      { cwd: process.cwd(), stdio: "inherit", shell: true, env: { ...process.env } },
+    );
+    child.on("close", (code) => resolve(code ?? 2));
+  });
+  console.log(`\nUI upload routes exit ${routesCode} (${routesCode === 0 ? "PASS" : "FAIL"})`);
+
+  forceExit(Object.values(codes).some((c) => c !== 0) || routesCode !== 0 ? 1 : 0);
 }
 
 main().catch((e) => {

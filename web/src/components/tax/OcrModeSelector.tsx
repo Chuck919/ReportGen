@@ -3,7 +3,7 @@
 import type { OcrMode } from "@/lib/api/types";
 import { getOcrModeOptions } from "@/lib/tax/ocr-modes";
 
-/** Compact mode picker — label + timing only. */
+/** Compact mode picker — Fast / Balanced / Thorough. */
 export function OcrModeSelector({
   value,
   onChange,
@@ -34,9 +34,6 @@ export function OcrModeSelector({
             ].join(" ")}
           >
             {mode.label}
-            {mode.hint ? (
-              <span className={selected ? "text-stone-400" : "text-stone-400"}> · {mode.hint}</span>
-            ) : null}
           </button>
         );
       })}
