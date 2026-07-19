@@ -26,10 +26,13 @@ export function isFormReferenceNumber(n: number): boolean {
 
 /** OCR money runs — supports comma, period, or space thousands grouping. */
 function ocrMoneyRuns(line: string): string[] {
+  // Dense/scanned OCR often inserts a space after a thousands comma: `2,539, 740` → `2,539,740`.
+  const normalized = line.replace(/(\d{1,3}(?:,\d{3})*),\s+(\d{3})\b/g, "$1,$2");
   const runs: string[] = [];
+  // Space-thousands must not start after "LINE n" ("LINE 20 419,737" ≠ 20,419).
   const re =
-    /\d{1,3}(?:[.,]\d{3})+(?:\.\d{2})?|\d{1,3}(?:\s+\d{3})+(?:\.\d{2})?|\d[\d,]{1,}(?:\.\d{2})?/g;
-  for (const m of line.matchAll(re)) runs.push(m[0]);
+    /\d{1,3}(?:[.,]\d{3})+(?:\.\d{2})?|(?<!line\s)\d{1,3}(?:\s+\d{3})+(?:\.\d{2})?|\d[\d,]{1,}(?:\.\d{2})?/gi;
+  for (const m of normalized.matchAll(re)) runs.push(m[0]);
   return runs;
 }
 
@@ -38,10 +41,11 @@ function ocrMoneyRuns(line: string): string[] {
  * Stmt Other-deductions detail only (not Form / Schedule L global money).
  */
 function ocrMoneyRunsWithTrailingPeriodCells(line: string): string[] {
+  const normalized = line.replace(/(\d{1,3}(?:,\d{3})*),\s+(\d{3})\b/g, "$1,$2");
   const runs: string[] = [];
   const re =
-    /\d{1,3}(?:[.,]\d{3})+(?:\.\d{2})?|\d{1,3}(?:\s+\d{3})+(?:\.\d{2})?|\d{1,7}\.(?!\d)|\d[\d,]{1,}(?:\.\d{2})?/g;
-  for (const m of line.matchAll(re)) runs.push(m[0]);
+    /\d{1,3}(?:[.,]\d{3})+(?:\.\d{2})?|(?<!line\s)\d{1,3}(?:\s+\d{3})+(?:\.\d{2})?|\d{1,7}\.(?!\d)|\d[\d,]{1,}(?:\.\d{2})?/gi;
+  for (const m of normalized.matchAll(re)) runs.push(m[0]);
   return runs;
 }
 
@@ -120,19 +124,48 @@ export function isForm1120Line(line: string, n: number): boolean {
 
 /** Leading IRS line number on a row (e.g. `18 Other current liabilities`). */
 export function leadingScheduleLineNumber(line: string): number | undefined {
-  const m = line.match(/^\s*(\d{1,2})(?:[a-z]\b)?/i);
+  const m = line.match(/^\s*[\W_]*(\d{1,2})(?:[a-z])?(?=\s|[_\][|.:])/i);
   if (!m) return undefined;
   const n = Number(m[1]);
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** Money tokens with at least 4 characters (excludes most line numbers like 12, 18). */
+/** Money tokens excluding the row's own leading IRS line reference. */
 export function substantialMoneyTokens(line: string): number[] {
-  const nums = parseOcrMoneyRuns(line, 4);
+  const nums = parseOcrMoneyRuns(line, 1);
+  const refs = new Set<number>();
   const lead = leadingScheduleLineNumber(line);
-  if (lead === undefined) return nums;
-  const filtered = nums.filter((n) => Math.abs(n) !== lead);
-  return filtered.length ? filtered : nums;
+  if (lead !== undefined) refs.add(lead);
+  for (const match of line.matchAll(/\[\s*(\d{1,3})[a-z]?(?=\s*[|\]])/gi)) {
+    refs.add(Number(match[1]));
+  }
+  for (const match of line.matchAll(/\|\s*(\d{1,3})[a-z]?\s*(?=[_|])/gi)) {
+    refs.add(Number(match[1]));
+  }
+  for (const match of line.matchAll(/\bline\s*(\d{1,3})\b/gi)) {
+    refs.add(Number(match[1]));
+  }
+  // Statement caption headers ("Statement 6 - Form 1120-S, Page 4, Schedule L,
+  // Line 18 …") — statement and page numbers are references, never dollar cells.
+  for (const match of line.matchAll(/\bpage\s*(\d{1,3})\b/gi)) {
+    refs.add(Number(match[1]));
+  }
+  for (const match of line.matchAll(/\b(?:stat(?:ement)?|stmt)\s*(\d{1,3})\b/gi)) {
+    refs.add(Number(match[1]));
+  }
+  const gluedLeading = line.match(/^\s*[\W_]*(\d{3,})\s+(?=[a-z])/i);
+  return nums.filter((n) => {
+    const abs = Math.abs(Math.round(n));
+    if (refs.has(abs)) return false;
+    if (
+      gluedLeading &&
+      Number(gluedLeading[1]) === abs &&
+      [...refs].some((ref) => String(abs).endsWith(String(ref)))
+    ) {
+      return false;
+    }
+    return true;
+  });
 }
 
 /** Rightmost money amount on a line (typical Form 1120-S layout). */
@@ -140,12 +173,13 @@ export function lineTailAmount(line: string): number | undefined {
   const nums = lineMoneyTokens(line);
   if (!nums.length) return undefined;
   // A blank amount cell is sometimes OCR'd as nothing but the row's own line-number reference,
-  // repeated once leading and once bracketed (e.g. "13 Salaries and wages ... [13]") — when every
-  // money-like token on the line is that same tiny value, there is no real dollar amount printed.
+  // repeated once leading and once bracketed (e.g. "13 Salaries and wages ... [13]").
   const distinct = new Set(nums.map((n) => Math.abs(n)));
   if (distinct.size === 1) {
     const only = [...distinct][0]!;
-    if (only >= 1 && only <= 99) return undefined;
+    const rowRef = leadingScheduleLineNumber(line);
+    const bracketRefs = [...line.matchAll(/\[\s*(\d{1,3})\s*\]/g)].map((m) => Number(m[1]));
+    if (rowRef === only || bracketRefs.includes(only)) return undefined;
   }
   return nums[nums.length - 1];
 }
@@ -202,25 +236,15 @@ export function unambiguousFormLineAmountForTag(line: string, tag: string): numb
   return bracketLineAmount(line, tag) ?? unambiguousFormLineAmount(line);
 }
 
-/** OCR often prefixes a spurious leading 1 on 7–8 digit amounts (e.g. 110,031,771 → 10,031,771). */
-export function derailOcrLeadingOne(n: number): number {
-  const abs = Math.abs(Math.round(n));
-  const s = String(abs);
-  if (s.length === 9 && s.startsWith("1")) {
-    const trimmed = Number(s.slice(1));
-    if (trimmed >= 1_000_000 && trimmed < 100_000_000) return Math.sign(n) * trimmed;
-  }
-  if (s.length === 8 && s.startsWith("1")) {
-    const trimmed = Number(s.slice(1));
-    if (trimmed >= 1_000_000 && trimmed < 10_000_000) return Math.sign(n) * trimmed;
-  }
-  return n;
-}
-
-/** Reject OCR-concatenated money (digit run length, not company size). */
+/**
+ * Reject OCR-concatenated digit runs (cell shape), not company size.
+ * Ungrouped IRS money cells on corporate returns are ≤9 digits ($999,999,999);
+ * 10+ digit runs are almost always glued OCR (e.g. two amounts smashed together).
+ */
 export function isReasonableMoneyAmount(n: number): boolean {
+  if (!Number.isFinite(n) || !Number.isSafeInteger(Math.round(n))) return false;
   const digits = String(Math.abs(Math.round(n))).length;
-  return digits >= 1 && digits <= 7;
+  return digits >= 1 && digits <= 9;
 }
 
 /** Statement / Stmt detail line amount — substantial tokens only. */
@@ -238,16 +262,32 @@ export function lineMaxAmount(line: string): number | undefined {
 /** Comparison / worksheet column dollars — exclude form refs, tax years, line-number crumbs. */
 export function isKeepableWorksheetAmount(n: number): boolean {
   const abs = Math.abs(Math.round(n));
+  if (abs < 1) return false;
   if (!isReasonableMoneyAmount(abs)) return false;
   if (isFormReferenceNumber(abs)) return false;
   if (abs >= 1990 && abs <= 2035) return false;
-  if (abs <= 99) return false;
   return true;
+}
+
+/**
+ * Keepable worksheet dollar with row context. Small dollars are valid; reject a
+ * printed row number only when every parsed numeric token is that same reference
+ * (a blank amount cell such as `16 Accounts payable`).
+ */
+export function isKeepableWorksheetAmountOnLine(n: number, line: string): boolean {
+  if (!isKeepableWorksheetAmount(n)) return false;
+  const abs = Math.abs(Math.round(n));
+  const rowRefs = [
+    ...line.matchAll(/(?:^\s*[\W_]*|\[|\bline\s*)(\d{1,3})(?=\s|[_\][|.:,])/gi),
+  ].map((m) => Number(m[1]));
+  if (!rowRefs.includes(abs)) return true;
+  const tokens = lineMoneyTokens(line).filter(isKeepableWorksheetAmount);
+  return tokens.some((token) => Math.abs(Math.round(token)) !== abs);
 }
 
 /** Substantial tokens suitable for comparison / Stmt TOTAL columns. */
 export function keepableWorksheetMoneyTokens(line: string): number[] {
-  return substantialMoneyTokens(line).filter(isKeepableWorksheetAmount);
+  return substantialMoneyTokens(line).filter((n) => isKeepableWorksheetAmountOnLine(n, line));
 }
 
 export function isHistoricalGrossReceiptsLine(line: string): boolean {
