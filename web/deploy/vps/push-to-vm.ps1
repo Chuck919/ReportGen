@@ -42,7 +42,7 @@ chmod +x deploy/vps/install-on-vm.sh
 export ENV_TEMPLATE=deploy/vps/.env.production.example
 export OPEN_UFW=0
 bash deploy/vps/install-on-vm.sh
-"@
+"@ -replace "`r`n", "`n"
 $remoteScript | ssh @sshArgs $target "bash -s"
 
 Write-Host ""
