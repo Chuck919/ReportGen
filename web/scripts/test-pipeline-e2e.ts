@@ -15,10 +15,8 @@ import { mergeTaxYearsByYear } from "../src/lib/tax/merge-years";
 import { processTaxPdfFile } from "../src/lib/tax/process-tax-upload";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";
 import { runLocalOcr } from "../src/lib/tax-return/local-ocr";
-import {
-  TAX_ATTACHMENT_FIELD_IDS,
-  WORKBOOK_COMPARISON_FIXTURES,
-} from "../src/lib/workbook-comparison-fixtures";
+import { TAX_ATTACHMENT_FIELD_IDS } from "../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./lib/workbook-comparison-fixtures";
 import { TAX_WORKBOOK_ROWS } from "../src/lib/tax-workbook";
 
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);

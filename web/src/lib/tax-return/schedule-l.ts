@@ -1,7 +1,7 @@
 import type { FieldExtraction } from "./form-anchors";
 import {
   isFormReferenceNumber,
-  isKeepableWorksheetAmount,
+  isKeepableWorksheetAmountOnLine,
   isReasonableMoneyAmount,
   keepableWorksheetMoneyTokens,
   lineMoneyTokens,
@@ -33,22 +33,21 @@ function scheduleLCapitalStockAmount(line: string): number | undefined {
     if (endNums.length) {
       const end = Math.round(Math.abs(endNums[endNums.length - 1]!));
       // Prefer IRS nominal-par tokens; otherwise keepable end-column dollars.
-      if (NOMINAL_PAR_AMOUNTS.has(end) || isKeepableWorksheetAmount(end)) return end;
+      if (NOMINAL_PAR_AMOUNTS.has(end) || isKeepableWorksheetAmountOnLine(end, line)) return end;
       return undefined;
     }
   }
 
   if (nums.length >= 2) {
     const end = Math.round(Math.abs(nums[nums.length - 1]!));
-    // Begin-column OCR junk when end is a line-number crumb — keep only par / keepable end.
-    if (end <= 99) return undefined;
-    if (NOMINAL_PAR_AMOUNTS.has(end) || isKeepableWorksheetAmount(end)) return end;
+    // Begin-column OCR junk is rejected only when it is the printed row reference.
+    if (NOMINAL_PAR_AMOUNTS.has(end) || isKeepableWorksheetAmountOnLine(end, line)) return end;
   }
 
   const amt = scheduleLineAmount(line);
   if (amt === undefined) return undefined;
   const abs = Math.round(Math.abs(amt));
-  if (NOMINAL_PAR_AMOUNTS.has(abs) || isKeepableWorksheetAmount(abs)) return amt;
+  if (NOMINAL_PAR_AMOUNTS.has(abs) || isKeepableWorksheetAmountOnLine(abs, line)) return amt;
   return undefined;
 }
 
@@ -57,7 +56,7 @@ function scheduleLine17Amount(line: string): number | undefined {
   // end-of-year column (last keepable token). Do NOT join spaced begin-column OCR
   // (`1 564`) into a single amount — that stole end-year 386 on thorough/live packs.
   const endCol = (nums: number[]): number | undefined => {
-    const keep = nums.filter((n) => Math.abs(n) !== 17 && isKeepableWorksheetAmount(n));
+    const keep = nums.filter((n) => isKeepableWorksheetAmountOnLine(n, line));
     if (!keep.length) return undefined;
     return keep[keep.length - 1];
   };
@@ -111,6 +110,14 @@ function setStmtTotal(
   out.sources[id] = source;
 }
 
+/** True when the row's final numeric cell equals the amount (comma groups intact). */
+function amountOccupiesEndCell(row: string, amount: number): boolean {
+  const runs = row.match(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+(?:\.\d{2})?/g);
+  if (!runs?.length) return false;
+  const last = parseMoney(runs[runs.length - 1]!);
+  return last !== null && Math.abs(last) === Math.abs(Math.round(amount));
+}
+
 function signedScheduleAmount(line: string): number | undefined {
   const amt = scheduleLineAmount(line);
   if (amt === undefined) return undefined;
@@ -134,14 +141,14 @@ export function scheduleLLine1CashAmount(line: string): number | undefined {
     .filter((n): n is number => {
       if (n === null) return false;
       const abs = Math.abs(n);
-      return isReasonableMoneyAmount(abs) && !isFormReferenceNumber(abs) && abs > 99;
+      return isKeepableWorksheetAmountOnLine(abs, normalized);
     });
   if (commaAmounts.length >= 2) return commaAmounts[commaAmounts.length - 1]!;
   if (commaAmounts.length === 1) return commaAmounts[0]!;
 
   const nums = lineMoneyTokens(normalized).filter((n) => {
     const abs = Math.abs(n);
-    return abs > 99 && abs !== 1 && isReasonableMoneyAmount(abs) && !isFormReferenceNumber(abs);
+    return isKeepableWorksheetAmountOnLine(abs, normalized);
   });
   if (nums.length >= 2) return nums[nums.length - 1]!;
   return nums[0];
@@ -149,27 +156,14 @@ export function scheduleLLine1CashAmount(line: string): number | undefined {
 
 function pickScheduleLGross(row: string): number | undefined {
   const cleaned = row.replace(/(\d{1,3}),\s+(\d{3})/g, "$1,$2");
-  const amounts: number[] = [];
-  for (const m of cleaned.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?\b|\d{5,8}\b/g)) {
-    const n = parseMoney(m[0]);
-    if (n === null) continue;
-    const abs = Math.abs(n);
-    // Digit-run length ≥5 = Schedule L gross cell grammar (not a $10k floor).
-    if (!isReasonableMoneyAmount(abs) || isFormReferenceNumber(abs) || abs <= 99) continue;
-    if (!/,/.test(m[0]) && String(abs).length < 5) continue;
-    amounts.push(abs);
-  }
+  const amounts = lineMoneyTokens(cleaned)
+    .map(Math.abs)
+    .filter((amount) => isKeepableWorksheetAmountOnLine(amount, cleaned));
   if (amounts.length >= 2) {
     // Schedule L 10a: beginning | end — workbook uses end-of-year (last column).
     return amounts[amounts.length - 1]!;
   }
   if (amounts.length) return amounts[0]!;
-  const tokens = lineMoneyTokens(cleaned).filter((n) => {
-    const abs = Math.abs(n);
-    return abs > 99 && isReasonableMoneyAmount(abs) && !isFormReferenceNumber(abs);
-  });
-  if (tokens.length >= 2) return Math.abs(tokens[tokens.length - 1]!);
-  if (tokens.length) return Math.abs(tokens[0]!);
   const amt = scheduleLineAmount(cleaned);
   return amt !== undefined && isReasonableMoneyAmount(amt) ? Math.abs(amt) : undefined;
 }
@@ -189,9 +183,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       const inBlock = scanText === schedBlock;
       const score =
         (inBlock ? 2 : 0) +
-        (/\d{1,3}(?:,\d{3})+/.test(line) ? 2 : 0) +
-        (amt >= 5_000 ? 2 : 0) +
-        Math.min(2, Math.log10(Math.max(amt, 1)));
+        (/\d{1,3}(?:,\d{3})+/.test(line) ? 2 : 0);
       if (!bestCash || score > bestCash.score) bestCash = { value: amt, score };
     }
   }
@@ -225,7 +217,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       .filter((n): n is number => {
         if (n === null) return false;
         const abs = Math.abs(n);
-        return abs > 99 && isReasonableMoneyAmount(abs) && !isFormReferenceNumber(abs);
+        return isKeepableWorksheetAmountOnLine(abs, line10b);
       });
     const acc =
       commaNums.length >= 2
@@ -279,10 +271,89 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     out.sources.accumulated_depreciation = "Schedule L line 10b (fully depreciated)";
   }
 
+  // Federal Asset Report grand totals — accumulated (end of year) = prior + current columns.
+  // Exact identities only: the cost column must equal line 10a gross; a lone 10b token equal
+  // to cost − accum is the net-book cell (OCR dropped the accum column), not accumulated dep.
+  const assetReportTotals = (() => {
+    for (const section of text.matchAll(/federal\s+asset\s+report[\s\S]{0,2500}/gi)) {
+      for (const raw of section[0].split(/\n/)) {
+        const row = raw.replace(/\s+/g, " ").trim();
+        if (!/^grand totals?\b/i.test(row) || /^net\b/i.test(row)) continue;
+        const nums = (row.match(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g) ?? [])
+          .map((t) => parseMoney(t))
+          .filter((n): n is number => n !== null && n > 0 && isReasonableMoneyAmount(n));
+        if (nums.length < 3) continue;
+        const cost = Math.round(nums[0]!);
+        const accum = Math.round(nums[nums.length - 2]! + nums[nums.length - 1]!);
+        if (accum <= 0 || accum > cost) continue;
+        return { cost, accum };
+      }
+    }
+    return undefined;
+  })();
+  if (assetReportTotals) {
+    const gfa = out.values.gross_fixed_assets;
+    const acc = out.values.accumulated_depreciation;
+    const costMatchesGross = gfa !== undefined && Math.round(gfa) === assetReportTotals.cost;
+    if (costMatchesGross) {
+      if (acc === undefined) {
+        out.values.accumulated_depreciation = assetReportTotals.accum;
+        out.confidence.accumulated_depreciation = 97;
+        out.sources.accumulated_depreciation = "Federal Asset Report (prior + current)";
+      } else if (Math.round(gfa! - assetReportTotals.accum) === Math.round(acc)) {
+        out.values.accumulated_depreciation = assetReportTotals.accum;
+        out.confidence.accumulated_depreciation = 98;
+        out.sources.accumulated_depreciation =
+          "Schedule L line 10b net book (accum from Federal Asset Report)";
+      }
+    } else if (
+      gfa !== undefined &&
+      Math.round(gfa) > 0 &&
+      Math.round(gfa) < 10_000 &&
+      assetReportTotals.cost > Math.round(gfa) &&
+      String(assetReportTotals.cost).endsWith(String(Math.round(gfa)))
+    ) {
+      // OCR occasionally drops leading digits on Schedule L 10a (e.g. 144,991 -> 991).
+      // When Federal Asset Report cost ends with that token, recover exact gross/accum pair.
+      out.values.gross_fixed_assets = assetReportTotals.cost;
+      out.confidence.gross_fixed_assets = Math.max(out.confidence.gross_fixed_assets ?? 98, 98);
+      out.sources.gross_fixed_assets = "Schedule L line 10a (recovered from Federal Asset Report cost)";
+      if (
+        acc === undefined ||
+        acc <= 0 ||
+        (Math.round(acc) < assetReportTotals.accum && Math.round(acc) < assetReportTotals.cost)
+      ) {
+        out.values.accumulated_depreciation = assetReportTotals.accum;
+        out.confidence.accumulated_depreciation = Math.max(
+          out.confidence.accumulated_depreciation ?? 97,
+          97,
+        );
+        out.sources.accumulated_depreciation = "Federal Asset Report (prior + current)";
+      }
+    } else if (gfa === undefined && acc === undefined) {
+      // Schedule L 10a/10b unreadable — fill both from the asset report totals.
+      out.values.gross_fixed_assets = assetReportTotals.cost;
+      out.confidence.gross_fixed_assets = 95;
+      out.sources.gross_fixed_assets = "Federal Asset Report cost total";
+      out.values.accumulated_depreciation = assetReportTotals.accum;
+      out.confidence.accumulated_depreciation = 95;
+      out.sources.accumulated_depreciation = "Federal Asset Report (prior + current)";
+    }
+  }
+
   for (const row of text.split(/\n/)) {
     if (!/13a\s+intangible/i.test(row)) continue;
+    if (/[|[\]~]\s*0\]?\s*$/.test(row)) {
+      out.values.gross_intangible_assets = 0;
+      out.confidence.gross_intangible_assets = 98;
+      out.sources.gross_intangible_assets = "Schedule L line 13a (explicit zero)";
+      break;
+    }
     const gross = scheduleLineAmount(row);
-    if (gross === undefined) continue;
+    if (gross === undefined || !isKeepableWorksheetAmountOnLine(gross, row)) continue;
+    // The amount must occupy the end cell. This rejects OCR fragments such as
+    // `13a Intangible ... 71 1]`, where 71 is layout debris before a blank cell.
+    if (!amountOccupiesEndCell(row, gross)) continue;
     out.values.gross_intangible_assets = Math.round(gross);
     out.confidence.gross_intangible_assets = 98;
     out.sources.gross_intangible_assets = "Schedule L line 13a";
@@ -297,14 +368,23 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       const row = block[i];
       if (i > 0 && /^14\b|other assets/i.test(row)) break;
       if (/less\s+accumulated\s+amort/i.test(row)) break;
+      if (/[|[\]~]\s*0\]?\s*$/.test(row)) {
+        out.values.gross_intangible_assets = 0;
+        out.confidence.gross_intangible_assets = source.includes("hi-dpi") ? 96 : 97;
+        out.sources.gross_intangible_assets = `${source} (explicit zero)`;
+        break;
+      }
       const amt = scheduleLineAmount(row);
-      if (amt !== undefined && amt > 0) {
+      if (amt !== undefined && amt > 0 && amountOccupiesEndCell(row, amt)) {
         out.values.gross_intangible_assets = Math.round(amt);
         out.confidence.gross_intangible_assets = source.includes("hi-dpi") ? 96 : 97;
         out.sources.gross_intangible_assets = source;
         break;
       }
-      if (i > 0 && /^\s*\d[\d,]{5,}\s*$/.test(row.trim())) {
+      if (
+        i > 0 &&
+        /^\s*\$?(?:\d{1,3}(?:,\d{3})+|\d+\.\d{2})\s*$/.test(row.trim())
+      ) {
         const lone = scheduleLineAmount(row.trim());
         if (lone !== undefined && lone > 0) {
           out.values.gross_intangible_assets = Math.round(lone);
@@ -393,12 +473,15 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       return false;
     }
     if (
-      /schedule\s*k|shareholder|box\s*17|125,?925|income\s*\(los|two\s*year|comparison|ending\s+liab|enci?ng\s+liab/i.test(
+      /schedule\s*k|shareholder|box\s*17|income\s*\(los|two\s*year|comparison|ending\s+liab|enci?ng\s+liab/i.test(
         line,
       )
     ) {
       return false;
     }
+    // Statement caption headers ("Statement 6 - Form 1120-S, Page 4, Schedule L,
+    // Line 18 - …") carry no amount cell — only "Page N" crumbs parse as money.
+    if (/schedule\s+l\W{0,15}line\s*18/i.test(line)) return false;
     return scheduleLineAmount(line) !== undefined;
   });
   oclCandidates.sort((a, b) => {
@@ -412,7 +495,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
   const oclLine = oclCandidates[0];
   if (oclLine) {
     const amt = scheduleLineAmount(oclLine);
-    if (amt !== undefined) {
+    if (amt !== undefined && isKeepableWorksheetAmountOnLine(amt, oclLine)) {
       out.values.other_current_liabilities = Math.round(amt);
       out.confidence.other_current_liabilities = 97;
       out.sources.other_current_liabilities = "Schedule L line 18";
@@ -434,8 +517,10 @@ export function extractScheduleLFields(text: string): FieldExtraction {
   });
   const notesLine = notesCandidates[0];
   if (notesLine) {
-    const amt = scheduleLineAmount(notesLine);
-    if (amt !== undefined) {
+    // Caption "1 year or more" is not a dollar cell — strip before money parse.
+    const notesMoneyLine = notesLine.replace(/\b1\s*year\s*or\s*more\b/gi, " ");
+    const amt = scheduleLineAmount(notesMoneyLine);
+    if (amt !== undefined && amt > 99 && isKeepableWorksheetAmountOnLine(amt, notesMoneyLine)) {
       out.values.notes_minus_short_term = Math.round(amt);
       out.confidence.notes_minus_short_term = 97;
       out.sources.notes_minus_short_term = "Schedule L line 20";
@@ -450,7 +535,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     if (/^\s*23\b/i.test(line) && /(?:paid.?in|p[aaoi]+(?:c|ck)?k?\s*in)\s+capital|addition.*capital/i.test(line)) {
       const commaNums = (line.replace(/(\d{1,3}),\s+(\d{3})/g, "$1,$2").match(/\d{1,3}(?:,\d{3})+/g) ?? [])
         .map((r) => parseMoney(r))
-        .filter((n): n is number => n !== null && isKeepableWorksheetAmount(n));
+        .filter((n): n is number => n !== null && isKeepableWorksheetAmountOnLine(n, line));
       const amt = commaNums.length ? commaNums[commaNums.length - 1]! : signedScheduleAmount(line);
       if (amt !== undefined) apic = amt;
     }
@@ -468,7 +553,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
   for (const row of text.split(/\n/)) {
     const line = row.replace(/\s+/g, " ").trim();
     if (/schedule\s+l\s*[=]|schedule\s+m-[23]|difference|page\s*1|screen\s+table/i.test(line)) continue;
-    // Preparer packs: "BALANCE … SCHEDULE L, LINE 24, COLUMN (D) 4,248,685."
+    // Preparer packs: "BALANCE … SCHEDULE L, LINE 24, COLUMN (D) 1,234,567."
     // — not only a leading "24" form row (those are often UI crumbs).
     const colD = /schedule\s+l[,\s]+line\s*24[,\s]+column\s*\(D\)/i.test(line);
     const line24Lead = /^\s*24\b/i.test(line);
@@ -476,7 +561,8 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     if (!colD && !line24Lead && !retained) continue;
     if (/schedule\s*m-?2|line\s*24.*attach/i.test(row) && !retained && !colD) continue;
     const amt = scheduleLineAmount(row);
-    if (amt === undefined || amt <= 0 || !isKeepableWorksheetAmount(amt)) continue;
+    if (amt === undefined || amt <= 0 || !isKeepableWorksheetAmountOnLine(amt, line)) continue;
+    if (Math.abs(Math.round(amt)) <= 99) continue;
     const score =
       (colD ? 12 : 0) +
       (line24Lead ? 3 : 0) +
@@ -502,7 +588,8 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       const amt = scheduleLCapitalStockAmount(line);
       if (
         amt !== undefined &&
-        (NOMINAL_PAR_AMOUNTS.has(Math.round(Math.abs(amt))) || isKeepableWorksheetAmount(amt))
+        (NOMINAL_PAR_AMOUNTS.has(Math.round(Math.abs(amt))) ||
+          isKeepableWorksheetAmountOnLine(amt, line))
       ) {
         out.values.common_stock = Math.round(amt);
         out.confidence.common_stock = 97;
@@ -512,7 +599,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     if (/^\s*17\b/i.test(line) && /less\s+than\s+1\s+year|payable\s+in\s+less|payabl\w*less|mortgages?.{0,12}notes.{0,12}bonds.{0,12}payabl/i.test(line)) {
       const amt = scheduleLine17Amount(line);
       // Reject calendar-year crumbs mistaken as dollars (Form years ≠ line 17 LTD).
-      if (amt !== undefined && isKeepableWorksheetAmount(amt)) {
+      if (amt !== undefined && isKeepableWorksheetAmountOnLine(amt, line)) {
         const prev = out.values.current_portion_ltd;
         if (prev === undefined || amt < prev) {
           out.values.current_portion_ltd = Math.round(amt);
@@ -538,8 +625,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     // Prefer Schedule L line 18 when it already has dollars that disagree with the statement
     // TOTAL (exact). Allow stmt overlay when Schedule L is missing or a line-number crumb.
     const schedIsCrumb =
-      schedLOcl !== undefined &&
-      (Math.abs(Math.round(schedLOcl)) <= 99 || isFormReferenceNumber(Math.abs(schedLOcl)));
+      schedLOcl !== undefined && isFormReferenceNumber(Math.abs(schedLOcl));
     if (
       schedLOcl !== undefined &&
       !schedIsCrumb &&
@@ -558,11 +644,14 @@ export function extractScheduleLFields(text: string): FieldExtraction {
     if (!/other\s+ass|ot\w*\s+ass|ofer\s+ass|ter\s+ass|stmt\s*4/i.test(row)) continue;
     const amt = scheduleLineAmount(row);
     if (amt === undefined) continue;
+    // A blank Schedule L row often yields its leading IRS line number as the only
+    // numeric token. Keep explicit zero or keepable dollars, never the row number.
+    if (amt !== 0 && !isKeepableWorksheetAmountOnLine(amt, row)) continue;
     const score =
       (/stmt|attach|statemen/i.test(row) ? 2 : 0) +
       (/\b14\b/i.test(row) ? 2 : 0) +
       (/other\s+ass/i.test(row) ? 1 : 0) +
-      (amt === 0 ? 0 : isKeepableWorksheetAmount(amt) ? 1 : -2);
+      (amt === 0 ? 0 : isKeepableWorksheetAmountOnLine(amt, row) ? 1 : -2);
     if (!best14 || score > best14.score) best14 = { value: amt, score };
   }
   if (best14 && best14.value > 0) {
@@ -613,8 +702,7 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       if (endTotal !== undefined) {
         const schedLOcl = out.values.other_current_liabilities;
         const schedIsCrumb =
-          schedLOcl !== undefined &&
-          (Math.abs(Math.round(schedLOcl)) <= 99 || isFormReferenceNumber(Math.abs(schedLOcl)));
+          schedLOcl !== undefined && isFormReferenceNumber(Math.abs(schedLOcl));
         if (schedLOcl === undefined || schedIsCrumb) {
           setStmtTotal(out, "other_current_liabilities", endTotal, "Statement 5 total");
         }
@@ -631,11 +719,10 @@ export function extractScheduleLFields(text: string): FieldExtraction {
       if (totalLine) {
         const nums = lineMoneyTokens(totalLine);
         const endTotal = nums.length >= 2 ? nums[nums.length - 1] : scheduleLineAmount(totalLine);
-        if (endTotal !== undefined && isKeepableWorksheetAmount(endTotal)) {
+        if (endTotal !== undefined && isKeepableWorksheetAmountOnLine(endTotal, totalLine)) {
           const schedLOcl = out.values.other_current_liabilities;
           const schedIsCrumb =
-            schedLOcl !== undefined &&
-            (Math.abs(Math.round(schedLOcl)) <= 99 || isFormReferenceNumber(Math.abs(schedLOcl)));
+            schedLOcl !== undefined && isFormReferenceNumber(Math.abs(schedLOcl));
           if (schedLOcl === undefined || schedIsCrumb) {
             setStmtTotal(out, "other_current_liabilities", endTotal, "Statement (Line 18) total scan");
           }
@@ -661,5 +748,7 @@ export function scanStatementLine18Total(text: string): number | undefined {
   if (!totalLine) return undefined;
   const nums = lineMoneyTokens(totalLine);
   const endTotal = nums.length >= 2 ? nums[nums.length - 1] : scheduleLineAmount(totalLine);
-  return endTotal !== undefined && isKeepableWorksheetAmount(endTotal) ? Math.round(endTotal) : undefined;
+  return endTotal !== undefined && isKeepableWorksheetAmountOnLine(endTotal, totalLine)
+    ? Math.round(endTotal)
+    : undefined;
 }

@@ -13,9 +13,6 @@ export const SCANNED_EMBEDDED_TEXT_THRESHOLD = 250;
 /** Page count above this → warn about long OCR time. */
 export const WARN_PAGE_COUNT = 80;
 
-/** Primary fields filled below this ratio → incomplete parse warning. */
-export const INCOMPLETE_PRIMARY_FILL_RATIO = 0.45;
-
 export function maxFilesPerApiRequest(): number {
   return MAX_FILES_PER_REQUEST;
 }

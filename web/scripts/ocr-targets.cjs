@@ -34,13 +34,23 @@ function fastHeuristicPages(total) {
   return uniqueSorted(out);
 }
 
-function capPageTargets(targets, max) {
+function capPageTargets(targets, max, protectedPages = []) {
   if (!max || max <= 0 || targets.length <= max) return targets;
   const sorted = uniqueSorted(targets);
   const total = sorted[sorted.length - 1];
   const head = sorted.filter((p) => p <= 12);
   const tail = sorted.filter((p) => p >= Math.max(total - 12, 1));
-  const picked = new Set([...head, ...tail]);
+  const picked = new Set();
+  // Attachment/statement keyword pages carry the paste-critical detail — keep them
+  // ahead of positional head/tail bands when the cap binds.
+  for (const p of protectedPages) {
+    if (picked.size >= max) break;
+    if (sorted.includes(p)) picked.add(p);
+  }
+  for (const p of [...head, ...tail]) {
+    if (picked.size >= max) break;
+    picked.add(p);
+  }
   for (const p of sorted) {
     if (picked.size >= max) break;
     picked.add(p);

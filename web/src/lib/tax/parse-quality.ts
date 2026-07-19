@@ -1,7 +1,7 @@
 import { TAX_ATTACHMENT_FIELD_IDS } from "@/lib/workbook-comparison-fixtures";
 import { TAX_WORKBOOK_ROWS } from "@/lib/tax-workbook";
 import type { ParsedTaxYear } from "@/lib/api/types";
-import { INCOMPLETE_PRIMARY_FILL_RATIO } from "./upload-policy";
+import { OPERATING_EXPENSE_SLOT_IDS } from "./opex-slot-ids";
 
 const PRIMARY_INPUT_IDS = TAX_WORKBOOK_ROWS.filter(
   (r) => r.excelBehavior === "input" && !TAX_ATTACHMENT_FIELD_IDS.has(r.id),
@@ -25,11 +25,15 @@ export function assessParseQuality(values: Record<string, number | undefined>): 
   }
   const primaryTotal = PRIMARY_INPUT_IDS.length;
   const fillRatio = primaryTotal ? primaryFilled / primaryTotal : 0;
+  const incomplete =
+    values.sales === undefined ||
+    values.cogs === undefined ||
+    OPERATING_EXPENSE_SLOT_IDS.every((id) => values[id] === undefined);
   return {
     primaryFilled,
     primaryTotal,
     fillRatio,
-    incomplete: fillRatio < INCOMPLETE_PRIMARY_FILL_RATIO,
+    incomplete,
     missingLabels: missingLabels.slice(0, 8),
   };
 }

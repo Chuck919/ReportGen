@@ -39,7 +39,7 @@ const { columns: merged, warnings } = mergeParsedTaxYears(
     {
       year: 2024,
       values: { sales: 200 },
-      clientKey: "kc fudge",
+      clientKey: "kc fudge company",
       clientName: "KC Fudge LLC",
       filename: "kcf.pdf",
       source: "test",
@@ -53,7 +53,7 @@ const sameCo = mergeParsedTaxYears(merged, [
   {
     year: 2023,
     values: { sales: 150 },
-    clientKey: "kc fudge",
+    clientKey: "kc fudge company",
     clientName: "KC Fudge LLC",
     filename: "kcf-2023.pdf",
     source: "test",

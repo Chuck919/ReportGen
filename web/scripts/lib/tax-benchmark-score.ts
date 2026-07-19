@@ -1,7 +1,5 @@
-import {
-  TAX_ATTACHMENT_FIELD_IDS,
-  WORKBOOK_COMPARISON_FIXTURES,
-} from "../../src/lib/workbook-comparison-fixtures";
+import { TAX_ATTACHMENT_FIELD_IDS } from "../../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./workbook-comparison-fixtures";
 import { OPERATING_EXPENSE_SLOT_IDS } from "../../src/lib/tax/operating-expenses";
 import { actualTop8Amounts, resolveExpectedTop8Amounts, type FixtureWithTop8 } from "../../src/lib/tax/fixture-top8";
 import { TAX_WORKBOOK_ROWS } from "../../src/lib/tax-workbook";
@@ -401,8 +399,11 @@ export function scoreOpexBenchmark(
   let n = top8.n;
   const misses = [...top8.misses];
 
-  if (expectedTop8.length > 0 && expectedTop8.length < 8) {
-    misses.push(`fixture_incomplete: top8Amounts has ${expectedTop8.length}/8 amounts`);
+  // A fixture with 8 listed entries where some seats are blank (0) is complete —
+  // only flag when the integrator sheet truly lists fewer than 8 rows.
+  const listedTop8 = fixture.top8Amounts?.length ?? 0;
+  if (listedTop8 > 0 && listedTop8 < 8) {
+    misses.push(`fixture_incomplete: top8Amounts has ${listedTop8}/8 amounts`);
   }
 
   const otherExp = fixture.values.other_operating_expenses;

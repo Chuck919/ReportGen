@@ -192,14 +192,10 @@ type CrossRefCandidate = {
   family: "comparison" | "form" | "statement" | "form4562";
 };
 
-function isPlausibleComparisonCandidate(
-  field: "depreciation" | "amortization",
-  value: number,
-): boolean {
+function isPlausibleComparisonCandidate(value: number): boolean {
   const abs = Math.abs(value);
   if (abs >= 2020 && abs <= 2035) return false;
   if (abs === 1986 || abs === 1987) return false;
-  if (abs <= 99 && value !== 0) return false;
   if (value !== 0 && !isReasonableMoneyAmount(value)) return false;
   return true;
 }
@@ -214,7 +210,7 @@ function pickCrossReferenced(
     (c) =>
       (c.value === 0 || isReasonableMoneyAmount(c.value)) &&
       !matchesBalanceSheetTrap(c.value, resolved, balanceTraps) &&
-      (c.family !== "comparison" || isPlausibleComparisonCandidate(field, c.value)),
+      (c.family !== "comparison" || isPlausibleComparisonCandidate(c.value)),
   );
   if (!valid.length) return undefined;
 

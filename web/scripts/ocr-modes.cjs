@@ -28,7 +28,7 @@ const BALANCED_PRESET = {
   minScoreGain: 1.75,
   skipHiDpiMinConf: 74,
   skipPhase3UnlessCritical: true,
-  // Keep phase1 keyword scan — skipping it regressed live KCF/Arizona accuracy.
+  // Keep phase1 keyword scan — skipping it regressed live holdout accuracy.
   skipPhase1QuickScan: false,
   useFastHeuristicPages: false,
   // Local machines: 2 workers keeps ~5 min balanced on typical returns; 1 worker often 8–15+ min.
@@ -100,7 +100,7 @@ function resolveOcrMode(mode) {
   return resolved;
 }
 
-/** Scale phase-2 page cap down on very large PDFs (e.g. 179pp Arizona) to hold ~5 min balanced. */
+/** Scale phase-2 page cap down on very large PDFs (100+ pages) to hold ~5 min balanced. */
 function effectivePhase2Cap(mode, totalPages, profile) {
   const base = profile === "benchmark" ? 12 : mode.maxPhase2Pages || 36;
   const largeAt = mode.largeDocPages ?? 100;

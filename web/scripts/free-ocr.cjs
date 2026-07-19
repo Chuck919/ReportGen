@@ -196,8 +196,12 @@ function phase1ScanPages(total, prof) {
   // On 100+ page returns, phase-1 scans only the opening band — keyword hits there
   // plus phase-2 capPageTargets (head+tail) still reach Stmt/Schedule L attachments.
   if (total > 100) return head;
-  const heuristic = heuristicPages(total, prof);
-  return uniqueSorted([...head, ...heuristic]);
+  // ≤100 pages: quick-scan every page. Head/mid/tail bands left a blind window between
+  // the form pages and the 30% mid band, so Federal Statements placed there (preparer
+  // layout varies) were never keyword-detected and phase-2 skipped them entirely.
+  const all = [];
+  for (let i = 1; i <= total; i++) all.push(i);
+  return all;
 }
 
 async function createOcrWorker(profile, scale) {
@@ -392,8 +396,10 @@ async function main() {
   const forcePages = parseForcePages(process.env.FREE_OCR_FORCE_PAGES);
   let interesting = new Set();
   let attachmentCandidates = new Set();
+  let scheduleLCandidates = new Set();
   let quickPageCount = 0;
   let heuristicOnlyTargets = null;
+  let phase1Retried = false;
   const quickPageText = new Map();
   let targets;
 
@@ -432,11 +438,43 @@ async function main() {
       quickPageText.set(page.pageNumber, t);
       if (KEYWORD_RE.test(t)) interesting.add(page.pageNumber);
       if (ATTACHMENT_KW.test(t)) attachmentCandidates.add(page.pageNumber);
+      if (SCHEDULE_L_KW.test(t)) scheduleLCandidates.add(page.pageNumber);
       return null;
     });
     logs.push(
       `phase1 scan ${Date.now() - tScan}ms ocrPages=${scanPages.length}/${quickPageCount} keywordPages=${interesting.size} attachmentCandidates=${attachmentCandidates.size}`,
     );
+
+    if (interesting.size === 0) {
+      // Zero keyword hits on a tax PDF means the low-scale quick render was illegible
+      // (scanned/large-format pages OCR to empty text), not that keywords are absent.
+      // Retry once at a higher scale before falling back to blind positional heuristics —
+      // Stmt attachments / 1125-E often sit in the head↔mid gap heuristics never cover.
+      phase1Retried = true;
+      const retryScale = Math.max(0.75, quickScale * 1.8);
+      mark(`phase1 retry getScreenshot quickScale=${retryScale} (0 keyword hits)`);
+      const p1b = new PDFParse({ data: buffer });
+      const quickB = await p1b.getScreenshot({
+        scale: retryScale,
+        imageDataUrl: false,
+        imageBuffer: true,
+      });
+      await p1b.destroy?.();
+      const scanPagesB = quickB.pages.filter((p) => scanPageNums.includes(p.pageNumber));
+      const tScanB = Date.now();
+      await processPagesParallel(scanPagesB, phase1Workers, profile, retryScale, async (worker, page) => {
+        const r = await worker.recognize(Buffer.from(page.data));
+        const t = r.data.text || "";
+        quickPageText.set(page.pageNumber, t);
+        if (KEYWORD_RE.test(t)) interesting.add(page.pageNumber);
+        if (ATTACHMENT_KW.test(t)) attachmentCandidates.add(page.pageNumber);
+        if (SCHEDULE_L_KW.test(t)) scheduleLCandidates.add(page.pageNumber);
+        return null;
+      });
+      logs.push(
+        `phase1 retry scan ${Date.now() - tScanB}ms keywordPages=${interesting.size} attachmentCandidates=${attachmentCandidates.size}`,
+      );
+    }
   }
 
   if (!forcePages.length) {
@@ -447,6 +485,16 @@ async function main() {
       const total = quickPageCount || (await readPdfPageTotal(buffer));
       targets = heuristicPages(total, profile);
       logs.push(`phase1 had 0 keyword hits — heuristic ${targets.length} of ${total} pages`);
+    } else if (phase1Retried) {
+      // Quick render was illegible on the first pass, so retry keyword hits are incomplete
+      // (head form/Schedule L pages often still OCR blank at retry scale). Union with the
+      // positional heuristic band; the phase-2 cap keeps attachment pages protected.
+      const total = quickPageCount || (await readPdfPageTotal(buffer));
+      const merged = uniqueSorted([...targets, ...heuristicPages(total, profile)]);
+      logs.push(
+        `phase1 retry keyword pages ${targets.length} + heuristic union -> ${merged.length}`,
+      );
+      targets = merged;
     }
 
     if (profile === "tax" && attachmentCandidates.size) {
@@ -467,7 +515,11 @@ async function main() {
     const maxPhase2 = Number(process.env.FREE_OCR_MAX_PHASE2_PAGES ?? defaultPhase2Cap);
     if (maxPhase2 > 0 && targets.length > maxPhase2) {
       logs.push(`capped phase2 OCR ${targets.length} -> ${maxPhase2} (FREE_OCR_MAX_PHASE2_PAGES)`);
-      targets = capPageTargets(targets, maxPhase2);
+      targets = capPageTargets(
+        targets,
+        maxPhase2,
+        uniqueSorted([...attachmentCandidates, ...scheduleLCandidates]),
+      );
     }
   }
 

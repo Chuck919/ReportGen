@@ -13,8 +13,7 @@ import type { ResolvedFields } from "./merge";
 import {
   formLineAmount,
   isForm1120Line,
-  isFormReferenceNumber,
-  isReasonableMoneyAmount,
+  isKeepableWorksheetAmountOnLine,
   lineMoneyTokens,
   lineTailAmount,
   scheduleLineAmount,
@@ -22,29 +21,21 @@ import {
   unambiguousFormLineAmount,
 } from "./money";
 import { computeWorkbookFormulas } from "@/lib/tax/workbook-formulas";
+import { OPERATING_EXPENSE_SLOT_IDS } from "@/lib/tax/opex-slot-ids";
 import {
   pickComparisonColumnIndex,
   shrinkToYearColumns,
 } from "@/lib/two-year-comparison-parser";
 
-const TOP8_IDS = [
-  "officer_compensation",
-  "salaries_wages",
-  "advertising",
-  "rent",
-  "taxes_licenses",
-  "bank_credit_card",
-  "professional_fees",
-  "utilities",
-] as const;
+const TOP8_IDS = OPERATING_EXPENSE_SLOT_IDS;
 
 function n(values: Record<string, number | undefined>, id: string): number {
   const v = values[id];
   return typeof v === "number" && Number.isFinite(v) ? Math.round(v) : 0;
 }
 
-/** Percentage-based money match (no fixed dollar floors). */
-export function pnlAmountsClose(a: number, b: number, _pct = 0.005): boolean {
+/** Dollar-exact P&L agreement after workbook rounding. */
+export function pnlAmountsEqual(a: number, b: number): boolean {
   return Math.round(a) === Math.round(b);
 }
 
@@ -152,7 +143,8 @@ export function scanFormGrossProfit(text: string, targetYear?: number): number |
     if (!hasLine3 && !/gross\s+profit\s+subtract/i.test(line)) continue;
     const amt = pickEndColumnAmount(line, text, targetYear);
     if (amt === undefined || amt <= 0) continue;
-    // Gross profit is a material P&L total — reject tiny OCR crumbs via sales-relative check later.
+    const abs = Math.abs(Math.round(amt));
+    if (!isKeepableWorksheetAmountOnLine(abs, line)) continue;
     hits.push(amt);
   }
   if (!hits.length) return undefined;
@@ -200,12 +192,7 @@ function isFormTaggedOrdinaryIncomeLine(line: string): boolean {
 /** Amount on a Form-tagged ordinary-income line — never year-column / comparison picking. */
 function pickFormOrdinaryIncomeAmount(line: string): number | undefined {
   const keepable = (n: number) => {
-    const abs = Math.abs(Math.round(n));
-    if (abs < 1 || !isReasonableMoneyAmount(abs)) return false;
-    if (isFormReferenceNumber(abs)) return false;
-    if (abs >= 1990 && abs <= 2035) return false;
-    if (abs <= 99) return false; // line-number crumbs
-    return true;
+    return isKeepableWorksheetAmountOnLine(n, line);
   };
   const tagged =
     formLineAmount(line, "22") ??
@@ -247,15 +234,16 @@ export function scanFormOrdinaryBusinessIncome(text: string, targetYear?: number
   if (!weighted.length) return undefined;
   const totals = new Map<number, number>();
   for (const h of weighted) totals.set(h.amount, (totals.get(h.amount) ?? 0) + h.weight);
+  // Highest form-tag evidence weight wins; larger amount only breaks exact weight ties.
+  // (No relative-size veto — that was a soft ratio choosing paste values.)
   const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
-  const top = ranked[0]![0];
-  const runner = ranked[1]?.[0];
-  if (runner !== undefined && top < runner * 0.2) return runner;
-  return top;
+  return ranked[0]![0];
 }
 
-export function countFilledTop8(values: Record<string, number | undefined>): number {
-  return TOP8_IDS.filter((id) => values[id] !== undefined).length;
+function hasCompleteTop8(values: Record<string, number | undefined>): boolean {
+  // Reverse math treats missing inputs as zero, so every paste seat must be explicit.
+  // A legitimate zero is complete; an undefined seat is not.
+  return TOP8_IDS.every((id) => values[id] !== undefined);
 }
 
 /**
@@ -269,7 +257,7 @@ export function deriveOtherOpexFromOrdinaryIncome(
   _sources?: Record<string, string | undefined>,
 ): number | undefined {
   if (values.sales === undefined || values.cogs === undefined) return undefined;
-  if (countFilledTop8(values) < 4) return undefined;
+  if (!hasCompleteTop8(values)) return undefined;
 
   const gp = Math.round(n(values, "sales") - n(values, "cogs"));
   const da = Math.round(n(values, "depreciation") + n(values, "amortization"));
@@ -280,7 +268,7 @@ export function deriveOtherOpexFromOrdinaryIncome(
   const otherExpenses = n(values, "other_expenses");
   // Same dollar amount sometimes lands in both income buckets — count once.
   let incomeAdd = ooi + otherIncome;
-  if (ooi > 0 && otherIncome > 0 && pnlAmountsClose(ooi, otherIncome)) {
+  if (ooi > 0 && otherIncome > 0 && pnlAmountsEqual(ooi, otherIncome)) {
     incomeAdd = otherIncome;
   }
 
@@ -288,8 +276,6 @@ export function deriveOtherOpexFromOrdinaryIncome(
   if (!Number.isFinite(opex)) return undefined;
   // Other opex can be zero; negative usually means inputs disagree — reject.
   if (opex < 0) return undefined;
-  const sales = values.sales;
-  if (sales !== undefined && sales > 0 && opex > sales) return undefined;
   return opex;
 }
 
@@ -300,7 +286,7 @@ export function impliedNetProfitBeforeTaxes(
   _sources?: Record<string, string | undefined>,
 ): number | undefined {
   if (values.sales === undefined || values.cogs === undefined) return undefined;
-  if (countFilledTop8(values) < 4) return undefined;
+  if (!hasCompleteTop8(values)) return undefined;
   const trial = { ...values, other_operating_expenses: otherOpex };
   const formulas = computeWorkbookFormulas(trial);
   return formulas.net_profit_before_taxes;
@@ -314,7 +300,7 @@ export function candidateClosesOrdinaryIncome(
 ): boolean {
   const npbt = impliedNetProfitBeforeTaxes(values, otherOpex, sources);
   if (npbt === undefined) return false;
-  return pnlAmountsClose(npbt, ordinaryIncome);
+  return pnlAmountsEqual(npbt, ordinaryIncome);
 }
 
 /**
@@ -340,7 +326,7 @@ export function applyOrdinaryIncomeReverseOpex(
 /**
  * Labeled Stmt itemized residual (office/supplies/telephone/travel/…).
  * Cross-year top-8 remapping often inflates paste overhead so Form-OI reverse
- * understates other_opex — never *shrink* that inventory with the plug. A larger
+ * understates other_opex — never *shrink* that inventory with a plug. A larger
  * plug may still apply when itemized under-counted crumbs (Form identity filled).
  */
 function isLabeledStmtDetailOtherOpexSource(source?: string): boolean {
@@ -348,16 +334,28 @@ function isLabeledStmtDetailOtherOpexSource(source?: string): boolean {
 }
 
 /**
+ * OD partition identity (stmtTOTAL − stmtInTop8 [+ form page-1 outside top-8]).
+ * Form-OI reverse must not replace this — workbook NPBT often disagrees with Form OI
+ * for reasons outside other_opex (GP, interest, DA), and a "closing" plug can be huge noise.
+ */
+function isStmtPartitionOtherOpexSource(source?: string): boolean {
+  return /stmt total\s*[−\-]\s*stmt lines in top-8|operating expenses \(stmt total/i.test(
+    source ?? "",
+  );
+}
+
+/**
  * Correct other_opex from Form ordinary income when the current residual fails identity.
  * Never touches top-8 slots. Guarded: only when derived closes Form OI and current does not.
  * Never shrink labeled Stmt itemized residuals with a smaller Form-OI plug.
+ * Never overwrite a closed OD stmt-partition residual.
  */
 export function applyOrdinaryIncomeReverseOpexFromAnchor(
   resolved: ResolvedFields,
   ordinaryIncome: number,
   _opts?: { allowOverwriteStmtResidual?: boolean },
 ): boolean {
-  if (countFilledTop8(resolved.values) < 6) return false;
+  if (!hasCompleteTop8(resolved.values)) return false;
   const derived = deriveOtherOpexFromOrdinaryIncome(
     resolved.values,
     ordinaryIncome,
@@ -369,16 +367,23 @@ export function applyOrdinaryIncomeReverseOpexFromAnchor(
   }
 
   const cur = resolved.values.other_operating_expenses;
-  if (cur !== undefined && pnlAmountsClose(cur, derived)) return false;
+  const curSource = resolved.sources?.other_operating_expenses;
+  if (cur !== undefined && pnlAmountsEqual(cur, derived)) return false;
   if (
     cur !== undefined &&
     candidateClosesOrdinaryIncome(resolved.values, cur, ordinaryIncome, resolved.sources)
   ) {
     return false;
   }
+  // OD partition answered other_opex. Never *grow* it with a Form-OI plug (arizona-scale
+  // P&L plugs can be huge when GP/interest disagree). Still allow a *smaller* Form-OI
+  // plug when the partition over-counted (kcf itemized under-exclusion → reverse shrink).
+  if (cur !== undefined && isStmtPartitionOtherOpexSource(curSource)) {
+    if (Math.round(derived) >= Math.round(cur)) return false;
+  }
   if (
     cur !== undefined &&
-    isLabeledStmtDetailOtherOpexSource(resolved.sources?.other_operating_expenses) &&
+    isLabeledStmtDetailOtherOpexSource(curSource) &&
     Math.round(derived) < Math.round(cur)
   ) {
     return false;
@@ -429,7 +434,7 @@ export function flagPnlIdentityFromAnchors(
   if (
     formGp !== undefined &&
     formulas.gross_profit !== undefined &&
-    !pnlAmountsClose(formGp, formulas.gross_profit)
+    !pnlAmountsEqual(formGp, formulas.gross_profit)
   ) {
     const msg = `Gross profit mismatch: form ${formGp.toLocaleString()} vs sales−COGS ${formulas.gross_profit.toLocaleString()}`;
     for (const id of ["sales", "cogs"] as const) {
@@ -444,14 +449,14 @@ export function flagPnlIdentityFromAnchors(
   const npbt = formulas.net_profit_before_taxes;
   const ni = formulas.net_income;
   const overhead = TOP8_IDS.reduce((s, id) => s + n(resolved.values, id), 0);
-  if (npbt !== undefined && !pnlAmountsClose(npbt, ordinaryIncome)) {
+  if (npbt !== undefined && !pnlAmountsEqual(npbt, ordinaryIncome)) {
     const gap = npbt - ordinaryIncome;
     const msg = `P&L does not close to Form ordinary income (workbook NPBT ${npbt.toLocaleString()} vs form ${ordinaryIncome.toLocaleString()}, gap ${gap.toLocaleString()}; top-8 sum ${overhead.toLocaleString()}, other_opex ${n(resolved.values, "other_operating_expenses").toLocaleString()})`;
     resolved.warnings.push(msg);
     if (resolved.values.other_operating_expenses !== undefined) {
       resolved.warnings.push(`other_operating_expenses may be wrong (gap ${gap.toLocaleString()})`);
     }
-  } else if (ni !== undefined && !pnlAmountsClose(ni, ordinaryIncome)) {
+  } else if (ni !== undefined && !pnlAmountsEqual(ni, ordinaryIncome)) {
     // When taxes/extras are zero, net income should also match ordinary income.
     const taxes = resolved.values.taxes_paid ?? 0;
     const extras =

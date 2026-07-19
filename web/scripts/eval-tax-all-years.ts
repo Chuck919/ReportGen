@@ -5,10 +5,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { PDFParse } from "pdf-parse";
-import {
-  TAX_ATTACHMENT_FIELD_IDS,
-  WORKBOOK_COMPARISON_FIXTURES,
-} from "../src/lib/workbook-comparison-fixtures";
+import { TAX_ATTACHMENT_FIELD_IDS } from "../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./lib/workbook-comparison-fixtures";
 import { parseTaxReturn } from "../src/lib/tax-return-parser";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";
 import { TAX_WORKBOOK_ROWS } from "../src/lib/tax-workbook";

@@ -7,10 +7,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PDFParse } from "pdf-parse";
-import {
-  TAX_ATTACHMENT_FIELD_IDS,
-  WORKBOOK_COMPARISON_FIXTURES,
-} from "../src/lib/workbook-comparison-fixtures";
+import { TAX_ATTACHMENT_FIELD_IDS } from "../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./lib/workbook-comparison-fixtures";
 import { parseTaxReturnFromText } from "../src/lib/tax-return/parse-from-text";
 import { runLocalOcr, type OcrMode } from "../src/lib/tax-return/local-ocr";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";

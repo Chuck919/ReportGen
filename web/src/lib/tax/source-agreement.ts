@@ -20,11 +20,6 @@ const FAMILY_PRIORITY: SourceFamily[] = [
   "other",
 ];
 
-/** Dollar-exact agreement only (charter) — legacy 2%/$1k slack removed. */
-export function withinTolerance(a: number, b: number, _pct = 0.02): boolean {
-  return Math.round(a) === Math.round(b);
-}
-
 export function valuesExactlyEqual(a: number, b: number): boolean {
   return Math.round(a) === Math.round(b);
 }
@@ -90,8 +85,6 @@ export function hasSourceDisagreement(snapshots: SourceSnapshot[]): boolean {
   return new Set(values).size > 1;
 }
 
-const MATERIAL_DISAGREEMENT_PCT = 0.08;
-
 /** Families treated as independent cross-check evidence (excludes OCR noise). */
 const CROSS_CHECK_FAMILIES = new Set<SourceFamily>([
   "form",
@@ -101,36 +94,21 @@ const CROSS_CHECK_FAMILIES = new Set<SourceFamily>([
 ]);
 
 function credibleCrossCheckSnapshots(snapshots: SourceSnapshot[]): SourceSnapshot[] {
-  return snapshots.filter(
-    (s) => CROSS_CHECK_FAMILIES.has(s.family) && s.confidence >= 70,
-  );
-}
-
-/** Largest relative percent gap between `chosen` and any alternate read. */
-export function largestDisagreementPercent(chosen: number, snapshots: SourceSnapshot[]): number {
-  let max = 0;
-  for (const snap of snapshots) {
-    if (valuesExactlyEqual(snap.value, chosen)) continue;
-    const pct = Math.abs(snap.value - chosen) / Math.max(Math.abs(chosen), 1);
-    if (pct > max) max = pct;
-  }
-  return max;
+  // Family provenance makes a read an independent cross-check. Parser confidence
+  // is metadata, not a threshold that can hide an exact-dollar disagreement.
+  return snapshots.filter((s) => CROSS_CHECK_FAMILIES.has(s.family));
 }
 
 /**
- * Material cross-family disagreement: a credible independent source disagrees by ≥8%
- * and fewer than two families corroborate the chosen value.
+ * Material cross-family disagreement: a credible independent source disagrees by
+ * at least one rounded dollar and fewer than two families corroborate the chosen value.
  * OCR reads and uncorroborated statement-only alternates are ignored.
  */
 export function hasMaterialDisagreement(chosen: number, snapshots: SourceSnapshot[]): boolean {
   const crossCheck = credibleCrossCheckSnapshots(snapshots);
   if (crossCheck.length < 2) return false;
   if (countAgreeingFamilies(chosen, crossCheck) >= 2) return false;
-  return crossCheck.some(
-    (s) =>
-      !valuesExactlyEqual(s.value, chosen) &&
-      Math.abs(s.value - chosen) / Math.max(Math.abs(chosen), 1) >= MATERIAL_DISAGREEMENT_PCT,
-  );
+  return crossCheck.some((s) => !valuesExactlyEqual(s.value, chosen));
 }
 
 export function pickBestSnapshot(snapshots: SourceSnapshot[]): SourceSnapshot {
@@ -236,16 +214,4 @@ export function resolveValuesFromSnapshots(
     fieldSources: outSources,
     fieldAlternates,
   };
-}
-
-/** @deprecated Use hasSourceDisagreement */
-export function hasTightSourceDisagreement(snapshots: SourceSnapshot[]): boolean {
-  return hasSourceDisagreement(snapshots);
-}
-
-/** @deprecated Use sourceDisagreementDetail */
-export function tightDisagreementDetail(snapshots: SourceSnapshot[]): string | undefined {
-  if (!hasSourceDisagreement(snapshots)) return undefined;
-  const best = pickBestSnapshot(snapshots);
-  return sourceDisagreementDetail(snapshots, best.value);
 }

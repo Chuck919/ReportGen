@@ -14,7 +14,6 @@ import {
   hasSourceDisagreement,
   pickBestSnapshot,
   valuesExactlyEqual,
-  withinTolerance,
 } from "../src/lib/tax/source-agreement";
 import { resolveFieldTrustTier } from "../src/lib/tax/field-trust-tier";
 
@@ -33,9 +32,8 @@ function assert(cond: boolean, msg: string) {
 
 console.log("=== reconcile tax year ===");
 
-assert(withinTolerance(1_000_000, 1_005_000), "within 2% tolerance");
-assert(!withinTolerance(1_000_000, 1_050_000), "outside tolerance");
 assert(valuesExactlyEqual(183_331, 183_331), "exact match");
+assert(!valuesExactlyEqual(1_000_000, 1_005_000), "relative closeness is not exact agreement");
 assert(!valuesExactlyEqual(183_331, 183_431), "one-digit mismatch is not equal");
 
 const cogsExceeds = reconcileTaxYear({
@@ -62,7 +60,10 @@ const junkAmort = reconcileTaxYear({
   confidence: { amortization: 99 },
   fieldSources: { amortization: "Form 1120-S line 14 (page 1 block)" },
 });
-assert(junkAmort.fieldTrustTier?.amortization === "low", "amortization 12 is low trust not green");
+assert(
+  junkAmort.fieldTrustTier?.amortization === "authoritative",
+  "small authoritative amortization is not rejected by a dollar floor",
+);
 
 const equitySnaps = [
   { family: "schedule-l" as const, value: 183_331, confidence: 92 },
@@ -133,13 +134,17 @@ const confirmedTsv = buildPasteTsv(
       year: 2024,
       values: { sales: 1_000_000, rent: 50_000 },
       fieldTrustTier: { sales: "multi-source", rent: "ocr-only" },
+      userVerifiedFields: { sales: true },
       source: "test",
     },
   ],
-  { confirmedOnly: true },
+  { confirmedOnly: true, includeLabels: true },
 );
 assert(confirmedTsv.includes("1000000.00"), "confirmed TSV includes verified sales with cents");
-assert(!confirmedTsv.includes("50000"), "confirmed TSV skips review rent");
+assert(
+  confirmedTsv.split("\n").some((line) => line.startsWith("Rent\t") && line === "Rent\t"),
+  "confirmed TSV skips unverified rent input",
+);
 
 const yoy = applyCrossYearFlags([
   { year: 2024, values: { sales: 1_000_000 }, source: "a" },

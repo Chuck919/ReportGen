@@ -32,34 +32,27 @@ function bankAmountsOnLine(line: string): number[] {
   });
 }
 
-/**
- * Score bank-fee candidates by labeled OD remainder + exact misc closure.
- * Soft residual/$/% bands removed — misc must dollar-equal the leftover or the
- * candidate is still admitted as a labeled bank line (lower score).
- */
-function scoreBankCandidate(
+/** Evaluate a labeled bank candidate by partition identity, without a score cutoff. */
+function evaluateBankCandidate(
   bank: number,
   prof: number,
   util: number,
   stmt2Total: number,
   misc: number[],
-): number {
+): { valid: boolean; exactMiscClosure: boolean } {
   // Structural: bank alone cannot be the whole Other-deductions total.
-  if (bank >= stmt2Total) return 0;
+  if (bank >= stmt2Total) return { valid: false, exactMiscClosure: false };
   const attachment = prof + util + bank;
-  if (attachment >= stmt2Total) return 0;
+  if (attachment >= stmt2Total) return { valid: false, exactMiscClosure: false };
   const residual = Math.round(stmt2Total - attachment);
-  if (residual < 1) return 0;
+  if (residual < 1) return { valid: false, exactMiscClosure: false };
 
   const miscRest = misc.filter((m) => Math.round(m) !== Math.round(bank));
   const miscSum = miscRest.reduce((s, n) => s + n, 0);
-  const miscExact =
+  const exactMiscClosure =
     miscRest.some((m) => Math.round(m) === residual) ||
     (miscSum >= 1 && Math.round(miscSum) === residual);
-
-  let score = 50;
-  if (miscExact) score += 40;
-  return Math.min(100, score);
+  return { valid: true, exactMiscClosure };
 }
 
 /** Pick Stmt 2 bank/credit-card line using bank-label vocabulary + Stmt total remainder. */
@@ -113,15 +106,30 @@ export function pickStmt2BankCreditCard(
   // Only labeled bank/merchant lines — do not promote unlabeled misc via stmt% bands.
   if (!candidates.size) return undefined;
 
-  let best: { bank: number; score: number } | undefined;
+  let best:
+    | { bank: number; exactMiscClosure: boolean; explicitExpenseCharge: boolean }
+    | undefined;
   for (const bank of candidates) {
-    let score = scoreBankCandidate(bank, prof, util, stmt2Total, misc);
-    if (expenseChargeBanks.has(bank)) score += 30;
-    if (!best || score > best.score) best = { bank, score };
+    const evidence = evaluateBankCandidate(bank, prof, util, stmt2Total, misc);
+    if (!evidence.valid) continue;
+    const pick = {
+      bank,
+      exactMiscClosure: evidence.exactMiscClosure,
+      explicitExpenseCharge: expenseChargeBanks.has(bank),
+    };
+    if (
+      !best ||
+      (pick.exactMiscClosure && !best.exactMiscClosure) ||
+      (pick.exactMiscClosure === best.exactMiscClosure &&
+        pick.explicitExpenseCharge &&
+        !best.explicitExpenseCharge)
+    ) {
+      best = pick;
+    }
   }
-  if (!best || best.score < 35) return undefined;
+  if (!best) return undefined;
 
-  const high = best.score >= 70;
+  const high = best.exactMiscClosure || best.explicitExpenseCharge;
   return {
     value: best.bank,
     confidence: high ? 92 : 74,

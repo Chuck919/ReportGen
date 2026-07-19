@@ -9,7 +9,6 @@ export type PoolExpenseLine = { label: string; amount: number; source?: string }
 export type IllogicalAmountReason =
   | "below_min_amount"
   | "unreasonable_digits"
-  | "exceeds_sales_ratio"
   | "collides_with_sales"
   | "collides_with_cogs"
   | "collides_with_gross_fixed_assets"
@@ -30,7 +29,6 @@ const ANCHOR_LABEL: Record<string, RegExp> = {
 /** Amount / anchor collision checks only — never rejects on label text alone for pool keep/drop. */
 export function diagnoseIllogicalAmount(
   line: PoolExpenseLine,
-  sales?: number,
   resolvedValues?: Record<string, number | undefined>,
 ): IllogicalAmountReason | undefined {
   const amount = Math.round(line.amount);
@@ -47,11 +45,12 @@ export function diagnoseIllogicalAmount(
   if (isMailingOrFormFooterNoise(label)) return "mailing_or_form_footer_noise";
   // Comparison opex field-rows are trusted even when OCR caption is anchor-like ("employment credits").
   if (!opexComparisonRow && isNonExpenseAnchorLabel(line.label)) return "non_expense_anchor";
-  // Expense larger than sales is impossible as a single SG&A line (identity, not a % band).
-  if (sales !== undefined && sales > 0 && amount > sales) {
-    return "exceeds_sales_ratio";
-  }
   if (resolvedValues) {
+    const sales = resolvedValues.sales;
+    // Accounting identity: an SG&A line cannot exceed known gross receipts.
+    if (typeof sales === "number" && sales >= 1 && amount > Math.round(sales)) {
+      return "collides_with_sales";
+    }
     for (const id of ["sales", "cogs", "gross_fixed_assets", "inventory"] as const) {
       const v = resolvedValues[id];
       const anchorRe = ANCHOR_LABEL[id];
@@ -84,7 +83,8 @@ export function diagnoseIllogicalAmount(
 
 /** True when the caption retains multiple money tokens and `amount` is a sum/max rollup column. */
 function isMultiColumnMoneyRollup(label: string, amount: number): boolean {
-  if (/~~|\[\s*[\d,]{3,}/.test(label)) return true;
+  // Comparison / worksheet rollups: bracketed columns, OCR `~~` change marks, or `[~ 565,880]`.
+  if (/~~|\[\s*[~\d,]{3,}/.test(label)) return true;
   const nums = [...(label.match(/\d{1,3}(?:,\d{3})+/g) ?? [])].map((s) =>
     parseInt(s.replace(/,/g, ""), 10),
   );
@@ -102,10 +102,10 @@ function isMultiColumnMoneyRollup(label: string, amount: number): boolean {
 
 export function filterIllogicalExpenseAmounts(
   lines: PoolExpenseLine[],
-  context?: { sales?: number; values?: Record<string, number | undefined> },
+  context?: { values?: Record<string, number | undefined> },
 ): PoolExpenseLine[] {
   return lines.filter(
-    (line) => diagnoseIllogicalAmount(line, context?.sales, context?.values) === undefined,
+    (line) => diagnoseIllogicalAmount(line, context?.values) === undefined,
   );
 }
 
@@ -119,11 +119,11 @@ export type LabelQualityAssessment = {
 };
 
 const EXPENSE_WORD =
-  /\b(fee|fees|rents?|utilit\w*|insur\w*|suppl\w*|office|bank|credit|merchant|profession\w*|legal|account\w*|repairs?|maint\w*|tax|licen\w*|benefit\w*|gasoline|payroll|salar\w*|wages?|officer|compens\w*|advert\w*|travel|telephone|dues|misc\w*|job|vehicle|fuel|amortization|janitorial|contract|labor|tolls|meals|education|software|equipment|recruit|auto)\b/i;
+  /\b(fee|fees|rents?|utilit\w*|insur\w*|suppl\w*|office|bank|credit|merchant|profession\w*|legal|account\w*|repairs?|maint\w*|tax|licen\w*|benefit\w*|gasoline|payroll|salar\w*|wages?|officer|compens\w*|advert\w*|travel|telephone|dues|misc\w*|job|vehicle|fuel|amortization|janitorial|contract|labor|tolls|meals|education|software|equipment|recruit|auto|pension|profit-?shar\w*|charit\w*)\b/i;
 
 /** P&L / B/S totals that sometimes bleed into comparison_raw — not SG&A detail lines. */
 const NON_EXPENSE_ANCHOR_LABEL =
-  /\b(gross receipts|gross profit|total income|total deductions|ordinary business income|ordinary income|taxable income|net income|total assets|total liabilities|shareholders|paid in capital|distributions|schedule m|federal statements|federal asset|bonus depreciation|section 199a|employment credits|managing member|president|aggregate business activity|unadjusted basis|year beginning|tax[- ]exempt income|non[- ]taxable\s+ppp|ppp\s+income|tax deposited|estimated\s+tax|refundable\s+credit)\b/i;
+  /\b(gross receipts|gross profit|total income|total\s+(?:\w+\s+){0,2}deductions|ordinary business income|ordinary income|taxable income|net income|total assets|total liabilities|shareholders|paid in capital|distributions|schedule m|federal statements|federal asset|bonus depreciation|section 199a|employment credits|managing member|president|aggregate business activity|unadjusted basis|year beginning|tax[- ]exempt income|non[- ]taxable\s+ppp|ppp\s+income|tax deposited|estimated\s+tax|refundable\s+credit|total\s+business\s+income)\b/i;
 
 /** Balance-sheet liability / asset captions (e.g. "Liquor tax payable") — not deductible operating expenses. */
 const BALANCE_SHEET_POSITION_LABEL = /\b(payables?|receivables?|accrued\s+liabilit\w*)\b/i;
@@ -171,7 +171,6 @@ export function isMailingOrFormFooterNoise(label: string): boolean {
   if (/\bform\s+1120\b/i.test(t) && /\b(?:created|omb\s+no)\b/i.test(t)) return true;
   if (/\bform\s+1120[-\s]?[sb]?\s*\(\d{4}\)/i.test(t)) return true;
   if (/^\s*s\s*:?\s*corporation\s*$/i.test(t)) return true;
-  if (/\btopeka\s+ks\b/i.test(t)) return true;
   if (/\b(?:see\s+)?separate\s+instructions\b/i.test(t) && /\bform\s+1120/i.test(t)) return true;
   return false;
 }

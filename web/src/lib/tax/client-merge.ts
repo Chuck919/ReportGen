@@ -16,34 +16,42 @@ export function stampClientOnColumns(
   }));
 }
 
-/** Prefer real taxpayer captions over Schedule / preparer OCR bleed. */
-export function clientKeyQuality(key: string): number {
+export type ClientKeyQuality = "unreliable" | "plausible" | "strong-entity";
+
+/** Classify taxpayer identity from caption structure, without weighted score cutoffs. */
+export function clientKeyQuality(key: string): ClientKeyQuality {
   const t = key.toLowerCase().trim();
-  if (!t) return -10;
-  let score = 0;
-  if (/\b(llc|inc|corp|company|services|supply)\b/.test(t)) score += 2;
-  const tokens = t.split(/\s+/).filter(Boolean);
-  if (tokens.length >= 2) score += 1;
-  if (tokens.length >= 3) score += 1;
+  if (!t) return "unreliable";
   // Form/schedule caption bleed (OCR of ownership / schedule headers as the taxpayer).
-  if (/identification|incorporation|stock\s+owned|schedule\s*[a-z]|form\s*\d/.test(t)) score -= 6;
-  // Lone tokens on cover pages are often the preparer firm, not the taxpayer.
-  if (tokens.length === 1) score -= 1;
-  // Repeated surname firm ("judd judd") after PLLC strip — preparer, not taxpayer.
-  if (tokens.length === 2 && tokens[0] === tokens[1]) score -= 3;
-  if (/\b(pllc|cpa|p\.?c\.?)\b/.test(t)) score -= 2;
-  return score;
+  if (/identification|incorporation|stock\s+owned|schedule\s*[a-z]|form\s*\d/.test(t)) {
+    return "unreliable";
+  }
+  // Repeated-surname firm name after PLLC strip — preparer, not taxpayer.
+  if (/^(\S+)\s+\1$/i.test(t) || /\b(pllc|cpa|p\.?c\.?)\b/.test(t)) {
+    return "unreliable";
+  }
+  if (
+    /\b(llc|inc|corp|corporation|company|services|service|supply)\b/.test(t) &&
+    /[a-z]{3,}/i.test(t)
+  ) {
+    return "strong-entity";
+  }
+  return "plausible";
 }
 
 function keysShareIdentity(a: string, b: string): boolean {
   if (a === b) return true;
   if (a.includes(b) || b.includes(a)) return true;
-  const ta = new Set(a.split(/\s+/).filter((t) => t.length > 2));
-  const tb = new Set(b.split(/\s+/).filter((t) => t.length > 2));
+  const generic = new Set([
+    "llc", "inc", "corp", "corporation", "company", "services", "service",
+    "supply", "the", "and",
+  ]);
+  const identityTokens = (key: string) =>
+    new Set(key.split(/\s+/).filter((token) => /[a-z]{3,}/i.test(token) && !generic.has(token)));
+  const ta = identityTokens(a);
+  const tb = identityTokens(b);
   if (!ta.size || !tb.size) return false;
-  let shared = 0;
-  for (const t of ta) if (tb.has(t)) shared++;
-  return shared >= 1 && shared / Math.min(ta.size, tb.size) >= 0.5;
+  return [...ta].some((token) => tb.has(token));
 }
 
 /**
@@ -64,14 +72,13 @@ export function shouldClearForDifferentCompany(
   const qE = clientKeyQuality(existingKey);
   const qI = clientKeyQuality(incomingKey);
   // Either side looks like OCR/preparer junk — keep merging years.
-  if (qE < 0 || qI < 0) return false;
+  if (qE === "unreliable" || qI === "unreliable") return false;
 
   const existingSet = new Set(existingYears);
   const yearOverlap = incomingYears.some((y) => existingSet.has(y));
-  // New-year progressive add: only clear when both names look like strong, distinct entities.
-  // Threshold 3 avoids preparer OCR (q≈0–2) wiping a real taxpayer during multi-file upload.
+  // New-year progressive add: only clear for two explicit legal-entity captions.
   if (!yearOverlap) {
-    return qE >= 3 && qI >= 3;
+    return qE === "strong-entity" && qI === "strong-entity";
   }
   return true;
 }
@@ -80,11 +87,15 @@ function pickPreferredIdentity(rows: Array<{ clientKey?: string; clientName?: st
   clientKey?: string;
   clientName?: string;
 } {
-  let best: { clientKey?: string; clientName?: string; score: number } | undefined;
+  let best: { clientKey?: string; clientName?: string; quality: ClientKeyQuality } | undefined;
   for (const row of rows) {
     if (!row.clientKey) continue;
-    const score = clientKeyQuality(row.clientKey);
-    if (!best || score > best.score) best = { clientKey: row.clientKey, clientName: row.clientName, score };
+    const quality = clientKeyQuality(row.clientKey);
+    const outranks =
+      !best ||
+      (quality === "strong-entity" && best.quality !== "strong-entity") ||
+      (quality === "plausible" && best.quality === "unreliable");
+    if (outranks) best = { clientKey: row.clientKey, clientName: row.clientName, quality };
   }
   return best ? { clientKey: best.clientKey, clientName: best.clientName } : {};
 }

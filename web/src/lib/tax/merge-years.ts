@@ -62,7 +62,7 @@ function applyCrossYearComparisonBackfill(columns: TaxYearValues[]): TaxYearValu
         }
       }
       const extraLabel = RANK_POOL_EXTRA_IDS[id];
-      if (extraLabel && Math.round(Math.abs(value)) >= 100) {
+      if (extraLabel && Math.round(Math.abs(value)) >= 1) {
         const src = `Two-year comparison (from ${col.year} return) (${id} row)`;
         const lines = [...(prior.operatingExpenseLines ?? [])];
         const already = lines.some(
@@ -109,8 +109,33 @@ function reflagPnlIdentityAfterOpexAlign(col: TaxYearValues): TaxYearValues {
   });
 }
 
+/**
+ * Finalization is a pure projection of parser output plus explicit user edits.
+ * Rebuild from the immutable parser snapshot so progressive merges, edits, and
+ * hydration cannot rank already-ranked paste seats or compound residual math.
+ */
+function restoreParserBaseline(col: TaxYearValues): TaxYearValues {
+  if (!col.parserBaseline) return col;
+
+  const values = { ...col.parserBaseline };
+  const fieldSources = col.parserFieldSources
+    ? { ...col.parserFieldSources }
+    : { ...(col.fieldSources ?? {}) };
+
+  for (const [id, edited] of Object.entries(col.userEditedFields ?? {})) {
+    if (!edited) continue;
+    const value = col.workbookValues?.[id] ?? col.values[id];
+    if (value !== undefined) values[id] = value;
+    const source = col.fieldSources?.[id];
+    if (source) fieldSources[id] = source;
+  }
+
+  return { ...col, values, fieldSources };
+}
+
 export function finalizeTaxColumns(columns: TaxYearValues[]): TaxYearValues[] {
-  let cols: TaxYearValues[] = applyCrossYearComparisonBackfill(columns).map((col) => {
+  const baselineColumns = columns.map(restoreParserBaseline);
+  let cols: TaxYearValues[] = applyCrossYearComparisonBackfill(baselineColumns).map((col) => {
     const refreshed = refreshTaxYearVerification(col);
     return {
       ...refreshed,

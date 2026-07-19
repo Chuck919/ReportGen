@@ -30,9 +30,9 @@ export function useTaxUpload() {
 
   useEffect(() => {
     const session = loadTaxSession();
-    // Re-finalize on hydrate (same as edit paths). Must stay idempotent after rank paste —
-    // see filterRankExpensePool taxes-anchor guard + benchmark-ui-upload-routes.ts.
-    if (session.columns.length) setColumns(finalizeTaxColumns(session.columns));
+    // Stored columns were finalized before save. Hydration must preserve that snapshot;
+    // edits explicitly re-finalize from parserBaseline below.
+    if (session.columns.length) setColumns(session.columns);
     if (session.clientName) setClientName(session.clientName);
     // Never restore busy — in-flight fetches do not survive reload/HMR.
     if (session.batchWarnings?.length) setBatchWarnings(session.batchWarnings);

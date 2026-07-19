@@ -3,15 +3,14 @@ import { TAX_WORKBOOK_ROWS, type TaxYearValues } from "@/lib/tax-workbook";
 import { inferTaxYear } from "@/lib/tax-return/infer-year";
 import { findHitsLineScoped } from "@/lib/tax-return/line-hits";
 import { runLocalOcr, type OcrMode } from "@/lib/tax-return/local-ocr";
-import { isOcrRecoveryEnabled, rescanMissingAttachmentsExperimental } from "@/lib/tax/ocr-recovery-experimental";
+import { rescanMissingAttachmentsExperimental } from "@/lib/tax/ocr-recovery-experimental";
 import { parseTaxReturnFromText } from "@/lib/tax-return/parse-from-text";
 import { buildOcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
-import { detectTaxForm } from "@/lib/tax-return/detect-tax-form";
 import { isProcessTimeoutError, ocrTimeoutUserMessage } from "@/lib/tax/ocr-errors";
 import { clientIdentityFromText } from "@/lib/tax-return/extract-business-name";
 import { applyTaxYearVerification, buildVerificationSnapshots } from "@/lib/tax/reconcile-tax-year";
 
-export { extractForm1120Anchors } from "@/lib/tax-return/form-anchors";
+export { extractFormAnchors } from "@/lib/tax-return/form-anchors";
 export { parseTaxReturnFromText } from "@/lib/tax-return/parse-from-text";
 export { extractStatementDeductions, extractStatementOtherIncome } from "@/lib/tax-return/statement-extractors";
 export { inferTaxYear } from "@/lib/tax-return/infer-year";
@@ -283,14 +282,12 @@ export async function parseTaxReturn(
   debug.combinedHitCount = findHitsLineScoped(`${embeddedText}\n${ocrText}`, 65, parsed.year).length;
 
   const allText = `${embeddedText}\n${ocrText}`;
-  const formKind = detectTaxForm(allText).kind;
   const rescanMatch = debug.ocrLogs?.find((l) => /Attachment gap rescan:/.test(l));
   const rescanPages = rescanMatch
     ? rescanMatch.match(/\(([^)]+)\)/)?.[1]?.split(",").map(Number).filter(Boolean)
     : undefined;
   debug.coverage = buildOcrCoverageDiagnostics(
     allText,
-    formKind,
     { values: parsed.values, confidence: parsed.confidence ?? {}, sources: parsed.fieldSources ?? {}, warnings: [] },
     {
       targetYear: parsed.year,

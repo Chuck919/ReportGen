@@ -21,7 +21,6 @@
     "test:tax-ui": "npx --yes tsx scripts/test-tax-ui-flow.ts",
     "test:reconcile": "npx --yes tsx scripts/test-reconcile-tax-year.ts",
     "test:client-merge": "npx --yes tsx scripts/test-client-merge.ts",
-    "test:cross-year-opex": "npx --yes tsx scripts/test-cross-year-opex-rank.ts",
     "test:benchmark-excel": "npx --yes tsx scripts/test-benchmark-excel-paste.ts",
     "test:income-dep-amort": "npx --yes tsx scripts/test-income-dep-amort.ts",
     "test:excel-paste": "npx --yes tsx scripts/test-excel-paste-alignment.ts",

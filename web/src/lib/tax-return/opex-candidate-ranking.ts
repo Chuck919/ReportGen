@@ -7,7 +7,6 @@ import {
   blockStmtTotalCorroborated,
   extractStatementDeductions,
   extractStatement3OtherOperatingExpenses,
-  scanStatement2Total,
   scanStmt2MiscLineAmounts,
   scanDocumentWideStmt2Exclusions,
 } from "./statement-extractors";
@@ -20,7 +19,7 @@ import {
   rejectComparisonOpexValue,
   comparisonWorksheetIncomplete,
 } from "./comparison-opex";
-import { scanFormLine20OtherDeductionsTotal, scanFormLineOtherDeductionsTotalBest } from "./form-anchors";
+import { scanFormLineOtherDeductionsTotalBest } from "./form-anchors";
 import { exactClosureTolerance } from "./structural-tolerance";
 import {
   collidesWithResolvedPnl,
@@ -75,16 +74,13 @@ function computeClosureScore(
   return diff <= exactClosureTolerance(stmt2Total) ? 1 : 0;
 }
 
-/** Prefer left over right: exact closure first, then source evidence, then consistency. */
+/** Prefer left over right using current-document structure only. */
 function preferCandidate(a: OpexCandidate, b: OpexCandidate): OpexCandidate {
   if (a.closureScore !== b.closureScore) return a.closureScore > b.closureScore ? a : b;
   const aDetail = isDetailEvidenceSource(a.source) ? 1 : 0;
   const bDetail = isDetailEvidenceSource(b.source) ? 1 : 0;
   if (aDetail !== bDetail) return aDetail > bDetail ? a : b;
   if (a.evidenceScore !== b.evidenceScore) return a.evidenceScore > b.evidenceScore ? a : b;
-  if (a.consistencyScore !== b.consistencyScore) {
-    return a.consistencyScore > b.consistencyScore ? a : b;
-  }
   return a;
 }
 
@@ -206,8 +202,9 @@ function buildCandidate(
     ctx.priorYearValues,
   );
 
-  // Exact closure dominates; source evidence breaks ties — no ML 0.35/0.65 blend on paste.
-  let totalScore = closureScore * 1000 + evidenceScore + consistencyScore;
+  // Exact closure and current-document evidence choose paste values. Cross-year consistency
+  // remains diagnostic only; real businesses can change sharply between years.
+  let totalScore = closureScore * 1000 + evidenceScore;
   if (closesPnl) totalScore += 25;
   else if (identityFlags.includes("pnl_identity_gap")) totalScore -= 8;
   const draft: OpexCandidate = {

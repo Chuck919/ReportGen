@@ -1,10 +1,13 @@
 import type { ResolvedFields } from "./merge";
-import { isFormReferenceNumber, isKeepableWorksheetAmount, isReasonableMoneyAmount, keepableWorksheetMoneyTokens, lineMoneyTokens } from "./money";
-import { pickComparisonColumnIndex, shrinkToYearColumns } from "@/lib/two-year-comparison-parser";
-import { scanComparisonOtherDeductionsTotal, computeComparisonOpexResidual } from "./comparison-opex";
-import { extractOtherDeductionsBlockOpex, extractStatementDeductions, blockStmtTotalCorroborated, scanStatement2Total, extractStatementTaxesSplit, isComparisonWorksheetContext } from "./statement-extractors";
+import { isFormReferenceNumber, isKeepableWorksheetAmount, isKeepableWorksheetAmountOnLine, isReasonableMoneyAmount, keepableWorksheetMoneyTokens, lineMoneyTokens } from "./money";
+import {
+  comparisonRowHasBlankCurrentColumn,
+  pickComparisonColumnIndex,
+  shrinkToYearColumns,
+} from "@/lib/two-year-comparison-parser";
+import { scanComparisonOtherDeductionsTotal } from "./comparison-opex";
+import { extractOtherDeductionsBlockOpex, blockStmtTotalCorroborated, scanStatement2Total, extractStatementTaxesSplit, isComparisonWorksheetContext } from "./statement-extractors";
 import { lineMatchesLabelPattern, repairOcrLabel } from "./ocr-label-repair";
-import { knownStmt2AttachmentSum } from "./stmt2-total-inference";
 import { exactClosureTolerance } from "./structural-tolerance";
 import { scanFormPageRent } from "./form-anchors";
 import { detectTaxForm } from "./detect-tax-form";
@@ -45,20 +48,35 @@ const STMT2_UTIL =
   /utilities|utility\s+expense|electric/i;
 
 function findComparisonBlock(allText: string): { text: string; start: number } | undefined {
-  const start =
-    allText.search(
-      /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|tax\s+projection\s+worksheet|(?:\bg\s*|ross\s+)receipts?\s+or\s+sales|ross\s+receipts?\s+or\s+sales/i,
-    ) ?? -1;
-  if (start < 0) return undefined;
+  const anchor = allText.search(
+    /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|tax\s+projection\s+worksheet|(?:\bg\s*|ross\s+)receipts?\s+or\s+sales|ross\s+receipts?\s+or\s+sales/i,
+  );
+  if (anchor < 0) return undefined;
+  // Page-2 headers often OCR after the page-1 comparison rows. Include preceding
+  // pages so field rows are not replaced by later Form line tags.
+  const start = Math.max(0, anchor - 12_000);
   return { text: allText.slice(start, start + 80_000), start };
 }
 
-function headerYearsInBlock(block: string, allText?: string, blockStart?: number): [number, number] | undefined {
-  const windows: string[] = [block.slice(0, 800)];
-  if (allText !== undefined && blockStart !== undefined) {
-    windows.push(allText.slice(Math.max(0, blockStart - 600), blockStart + 400));
-  }
+function headerYearsInBlock(block: string): [number, number] | undefined {
+  const marker = block.search(
+    /t\w{0,3}[\s-]*y\s*ear\s*[^\w\n]{0,3}\w{0,6}\s*omparison|two[\s-]*year[\s-]*comparison/i,
+  );
+  const windows: string[] = [
+    marker >= 0
+      ? block.slice(Math.max(0, marker - 800), marker + 800)
+      : block.slice(0, 800),
+  ];
   for (const w of windows) {
+    // Single-year title ("Two-Year Comparison 2023") with Prior/Current column
+    // captions — the title year IS the current (right) column. Structural; must win
+    // over the loose year-pair fallback, which can pair the title year with unrelated
+    // cover-letter years ("… 2024 estimated tax …").
+    const titled = w.match(/omparison\s*[^\w\n]{0,3}(20\d{2})\b/i);
+    if (titled && /prior\s+year/i.test(w) && /current\s+year/i.test(w)) {
+      const current = Number(titled[1]);
+      return [current - 1, current];
+    }
     const m =
       w.match(/\b(20\d{2})\s*[\&\-–]\s*(20\d{2})\b/) ??
       w.match(/\b(20\d{2})\s+and\s+(20\d{2})\b/i) ??
@@ -68,13 +86,21 @@ function headerYearsInBlock(block: string, allText?: string, blockStart?: number
   return undefined;
 }
 
-function pickColumn(nums: number[], targetYear: number, years?: [number, number]): number | undefined {
+function pickColumn(
+  nums: number[],
+  targetYear: number,
+  years?: [number, number],
+  line?: string,
+): number | undefined {
   const filtered = nums.filter(isKeepableWorksheetAmount);
   if (!filtered.length) return undefined;
+  const col = years ? pickComparisonColumnIndex(years[0], years[1], targetYear) : 1;
+  // Blank current-year cell (prior + self-negating change) — no dollars for this year.
+  if (col === 1 && line !== undefined && comparisonRowHasBlankCurrentColumn(line)) {
+    return undefined;
+  }
   const pair = shrinkToYearColumns(filtered);
   if (!pair) return filtered.length >= 2 ? filtered[1] : filtered[0];
-  if (!years) return pair[1];
-  const col = pickComparisonColumnIndex(years[0], years[1], targetYear);
   return col === 0 ? pair[0] : pair[1];
 }
 
@@ -129,12 +155,7 @@ function scanStmt2RentMax(allText: string, formKind?: import("./detect-tax-form"
     if (!/\brents?\b/i.test(line)) return;
     for (const n of lineMoneyTokens(line)) {
       const abs = Math.round(Math.abs(n));
-      if (
-        !isKeepableWorksheetAmount(abs) ||
-        abs > 5_000_000
-      ) {
-        continue;
-      }
+      if (!isKeepableWorksheetAmountOnLine(abs, line)) continue;
       candidates.push(abs);
     }
   };
@@ -175,7 +196,7 @@ export function refillFromComparisonLabeledRows(
   const blockInfo = findComparisonBlock(allText);
   if (targetYear === undefined) return;
   const block = blockInfo?.text;
-  const years = block ? headerYearsInBlock(block, allText, blockInfo?.start) : undefined;
+  const years = block ? headerYearsInBlock(block) : undefined;
 
   const stmt2Util = scanStmt2UtilitiesMax(allText);
   if (stmt2Util !== undefined) {
@@ -227,10 +248,23 @@ export function refillFromComparisonLabeledRows(
     }
     // Do not bleed a prior label onto a money line that already has its own caption
     // (e.g. "Salaries…" header + "Repairs… 4212" must not book 4212 as salaries).
-    const lineHasOwnCaption = COMPARISON_ROW_RULES.some(
-      (r) => r.labelRe.test(line) || r.labelRe.test(repairOcrLabel(line)),
-    );
-    const matchLine = labelPrefix && !lineHasOwnCaption ? `${labelPrefix} ${line}` : line;
+    // Also block rollup / P&L footer rows ("Total business deductions 596,314") — a blank
+    // prior expense caption must not inherit those dollars.
+    const lineHasOwnCaption =
+      COMPARISON_ROW_RULES.some(
+        (r) => r.labelRe.test(line) || r.labelRe.test(repairOcrLabel(line)),
+      ) ||
+      /^(?:total|net|gross|other\s+deduct|cost\s+of)\b/i.test(line) ||
+      /total\s+business\s+(?:income|deductions)\b/i.test(line);
+    const continuationNums = keepableWorksheetMoneyTokens(line);
+    const isColumnContinuation =
+      !/[a-z]{3,}/i.test(line) ||
+      (/employment\s+credits/i.test(line) && continuationNums.length >= 2) ||
+      (/[|[\]~]/.test(line) && continuationNums.length >= 2);
+    const matchLine =
+      labelPrefix && !lineHasOwnCaption && isColumnContinuation
+        ? `${labelPrefix} ${line}`
+        : line;
     labelPrefix = "";
     const lineIdx = allText.indexOf(rawLine);
     const recentContext =
@@ -243,7 +277,7 @@ export function refillFromComparisonLabeledRows(
       const labelLine = repairOcrLabel(matchLine);
       if (!lineMatchesLabelPattern(matchLine, rule.labelRe) && !rule.labelRe.test(labelLine)) continue;
       const nums = keepableWorksheetMoneyTokens(line);
-      const picked = pickColumn(nums, targetYear, years);
+      const picked = pickColumn(nums, targetYear, years, line);
       if (picked === undefined) continue;
 
       const cur = resolved.values[rule.id];
@@ -282,7 +316,8 @@ export function refillFromComparisonLabeledRows(
           /wages?\s+less\s+employment|salaries\s+and\s+wages\s+less/i.test(matchLine));
 
       if (!replace) continue;
-      resolved.values[rule.id] = Math.round(picked);
+      // Expense rows are absolute dollars — variance/change columns are signed OCR noise.
+      resolved.values[rule.id] = Math.round(Math.abs(picked));
       resolved.confidence[rule.id] = 90;
       resolved.sources[rule.id] = `Two-year comparison (${rule.id} row)`;
     }
@@ -299,7 +334,7 @@ export function refillFromComparisonLabeledRows(
       const line = rawLine.replace(/\s+/g, " ").trim();
       if (!/TAXES\s+PAID|STATE\s+INCOME\s+TAX/i.test(line)) continue;
       const nums = keepableWorksheetMoneyTokens(line);
-      const picked = pickColumn(nums, targetYear, years);
+      const picked = pickColumn(nums, targetYear, years, line);
       if (picked !== undefined && picked > 0) {
         paid = Math.round(picked);
         break;
@@ -307,7 +342,20 @@ export function refillFromComparisonLabeledRows(
     }
   }
   // Identity split when comparison taxes row embeds taxes paid (no size/% gates).
-  if (compTaxes !== undefined && paid !== undefined && paid > 0 && paid < compTaxes) {
+  // Only when taxes_licenses itself came from the comparison worksheet — never shrink
+  // Form page-1 line 17 SG&A taxes by Form line 31 income-tax liability (different lines).
+  const taxSrc = resolved.sources.taxes_licenses ?? "";
+  const paidSrc = resolved.sources.taxes_paid ?? "";
+  const taxesFromComparison = /two[\s.-]?year\s+comparison|taxes\s+minus\s+taxes\s+paid/i.test(taxSrc);
+  const paidIsFormIncomeTaxLiability = /form\s*1120[-\s]?[sb]?\s*line\s*31|total\s+tax/i.test(paidSrc);
+  if (
+    taxesFromComparison &&
+    !paidIsFormIncomeTaxLiability &&
+    compTaxes !== undefined &&
+    paid !== undefined &&
+    paid > 0 &&
+    paid < compTaxes
+  ) {
     const split = Math.round(compTaxes - paid);
     if (split >= 1) {
       resolved.values.taxes_licenses = split;
@@ -316,28 +364,12 @@ export function refillFromComparisonLabeledRows(
     }
   }
 
-  const attachmentSum = knownStmt2AttachmentSum(resolved, allText);
   const stmt2Total = scanComparisonOtherDeductionsTotal(allText, targetYear);
   const blockOpex = extractOtherDeductionsBlockOpex(allText);
-  const opexResidual = computeComparisonOpexResidual(
-    allText,
-    targetYear,
-    attachmentSum,
-    {
-      attachmentSum,
-      stmt2Total,
-    },
-    resolved,
-    undefined,
-  );
 
   const cur = resolved.values.other_operating_expenses;
   const curSource = resolved.sources.other_operating_expenses ?? "";
   const curIsOfficeDetail = /office\/supplies|telephone\/travel\/bank detail/i.test(curSource);
-  const curIsAuthoritativeDetail =
-    /summed detail|misc detail closes|office\/supplies|telephone\/travel\/bank detail|total minus util/i.test(
-      curSource,
-    );
 
   const blockOfficeDetail =
     blockOpex.opex !== undefined &&
@@ -392,7 +424,7 @@ export function extractComparisonExpenseLines(
 ): Array<{ label: string; amount: number; source: string }> {
   const blockInfo = findComparisonBlock(allText);
   if (!blockInfo) return [];
-  const years = headerYearsInBlock(blockInfo.text, allText, blockInfo.start);
+  const years = headerYearsInBlock(blockInfo.text);
   const out: Array<{ label: string; amount: number; source: string }> = [];
   const rawLines = blockInfo.text.split(/\n/);
 
@@ -403,7 +435,15 @@ export function extractComparisonExpenseLines(
     blockCtx = `${blockCtx} ${line}`.slice(-800);
     if (!/\d/.test(line) && i + 1 < rawLines.length) {
       const next = rawLines[i + 1]!.replace(/\s+/g, " ").trim();
-      if (/\d/.test(next) && /salar|wage|officer|repair|insur|advert|rent|tax|utilit|bank|profession|benefit|supply/i.test(`${line} ${next}`)) {
+      // Never glue a blank expense caption onto the next rollup/total row.
+      if (
+        /\d/.test(next) &&
+        !/^(?:total|net|gross|other\s+deduct|cost\s+of)\b/i.test(next) &&
+        !/total\s+business\s+(?:income|deductions)\b/i.test(next) &&
+        /salar|wage|officer|repair|insur|advert|rent|tax|utilit|bank|profession|benefit|supply/i.test(
+          `${line} ${next}`,
+        )
+      ) {
         line = `${line} ${next}`;
         i += 1;
         blockCtx = `${blockCtx} ${next}`.slice(-800);
@@ -441,17 +481,18 @@ export function extractAllComparisonLabelValueLines(
 ): Array<{ label: string; amount: number; source: string }> {
   const blockInfo = findComparisonBlock(allText);
   if (!blockInfo) return [];
-  const years = headerYearsInBlock(blockInfo.text, allText, blockInfo.start);
+  const years = headerYearsInBlock(blockInfo.text);
   const out: Array<{ label: string; amount: number; source: string }> = [];
 
   const pushRawRow = (line: string, ctx = "") => {
     if (!/\d/.test(line)) return;
     if (isCogsOtherCostsContext(ctx, line)) return;
     if (/^(total|gross receipts|ordinary business|taxable income|net income)\b/i.test(line)) return;
+    if (/total\s+business\s+(?:income|deductions)\b/i.test(line)) return;
     if (/SECTION\s+199A|SCHEDULE\s+K\b|DISTRIBUTIONS/i.test(line)) return;
     const nums = keepableWorksheetMoneyTokens(line);
     if (!nums.length) return;
-    const picked = pickColumn(nums, targetYear, years);
+    const picked = pickColumn(nums, targetYear, years, line);
     if (picked === undefined) return;
     const rounded = Math.round(Math.abs(picked));
     if (!isKeepableWorksheetAmount(rounded)) return;
@@ -472,7 +513,12 @@ export function extractAllComparisonLabelValueLines(
     rawCtx = `${rawCtx} ${line}`.slice(-800);
     if (!/\d/.test(line) && i + 1 < rawLines.length) {
       const next = rawLines[i + 1]!.replace(/\s+/g, " ").trim();
-      if (/\d/.test(next) && /[a-z]{3,}/i.test(line)) {
+      if (
+        /\d/.test(next) &&
+        /[a-z]{3,}/i.test(line) &&
+        !/^(?:total|net|gross|other\s+deduct|cost\s+of)\b/i.test(next) &&
+        !/total\s+business\s+(?:income|deductions)\b/i.test(next)
+      ) {
         line = `${line} ${next}`;
         i += 1;
         rawCtx = `${rawCtx} ${next}`.slice(-800);
@@ -511,7 +557,7 @@ export function extractComparisonDeductionScheduleLines(
 ): Array<{ label: string; amount: number; source: string }> {
   const blockInfo = findComparisonBlock(allText);
   const years = blockInfo
-    ? headerYearsInBlock(blockInfo.text, allText, blockInfo.start)
+    ? headerYearsInBlock(blockInfo.text)
     : undefined;
   const out: Array<{ label: string; amount: number; source: string }> = [];
 
@@ -528,7 +574,7 @@ export function extractComparisonDeductionScheduleLines(
     }
     const nums = keepableWorksheetMoneyTokens(line);
     if (!nums.length) continue;
-    const picked = pickColumn(nums, targetYear, years);
+    const picked = pickColumn(nums, targetYear, years, line);
     if (picked === undefined) continue;
     const rounded = Math.round(Math.abs(picked));
     if (!isKeepableWorksheetAmount(rounded)) continue;
@@ -591,7 +637,7 @@ function pushComparisonLine(
     const labelLine = repairOcrLabel(line);
     if (!lineMatchesLabelPattern(line, rule.labelRe) && !rule.labelRe.test(labelLine)) continue;
     const nums = keepableWorksheetMoneyTokens(line);
-    const picked = pickColumn(nums, targetYear, years);
+    const picked = pickColumn(nums, targetYear, years, line);
     if (picked === undefined) continue;
     out.push({
       label: labelFromComparisonOcrLine(line, COMPARISON_LEDGER_LABELS[rule.id] ?? rule.id),

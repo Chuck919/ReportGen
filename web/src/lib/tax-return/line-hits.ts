@@ -5,7 +5,6 @@ import {
   stripEinNoise,
 } from "@/lib/two-year-comparison-parser";
 import {
-  isEinOrPaymentInstructionBleed,
   lineMatchesLabelPattern,
   repairOcrLabel,
   stripOcrLinePrefix,
@@ -86,7 +85,7 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   const lead = leadingScheduleLineNumber(line);
   if (id === "cogs" && /gross profit|\[3\b|\b3\b.*gross/i.test(line)) return true;
   if (id === "depreciation" && (/accumulated|less\s+acc|post-1986|adjustment|form\s*4562/i.test(line) || value < 0)) return true;
-  if (id === "depreciation" && Math.abs(value) <= 99 && !substantialMoneyTokens(line).length) return true;
+  if (id === "depreciation" && !substantialMoneyTokens(line).length) return true;
   if (id === "amortization" && /accumulated|less\s+acc|schedule\s*l|gross\s+intangible/i.test(line)) return true;
   if (id === "accumulated_depreciation" && !/accumulated|less\s+acc/i.test(line)) return true;
   if (id === "accumulated_amortization" && (/other\s+assets|\b14\b/i.test(line) && !/amort|accumulated/i.test(line))) return true;
@@ -94,6 +93,16 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   if (id === "other_current_assets" && (/accounts\s+payable|\b16\b/i.test(line) && !/other\s+current\s+asset|line\s*6|\b6\b/i.test(line))) return true;
   // Caption / line-anchor required — no bare <$1000 size floor.
   if (id === "other_current_assets" && !/other\s+current\s+ass|line\s*6|\b6\b/i.test(line)) return true;
+  // Form 1125-A COGS / questionnaire lines mention "inventory" but are not Schedule L.
+  // Nearby regulation crumbs (e.g. §1.263(a) de minimis) parse as dollars via "263".
+  if (
+    id === "inventory" &&
+    /was there any change|determining quantities|opening and closing inventory|lifo inventory method|figured under lifo|inventory at (?:beginning|end) of year|section\s*263|1\.263|263A|de\s*minimis\s+safe\s+harbor/i.test(
+      line,
+    )
+  ) {
+    return true;
+  }
   if (id === "unclassified_equity" && value < 0) return true;
   if (id === "unclassified_equity" && !/retained|equity|line\s*24|\b24\b/i.test(line)) return true;
   if (
@@ -104,7 +113,7 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
     return true;
   }
   // Line-number crumbs only when no substantial money cell (not a bare <$100 floor).
-  if (id === "other_income" && Math.abs(value) <= 99 && !substantialMoneyTokens(line).length) return true;
+  if (id === "other_income" && !substantialMoneyTokens(line).length) return true;
   if (
     id === "other_operating_income" &&
     /other\s+income/i.test(line) &&
@@ -114,8 +123,7 @@ function rejectValueForField(id: string, line: string, value: number, targetYear
   }
   // Sales / COGS: caption structure — no bare <$1000 size floor.
   if (id === "sales" && !/receipt|sales|1a|1c/i.test(line)) return true;
-  if (id === "cogs" && Math.abs(value) <= 99 && !/cost\s+of|cogs|goods\s+sold/i.test(line)) return true;
-  if ((id === "sales" || id === "cogs" || id === "rent") && Math.abs(value) <= 1) return true;
+  if (id === "cogs" && !/cost\s+of|cogs|goods\s+sold/i.test(line)) return true;
   if (id === "rent" && /gross\s+profit|total\s+income|ordinary\s+income/i.test(line)) return true;
   if (lead !== undefined && Math.abs(value) === lead) return true;
   if (id === "taxes_licenses" && /(\b13\b|\[13\]).*interest/i.test(line)) return true;
@@ -178,7 +186,7 @@ export function findHitsLineScoped(text: string, baseConfidence: number, targetY
         if (chunk.slice(idx + match[0].length, idx + match[0].length + 1) === "%") continue;
         const value = parseMoney(match[0]);
         if (value === null || rejectValueForField(id, line, value, targetYear)) continue;
-        if (id === "other_income" && /total\s+income/i.test(chunk) && Math.abs(value) >= 1000) continue;
+        if (id === "other_income" && /total\s+income/i.test(chunk)) continue;
         nums.push(value);
       }
       if (!nums.length) continue;
@@ -272,8 +280,9 @@ export function resolveHits(
       maxAmountFields.has(row.id) && candidates.length > 1
         ? (() => {
             const best = candidates.reduce((a, b) => (Math.abs(b.value) > Math.abs(a.value) ? b : a));
+            // Confidence pool = dollar-exact repeats of the winner only (no 1% band).
             const matching = candidates.filter(
-              (h) => Math.abs(h.value - best.value) <= Math.max(2, Math.abs(best.value) * 0.01),
+              (h) => Math.round(h.value) === Math.round(best.value),
             );
             return { value: best.value, matching: matching.length ? matching : [best] };
           })()

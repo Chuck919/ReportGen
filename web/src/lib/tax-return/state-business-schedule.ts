@@ -1,5 +1,10 @@
 import type { FieldExtraction } from "./form-anchors";
-import { lineMoneyTokens, scheduleLineAmount } from "./money";
+import {
+  isKeepableWorksheetAmount,
+  isKeepableWorksheetAmountOnLine,
+  lineMoneyTokens,
+  scheduleLineAmount,
+} from "./money";
 
 /**
  * State / local business P&L schedules (e.g. MO RD-108 Schedule C) mirror federal
@@ -16,7 +21,7 @@ export function scanStateBusinessScheduleDeductions(text: string): FieldExtracti
   if (!starts.length) return out;
 
   const set = (id: string, value: number, source: string, conf = 91) => {
-    if (id === "taxes_licenses" && value < 5_000) return;
+    if (!isKeepableWorksheetAmount(value)) return;
     const prev = out.confidence[id] ?? 0;
     if (conf < prev) return;
     out.values[id] = Math.round(value);
@@ -30,8 +35,10 @@ export function scanStateBusinessScheduleDeductions(text: string): FieldExtracti
       const line = rawLine.replace(/\s+/g, " ").trim();
       if (!line || !/\d/.test(line)) continue;
 
-      const amt = scheduleLineAmount(line) ?? lineMoneyTokens(line).filter((n) => Math.abs(n) >= 1_000).pop();
-      if (amt === undefined || Math.abs(amt) < 1_000) continue;
+      const amt =
+        scheduleLineAmount(line) ??
+        lineMoneyTokens(line).filter((n) => isKeepableWorksheetAmountOnLine(n, line)).pop();
+      if (amt === undefined || !isKeepableWorksheetAmountOnLine(amt, line)) continue;
 
       if (
         (/(?:^|\s)10\s*[_\.\)]\s*rents?\b|(?:^|\s)10\.\s*rents?\b/i.test(line) || /\b10[_\s]+rents?\b/i.test(line)) &&

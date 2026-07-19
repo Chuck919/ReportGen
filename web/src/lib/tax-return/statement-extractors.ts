@@ -1,6 +1,8 @@
 import {
   isFormReferenceNumber,
+  isKeepableWorksheetAmountOnLine,
   isReasonableMoneyAmount,
+  keepableWorksheetMoneyTokens,
   lineMoneyTokens,
   parseMoney,
   statementLineAmount,
@@ -15,7 +17,6 @@ import { pickComparisonColumnIndex, shrinkToYearColumns } from "@/lib/two-year-c
 import { pickStmt2BankCreditCard } from "./stmt2-bank-picker";
 import { exactClosureTolerance } from "./structural-tolerance";
 import { isEinOrPaymentInstructionBleed, repairOcrLabel } from "./ocr-label-repair";
-import { isPlausibleOtherOperatingExpense } from "./opex-plausibility";
 
 /** Labeled Stmt-attachment detail dollars — keep micro-lines (`TRAVEL 8.`); reject form-refs/years. */
 function isKeepableStmtDetailAmount(n: number): boolean {
@@ -25,6 +26,53 @@ function isKeepableStmtDetailAmount(n: number): boolean {
   if (isFormReferenceNumber(abs)) return false;
   if (abs >= 1990 && abs <= 2035) return false;
   return true;
+}
+
+/**
+ * Statement TOTAL row amount — money-cell shapes only, rightmost column:
+ * comma-grouped (`57,242.`), trailing-period cell (`57242.`), else a 4+ digit run.
+ * Column position + cell shape select the amount (no dollar-size floors); form refs,
+ * years, and line-number crumbs rejected via isKeepableStmtDetailAmount.
+ */
+function readStatementTotalCell(line: string): number | undefined {
+  const keepable = (n: number | null): n is number => n !== null && isKeepableStmtDetailAmount(n);
+  const comma = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
+    .map((x) => parseMoney(x[0]))
+    .filter(keepable);
+  if (comma.length) return Math.abs(Math.round(comma[comma.length - 1]!));
+  const cells = Array.from(line.matchAll(/(?<![\d,.])(\d{1,7})\.(?!\d)/g))
+    .map((x) => parseMoney(x[1]!))
+    .filter(keepable);
+  if (cells.length) return Math.abs(Math.round(cells[cells.length - 1]!));
+  const runs = substantialMoneyTokens(line).filter((n) => isKeepableStmtDetailAmount(n));
+  if (runs.length) return Math.abs(Math.round(runs[runs.length - 1]!));
+  return undefined;
+}
+
+/**
+ * Mini federal statement (Description / Amount / Total) — accept the printed Total only
+ * when its own detail lines exactly close to it (charter exact closure, no `$50k` cap).
+ */
+function miniTableTotalWithClosure(detailRegion: string, totalLine: string): number | undefined {
+  const total = readStatementTotalCell(totalLine);
+  if (total === undefined) return undefined;
+  const headerRe = /description[\s\S]{0,40}?amount/gi;
+  let regionStart = 0;
+  let hm: RegExpExecArray | null;
+  while ((hm = headerRe.exec(detailRegion)) !== null) regionStart = hm.index + hm[0].length;
+  const region = detailRegion.slice(regionStart);
+  let detailSum = 0;
+  for (const rawLine of region.split(/\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line || !/[a-z]{3,}/i.test(line)) continue;
+    if (/^total\b|^description\b/i.test(line)) continue;
+    // Page-header / date / EIN bleed — not detail rows.
+    if (/\d{1,2}\/\d{1,2}\/\d{2,4}|\b\d{2}-\d{7}\b|federal\s+statements|\bpage\s+\d+\b/i.test(line)) continue;
+    const amt = stmtAttachmentLineAmount(line);
+    if (amt === undefined || !isKeepableStmtDetailAmount(amt)) continue;
+    detailSum += Math.round(Math.abs(amt));
+  }
+  return Math.abs(detailSum - total) <= exactClosureTolerance(total) ? total : undefined;
 }
 
 function tailFromLine(line: string, mode: "last" | "max"): number | undefined {
@@ -40,6 +88,19 @@ function isTaxesLicensesStmt2Line(line: string): boolean {
 }
 
 /** Stmt 2 attachment total from the block "Total" line (often more accurate than Form line 20 OCR). */
+/** Federal mini-statements (gross receipts / taxes / interest) that also end in bare "Total". */
+function isNonOdFederalMiniStatementContext(ctx: string, line: string): boolean {
+  const hay = `${ctx} ${line}`;
+  if (/gross\s+receipts|line\s*1a\b/i.test(hay) && !/other\s+deduct/i.test(hay)) return true;
+  if (/taxes\s+and\s+licenses|line\s*12\b.*tax/i.test(hay) && !/other\s+deduct/i.test(hay)) return true;
+  if (/\binterest\s+expense\b|line\s*13\b.*interest/i.test(hay) && !/other\s+deduct/i.test(hay)) {
+    return true;
+  }
+  if (/total\s+business\s+(?:income|deductions)\b/i.test(line)) return true;
+  if (/total\s+(?:income|receipts|sales|revenue)\b/i.test(line)) return true;
+  return false;
+}
+
 export function scanStatement2Total(text: string): number | undefined {
   let best: number | undefined;
 
@@ -48,25 +109,30 @@ export function scanStatement2Total(text: string): number | undefined {
     inOtherDedBlock: boolean,
     taxesOnlyBlock: boolean,
     recentContext?: string,
-  ) => {
+  ): boolean => {
     const normalized = line.replace(/\s+/g, " ").trim();
-    if (!/^total\b/i.test(normalized)) return;
-    if (/total\s+deductions/i.test(normalized)) return;
-    if (recentContext && isComparisonWorksheetContext(recentContext)) return;
-    if (isTaxesLicensesStmt2Line(line)) return;
-    if (taxesOnlyBlock) return;
+    if (!/^total\b/i.test(normalized)) return false;
+    if (/total\s+deductions/i.test(normalized)) return false;
+    if (recentContext && isComparisonWorksheetContext(recentContext)) return false;
+    if (recentContext && isNonOdFederalMiniStatementContext(recentContext, normalized)) {
+      return false;
+    }
+    if (isTaxesLicensesStmt2Line(line)) return false;
+    if (taxesOnlyBlock) return false;
+    // Paired begin|end BS footers are not Stmt OD attachment totals.
+    if (keepableWorksheetMoneyTokens(normalized).length >= 2) return false;
     const total = statementLineAmount(line);
-    if (total === undefined || !isReasonableMoneyAmount(total)) return;
+    if (total === undefined || !isReasonableMoneyAmount(total)) return false;
     // Labeled form footers ("TOTAL TO FORM … LINE 19/20") are authoritative.
     // Bare "Total": only inside an Other-deductions block (drops column crumbs outside the pack).
-    // Size floors ($10k/$50k) removed — use keepable-money + block membership instead.
     const labeledFormFooter =
       /total\s+to\s+(?:form|schedule|sch\.?)\b|total\s+to\s+line\s*(?:19|20|26)\b/i.test(normalized);
     const abs = Math.round(Math.abs(total));
-    if (isFormReferenceNumber(abs)) return;
-    if (!labeledFormFooter && !inOtherDedBlock) return;
-    if (abs < 1) return;
+    if (isFormReferenceNumber(abs)) return false;
+    if (!labeledFormFooter && !inOtherDedBlock) return false;
+    if (abs < 1) return false;
     if (best === undefined || abs > Math.abs(best)) best = abs;
+    return true;
   };
 
   const stmt2BlockRe =
@@ -120,7 +186,13 @@ export function scanStatement2Total(text: string): number | undefined {
     }
     if (isTaxesLicensesStmt2Line(line)) inOtherDed = false;
     if (!inStmt2) continue;
-    considerTotal(line, inOtherDed, taxesOnlyBlock, recentContext);
+    // Attachment OD blocks end at their bare Total footer — do not keep scanning later
+    // Federal Statements mini-pages (gross receipts / taxes / interest) that also say Total.
+    if (considerTotal(line, inOtherDed, taxesOnlyBlock, recentContext) && inOtherDed) {
+      inStmt2 = false;
+      inOtherDed = false;
+      taxesOnlyBlock = false;
+    }
   }
 
   return best;
@@ -128,14 +200,12 @@ export function scanStatement2Total(text: string): number | undefined {
 
 /** Sum labeled Stmt 2 exclusion lines anywhere in the document (when attachment pages OCR separately). */
 export function scanDocumentWideStmt2Exclusions(text: string): number {
+  // Generic SG&A / OD exclusion vocabulary only — not company-specific captions
+  // (company-specific detail captions belong in residual, not this sum).
   const rules: Array<{ key: string; re: RegExp }> = [
     { key: "insurance", re: /^insurance\b/i },
     { key: "contract", re: /contract\s+labor/i },
     { key: "auto", re: /auto\s+and\s+truck/i },
-    { key: "forklift", re: /forklift|fork\s+lift/i },
-    { key: "production", re: /production\s+support|product\s+develop/i },
-    { key: "consulting", re: /^consulting\b/i },
-    { key: "it", re: /IT\s+support|website\s+support/i },
     { key: "merchant", re: /merchant\s+svc|merchant\s+service|merchant\s+fee/i },
     { key: "licenses", re: /licenses?\s+and\s+permits/i },
     { key: "accounting", re: /accounting\s*&|legal\s+and\s+prof/i },
@@ -176,25 +246,30 @@ export function sumStmt2BlockLineItems(text: string): number | undefined {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!line) continue;
 
-    if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
-      const lineIdx = text.indexOf(rawLine);
-      const recentContext = text
-        .slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length)
-        .replace(/\s+/g, " ");
-      if (isComparisonWorksheetContext(recentContext)) continue;
+    // Other Deductions isn't always Statement 2 — same block detector as the misc scan.
+    const headIdx = text.indexOf(rawLine);
+    const headCtx = text
+      .slice(Math.max(0, headIdx - 500), headIdx + rawLine.length)
+      .replace(/\s+/g, " ");
+    if (isOtherDeductionsBlockHeader(line, headCtx)) {
+      if (isComparisonWorksheetContext(headCtx)) continue;
       inStmt2 = true;
       sum = 0;
       sawLine = false;
       continue;
     }
-    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
+    if (inStmt2 && endsOtherDeductionsBlock(line, headCtx)) inStmt2 = false;
     if (!inStmt2) continue;
     const lineIdx = text.indexOf(rawLine);
     const recentContext = text
       .slice(Math.max(0, lineIdx - 400), lineIdx + rawLine.length)
       .replace(/\s+/g, " ");
     if (isComparisonWorksheetContext(recentContext)) continue;
-    if (/^total\b/i.test(line)) continue;
+    // OD attachment ends at its Total footer — stop before later Federal Statements pages.
+    if (/^total\b/i.test(line)) {
+      inStmt2 = false;
+      continue;
+    }
     if (PRIMARY_STMT2_LABEL.test(line)) {
       const amt = statementLineAmount(line);
       if (amt !== undefined && isReasonableMoneyAmount(amt)) {
@@ -209,7 +284,8 @@ export function sumStmt2BlockLineItems(text: string): number | undefined {
     const amount = statementLineAmount(line);
     if (amount === undefined || !isReasonableMoneyAmount(amount)) continue;
     const abs = Math.abs(amount);
-    if (abs < 1 || abs > 2_000_000 || isFormReferenceNumber(abs)) continue;
+    if (abs < 1 || isFormReferenceNumber(abs)) continue;
+    if (!isKeepableStmtDetailAmount(abs)) continue;
     sum += abs;
     sawLine = true;
   }
@@ -244,7 +320,10 @@ export function scanStmt2MiscLineAmounts(text: string): number[] {
     if (inStmt2 && endsOtherDeductionsBlock(line, recentContext)) inStmt2 = false;
     if (!inStmt2) continue;
     if (isComparisonWorksheetContext(recentContext)) continue;
-    if (/^total\b/i.test(line)) continue;
+    if (/^total\b/i.test(line)) {
+      inStmt2 = false;
+      continue;
+    }
     const amount = statementLineAmount(line);
     if (amount === undefined || !isReasonableMoneyAmount(amount)) continue;
     const abs = Math.round(Math.abs(amount));
@@ -263,38 +342,6 @@ export function scanStmt2MiscLineAmounts(text: string): number[] {
     amounts.push(abs);
   }
   return amounts;
-}
-
-/** Money amounts on Stmt 2 lines within a band (for truncated-total recovery). */
-export function scanStmt2AmountsInBand(text: string, low: number, high: number): number[] {
-  let inStmt2 = false;
-  const out = new Set<number>();
-  for (const rawLine of text.split(/\n/)) {
-    const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!line) continue;
-    if (/statement\s*2|stmt\s*2|line\s*(?:19|20)\b.*other\s+deductions|other\s+deductions.*statement\s*2/i.test(line)) {
-      const lineIdx = text.indexOf(rawLine);
-      const recentContext = text
-        .slice(Math.max(0, lineIdx - 500), lineIdx + rawLine.length)
-        .replace(/\s+/g, " ");
-      if (isComparisonWorksheetContext(recentContext)) continue;
-      inStmt2 = true;
-      continue;
-    }
-    if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line)) inStmt2 = false;
-    if (!inStmt2) continue;
-    const lineIdx = text.indexOf(rawLine);
-    const recentContext = text
-      .slice(Math.max(0, lineIdx - 400), lineIdx + rawLine.length)
-      .replace(/\s+/g, " ");
-    if (isComparisonWorksheetContext(recentContext)) continue;
-    if (/^total\b/i.test(line)) continue;
-    for (const token of substantialMoneyTokens(line)) {
-      const abs = Math.round(Math.abs(token));
-      if (abs >= low && abs <= high && isReasonableMoneyAmount(abs)) out.add(abs);
-    }
-  }
-  return [...out];
 }
 
 const PRIMARY_STMT2_LABEL =
@@ -318,8 +365,10 @@ function shouldReplaceBlockBest(
   if (
     /summed detail/i.test(pick.source) &&
     /office\/supplies/i.test(best.source) &&
-    pick.opex > best.opex * 1.5
+    Math.round(pick.opex) !== Math.round(best.opex)
   ) {
+    // Prefer labeled summed detail over an incomplete office bucket when amounts disagree —
+    // no relative-size band.
     return true;
   }
   if (
@@ -454,17 +503,24 @@ export function endsOtherDeductionsBlock(line: string, recentContext?: string): 
   if (/form\s*1125|other\s+costs?\b|total\s+to\s+line\s*5/i.test(line)) return true;
   if (/statement\s*[3-9]|stmt\s*[3-9]/i.test(line) && !/other\s+deduct/i.test(line)) return true;
   if (/statement\s*4|stmt\s*4/i.test(line)) return true;
+  // Next Federal Statements mini-page (gross receipts / taxes / interest) after OD Total.
+  if (
+    /form\s+1120[-\s]?s?.{0,40}line\s*(?:1a|12|13)\b/i.test(line) &&
+    !/other\s+deduct/i.test(line)
+  ) {
+    return true;
+  }
   return false;
 }
 
 function scanFederalStmt1MiniTotal(text: string): number {
   const m = text.match(
-    /federal\s+statements[\s\S]{0,1200}?description\s+amount[\s\S]{0,800}?total\s+\$?\s*([\d,]+)[\s\S]{0,200}statement\s*2\b[\s\S]{0,120}other\s+deduct/i,
+    /federal\s+statements[\s\S]{0,1200}?description[\s\S]{0,40}?amount([\s\S]{0,800}?)(total[^\n]*)[\s\S]{0,200}statement\s*2\b[\s\S]{0,120}other\s+deduct/i,
   );
   if (!m) return 0;
-  const parsed = parseMoney(m[1]!);
-  if (parsed === null || !isReasonableMoneyAmount(parsed) || Math.abs(parsed) >= 50_000) return 0;
-  return Math.round(Math.abs(parsed));
+  // Exact detail closure replaces the old `< $50k` size cap — a Total that does not
+  // close to its own mini-table rows is a mis-captured foreign total, whatever its size.
+  return miniTableTotalWithClosure(m[1] ?? "", m[2] ?? "") ?? 0;
 }
 
 /** Parse Stmt 2/3 other-deduction attachment blocks (federal OD statements). */
@@ -497,15 +553,10 @@ export function extractOtherDeductionsBlockOpex(text: string): {
   let largeDetailSum = 0;
   let professional = 0;
   let contractLabor = 0;
-  let forkliftFuel = 0;
-  let productionSupport = 0;
-  let consulting = 0;
-  let itSupport = 0;
   let insuranceLine = 0;
   let miscAmount = 0;
   let telAmount = 0;
   let bankInBlock = 0;
-  let federalStmt1Total = 0;
   let federalStmt1Carried = scanFederalStmt1MiniTotal(text);
   let sawFederalStmt2 = false;
   let blockIsFederal = false;
@@ -514,7 +565,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
   let amortInBlock = 0;
 
   const appendFederalTableOpex = () => {
-    if (!blockIsFederal || stmtTotal === undefined || stmtTotal < 1_000) return;
+    if (!blockIsFederal || stmtTotal === undefined || stmtTotal < 1) return;
     if (bankInBlock <= 0 || professional <= 0) return;
 
     const slotExcluded = Math.round(
@@ -537,7 +588,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
 
     if (
       federalAdjusted !== undefined &&
-      federalAdjusted >= 1_000 &&
+      federalAdjusted >= 1 &&
       federalAdjusted < stmtTotal &&
       isReasonableMoneyAmount(federalAdjusted)
     ) {
@@ -555,7 +606,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
 
     if (
       federalSlotResidual !== undefined &&
-      federalSlotResidual >= 1_000 &&
+      federalSlotResidual >= 1 &&
       federalSlotResidual < stmtTotal &&
       isReasonableMoneyAmount(federalSlotResidual)
     ) {
@@ -578,7 +629,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
           : undefined;
       if (
         federalLineSum !== undefined &&
-        federalLineSum >= 1_000 &&
+        federalLineSum >= 1 &&
         federalLineSum < stmtTotal &&
         isReasonableMoneyAmount(federalLineSum)
       ) {
@@ -598,24 +649,20 @@ export function extractOtherDeductionsBlockOpex(text: string): {
   const flush = () => {
     appendFederalTableOpex();
 
-    const hasLargeDetail =
-      utilities > 0 ||
-      insuranceLine > 0 ||
-      contractLabor > 0 ||
-      professional > 0 ||
-      opexDetail > 0 ||
-      largeDetailSum > 0;
     const skipLargeFederal =
       blockIsFederal && bankInBlock > 0 && professional > 0 && best?.detailPreferred;
-    if (stmtTotal !== undefined && stmtTotal >= 100_000 && hasLargeDetail && !skipLargeFederal) {
+    // Rich OD statements with detail lines *outside* the recipe buckets (largeDetailSum):
+    // hand recipes cannot partition the block, so only the soft classic is nominated
+    // (structural discriminator — replaces the old `stmtTotal >= $100k` size split).
+    if (stmtTotal !== undefined && largeDetailSum > 0 && !skipLargeFederal) {
       /**
-       * Large-corp OD: do NOT nominate hand label-bucket recipes (typeA / consulting / IT /
+       * Rich-OD path: do NOT nominate hand label-bucket recipes (typeA / consulting / IT /
        * insurance $5k gates / ×0.97). Those closed by construction and needed soft floors to
        * avoid collapsed "summed detail" sticking through align.
        *
        * Emit only a soft classic for early ranking. Final other_opex comes from charter
        * identity `stmtTOTAL − stmtInTop8` at align (formula recipes are no longer authoritative).
-       * Small-attachment office/detail inventory remains on the stmtTotal < 100k branch.
+       * Fully-classified blocks take the recipe/office-inventory branch below.
        */
       if (utilities > 0) {
         const classicExcluded = utilities + autoTruck + licenses;
@@ -634,7 +681,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
           }
         }
       }
-    } else if (stmtTotal !== undefined && stmtTotal >= 1_000) {
+    } else if (stmtTotal !== undefined && stmtTotal >= 1) {
       const slotExcluded = Math.round(
         bankInBlock + utilities + professional + autoTruck + licenses + merchant,
       );
@@ -675,7 +722,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
       if (
         federalAdjusted !== undefined &&
         blockIsFederal &&
-        federalAdjusted >= 1_000 &&
+        federalAdjusted >= 1 &&
         federalAdjusted < stmtTotal &&
         isReasonableMoneyAmount(federalAdjusted)
       ) {
@@ -691,7 +738,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
       } else if (
         federalWithoutUtilStmt1 !== undefined &&
         blockIsFederal &&
-        federalWithoutUtilStmt1 >= 1_000 &&
+        federalWithoutUtilStmt1 >= 1 &&
         federalWithoutUtilStmt1 < stmtTotal &&
         isReasonableMoneyAmount(federalWithoutUtilStmt1) &&
         (federalWithStmt1 === undefined ||
@@ -710,7 +757,7 @@ export function extractOtherDeductionsBlockOpex(text: string): {
       if (
         federalWithStmt1 !== undefined &&
         blockIsFederal &&
-        federalWithStmt1 >= 1_000 &&
+        federalWithStmt1 >= 1 &&
         federalWithStmt1 < stmtTotal &&
         isReasonableMoneyAmount(federalWithStmt1) &&
         (!isKeepableStmtDetailAmount(opexDetail) ||
@@ -778,15 +825,10 @@ export function extractOtherDeductionsBlockOpex(text: string): {
     largeDetailSum = 0;
     professional = 0;
     contractLabor = 0;
-    forkliftFuel = 0;
-    productionSupport = 0;
-    consulting = 0;
-    itSupport = 0;
     insuranceLine = 0;
     miscAmount = 0;
     telAmount = 0;
     bankInBlock = 0;
-    federalStmt1Total = 0;
     sawFederalStmt2 = false;
     blockIsFederal = false;
     travelInBlock = 0;
@@ -832,38 +874,19 @@ export function extractOtherDeductionsBlockOpex(text: string): {
         !/statement\s*2\b.*other\s+deduct/i.test(ctxWindow) &&
         !sawFederalStmt2
       ) {
-        const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
-          .map((x) => parseMoney(x[0]))
-          .filter((n): n is number => n !== null && Math.abs(n) >= 100);
-        const miniTotal =
-          commaAmounts.length > 0
-            ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
-            : undefined;
-        if (miniTotal !== undefined && miniTotal < 50_000 && isReasonableMoneyAmount(miniTotal)) {
-          federalStmt1Carried = Math.max(federalStmt1Carried, Math.round(miniTotal));
+        // Exact detail closure replaces the old `< $50k` cap (see scanFederalStmt1MiniTotal).
+        const miniTotal = miniTableTotalWithClosure(
+          text.slice(Math.max(0, lineIdx - 250), lineIdx),
+          line,
+        );
+        if (miniTotal !== undefined) {
+          federalStmt1Carried = Math.max(federalStmt1Carried, miniTotal);
         }
       }
       continue;
     }
 
-    const readBlockTotal = (line: string): number | undefined => {
-      const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
-        .map((x) => parseMoney(x[0]))
-        .filter(
-          (n): n is number =>
-            n !== null && Math.abs(n) >= 1_000 && !isFormReferenceNumber(Math.abs(n)),
-        );
-      const total =
-        commaAmounts.length > 0
-          ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
-          : substantialMoneyTokens(line)
-              .filter((n) => Math.abs(n) >= 1_000 && !isFormReferenceNumber(Math.abs(n)))
-              .sort((a, b) => Math.abs(b) - Math.abs(a))[0];
-      if (total !== undefined && isReasonableMoneyAmount(total)) {
-        return Math.abs(Math.round(total));
-      }
-      return undefined;
-    };
+    const readBlockTotal = (line: string): number | undefined => readStatementTotalCell(line);
 
     if (/^total\s+to\s+form/i.test(line)) {
       const total = readBlockTotal(line);
@@ -907,11 +930,6 @@ export function extractOtherDeductionsBlockOpex(text: string): {
     else if (/merchant\s+svc|merchant\s+service|merchant\s+fee/i.test(line)) merchant = abs;
     else if (/^professional\b|accounting\s*&|legal\s+and/i.test(line)) professional = Math.max(professional, abs);
     else if (/contract\s+labor/i.test(line)) contractLabor = Math.max(contractLabor, abs);
-    else if (/forklift|fork\s+lift/i.test(line)) forkliftFuel = Math.max(forkliftFuel, abs);
-    else if (/production\s+support|product\s+develop/i.test(line)) {
-      productionSupport = Math.max(productionSupport, abs);
-    } else if (/^consulting\b/i.test(line)) consulting = Math.max(consulting, abs);
-    else if (/IT\s+support|website\s+support/i.test(line)) itSupport = Math.max(itSupport, abs);
     else if (/^insurance\b/i.test(line)) {
       insuranceLine = Math.max(insuranceLine, abs);
     } else if (/^amortization\b/i.test(line) && !/accumulated/i.test(line)) {
@@ -967,7 +985,8 @@ export function scanBooksOtherIncomeForYear(allText: string, targetYear: number)
     const lineIdx = allText.indexOf(rawLine);
     const yearWindow = allText.slice(Math.max(0, lineIdx - 4000), lineIdx + rawLine.length + 400);
     if (!new RegExp(`\\b${targetYear}\\b`).test(yearWindow)) continue;
-    const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 0 && Math.abs(n) < 50_000);
+    // Keepable worksheet dollars (years / form refs / line-number crumbs out) — no $50k cap.
+    const nums = lineMoneyTokens(line).filter((n) => isKeepableWorksheetAmountOnLine(n, line));
     const pair = shrinkToYearColumns(nums);
     if (!pair) continue;
     const yearMatch =
@@ -1099,7 +1118,7 @@ export function extractStatementExpenseLines(text: string): StatementExpenseLine
   }
 
   const insurance = scanStmt2InsuranceAmount(text);
-  if (insurance !== undefined && insurance >= 100) {
+  if (insurance !== undefined && isKeepableStmtDetailAmount(insurance)) {
     out.push({ label: "Insurance", amount: insurance, source: "Statement 2 (insurance line)" });
   }
 
@@ -1144,19 +1163,18 @@ function isGarbageStmtBlockLine(label: string, amount: number, anchor?: number):
   ) {
     return true;
   }
-  // Short entity captions with large amounts are cover/header bleed, not SG&A lines.
-  if (/\b(llc|inc|corp)\b/i.test(label) && label.split(/\s+/).length <= 6 && amount > 250_000) {
-    return true;
-  }
-  // FEIN / entity header bleed ("TAXPAYER NAME, INC. 12-3456789" → OCR amount from EIN digits).
+  // Entity header / cover bleed ("TAXPAYER NAME, INC. 12-3456789 …") — the label is a
+  // company caption, not an expense category. Structural signals only (no $100k/$250k
+  // size bands): a short caption ending in an entity suffix (labels are digit-stripped,
+  // so a trailing timestamp bleed like "PM"/"AM" may follow the suffix).
   if (
-    /\b(supply|inc|llc|corp|services)\b/i.test(label) &&
-    label.split(/\s+/).length <= 8 &&
-    amount > 100_000
+    /\b(?:inc|llc|corp)\b\.?(?:\s+(?:pm|am))?$/i.test(label.trim()) &&
+    label.split(/\s+/).length <= 8
   ) {
     return true;
   }
-  if (anchor !== undefined && anchor > 0 && amount > anchor * 2.5) return true;
+  // A detail line cannot exceed its own block TOTAL — partition identity, not a ratio band.
+  if (anchor !== undefined && anchor > 0 && Math.round(amount) > Math.round(anchor)) return true;
   return false;
 }
 
@@ -1171,6 +1189,8 @@ function tryPushStmt2ExpenseLine(
   if (/^description\b/i.test(line) && /\bamount\b/i.test(line)) return;
   if (/\bdepreciation\b/i.test(line) && !/accumulated/i.test(line)) return;
   if (/\bamortization\b/i.test(line) && !/accumulated/i.test(line)) return;
+  // Preparer page-header bleed — date + clock timestamp on one row is a header, not detail.
+  if (/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(line) && /\b\d{1,2}:\d{2}\b/.test(line)) return;
   let amount = stmtAttachmentLineAmount(line) ?? statementLineAmount(line);
   if (amount === undefined) {
     const tokens = stmtAttachmentMoneyTokens(line)
@@ -1182,6 +1202,7 @@ function tryPushStmt2ExpenseLine(
   if (amount === undefined || !isReasonableMoneyAmount(amount)) return;
   const rounded = Math.round(Math.abs(amount));
   if (!isKeepableStmtDetailAmount(rounded)) return;
+  if (isEinOrPaymentInstructionBleed(line, rounded)) return;
   const label = stripStmt2MoneyLabel(line);
   if (isObviouslyNotStmtExpenseLine(label)) return;
   out.push({ label, amount: rounded, source });
@@ -1847,7 +1868,6 @@ export function extractStatementTaxesSplit(text: string): FieldExtraction {
   let paidSum = 0;
   let sawSalesUse = false;
   let stateIncomeLines = 0;
-  let sawPriorYears = false;
   const blockLines: string[] = [];
 
   for (const rawLine of text.split(/\n/)) {
@@ -1868,7 +1888,6 @@ export function extractStatementTaxesSplit(text: string): FieldExtraction {
         paidSum = 0;
         sawSalesUse = false;
         stateIncomeLines = 0;
-        sawPriorYears = false;
         blockLines.length = 0;
       }
       if (/payroll|sales\s+and\s+use/i.test(line)) continue;
@@ -1887,7 +1906,6 @@ export function extractStatementTaxesSplit(text: string): FieldExtraction {
     if (amt === null || amt === undefined || !isReasonableMoneyAmount(amt)) continue;
 
     if (/state\s+taxes\s*-?\s*prior/i.test(line)) {
-      sawPriorYears = true;
       if (amt > 0) paidSum += amt;
     } else if (/based\s+on\s+income/i.test(line) && !/other\s+state|foreign\s+tax/i.test(line)) {
       // Federal taxes_paid = state income-tax lines only (exclude OTHER STATE offsets).
@@ -1926,8 +1944,10 @@ export function extractStatement3OtherOperatingExpenses(text: string): FieldExtr
   const out: FieldExtraction = { values: {}, confidence: {}, sources: {} };
 
   const starts: number[] = [];
-  const startRe =
-    /statement\s*3\b[^\n]{0,220}(?:other\s+deduct|form\s+1120|schedule\s*c|r[dD]-108|line\s*18)/gi;
+  // Header must reference other deductions (or the RD-108 city OD schedule) — a bare
+  // `Statement 3 - Form 1120 …` title also matches Schedule L / Schedule K statements
+  // (other current liabilities, K-items), whose totals are not deduction totals.
+  const startRe = /statement\s*3\b[^\n]{0,220}(?:other\s+deduct|r[dD]-108)/gi;
   let m: RegExpExecArray | null;
   while ((m = startRe.exec(text)) !== null) starts.push(m.index);
   if (!starts.length) return out;
@@ -1949,44 +1969,11 @@ export function extractStatement3OtherOperatingExpenses(text: string): FieldExtr
       if (!line) continue;
       if (sawTotal && /statement\s*[4-9]\b/i.test(line) && !/statement\s*3/i.test(line)) break;
 
-      if (/^total\s+to\s+form/i.test(line)) {
-        const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
-          .map((x) => parseMoney(x[0]))
-          .filter(
-            (n): n is number =>
-              n !== null &&
-              Math.abs(n) >= 50_000 &&
-              !isFormReferenceNumber(Math.abs(n)),
-          );
-        const total =
-          commaAmounts.length > 0
-            ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
-            : substantialMoneyTokens(line)
-                .filter((n) => Math.abs(n) >= 50_000 && !isFormReferenceNumber(Math.abs(n)))
-                .sort((a, b) => Math.abs(b) - Math.abs(a))[0];
-        if (total !== undefined && isReasonableMoneyAmount(total)) {
-          stmt3Total = Math.abs(Math.round(total));
-          sawTotal = true;
-        }
-        continue;
-      }
       if (/^total\b/i.test(line)) {
-        const commaAmounts = Array.from(line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g))
-          .map((x) => parseMoney(x[0]))
-          .filter(
-            (n): n is number =>
-              n !== null &&
-              Math.abs(n) >= 15_000 &&
-              !isFormReferenceNumber(Math.abs(n)),
-          );
-        const total =
-          commaAmounts.length > 0
-            ? Math.max(...commaAmounts.map((n) => Math.abs(n)))
-            : substantialMoneyTokens(line)
-                .filter((n) => Math.abs(n) >= 15_000 && !isFormReferenceNumber(Math.abs(n)))
-                .sort((a, b) => Math.abs(b) - Math.abs(a))[0];
-        if (total !== undefined && isReasonableMoneyAmount(total)) {
-          stmt3Total = Math.abs(Math.round(total));
+        // Structural cell-shape read (rightmost money column) — no `$50k` / `$15k` floors.
+        const total = readStatementTotalCell(line);
+        if (total !== undefined) {
+          stmt3Total = total;
           sawTotal = true;
         }
         continue;
@@ -2088,11 +2075,16 @@ function iterStatement1Blocks(text: string): string[] {
   return blocks;
 }
 
-function statement1DetailStats(text: string): { count: number; hasMiscellaneous: boolean } {
-  let bestCount = 0;
-  let hasMiscellaneous = false;
+function statement1HasLabeledDetail(text: string, labelRe: RegExp): boolean {
   for (const block of iterStatement1Blocks(text)) {
-    let count = 0;
+    const blockHeader = block.slice(0, 400).replace(/\s+/g, " ");
+    if (
+      !/federal\s+statements|statement\s*1\s*-?\s*form|statement\s*1.{0,80}other\s+income|other\s+income.{0,100}statement\s*1/i.test(
+        blockHeader,
+      )
+    ) {
+      continue;
+    }
     let pastHeader = false;
     for (const rawLine of block.split(/\n/)) {
       const line = rawLine.replace(/\s+/g, " ").trim();
@@ -2103,13 +2095,13 @@ function statement1DetailStats(text: string): { count: number; hasMiscellaneous:
       }
       if (!pastHeader || !line || /^total\b/i.test(line)) continue;
       if (!/[a-z]{3,}/i.test(line)) continue;
-      if (/miscellaneous/i.test(line)) hasMiscellaneous = true;
+      // Form page-1 echo rows ("Form 1120-S, P1, Ln 5 Income $2,812") are not Stmt detail.
+      if (/form\s*1120|page\s*1|line\s*5|calculated\s+amount/i.test(line)) continue;
       if (statementLineAmount(line) === undefined) continue;
-      count += 1;
+      if (labelRe.test(line)) return true;
     }
-    if (count > bestCount) bestCount = count;
   }
-  return { count: bestCount, hasMiscellaneous };
+  return false;
 }
 
 /** Stmt 1 total equals a lone tax-refund line — not workbook other_income. */
@@ -2121,7 +2113,7 @@ export function statement1TotalIsTaxRefund(text: string, total: number): boolean
       // Prefer lineMoneyTokens — refunds are often 3-digit ($857) and fail substantialMoneyTokens.
       const nums = lineMoneyTokens(line);
       const amt = nums.length ? nums[nums.length - 1] : undefined;
-      if (amt !== undefined && Math.abs(amt - total) <= Math.max(2, Math.abs(total) * 0.02)) {
+      if (amt !== undefined && Math.round(Math.abs(amt)) === Math.round(Math.abs(total))) {
         return true;
       }
     }
@@ -2129,16 +2121,17 @@ export function statement1TotalIsTaxRefund(text: string, total: number): boolean
   return false;
 }
 
-/** Workbook copies Stmt 1 total to other_income when stmt has 3+ lines or includes Miscellaneous. */
+/** Workbook other-income evidence requires an explicit detail caption, not a row-count proxy. */
 export function statement1ReportsToWorkbookOtherIncome(text: string): boolean {
-  const { count, hasMiscellaneous } = statement1DetailStats(text);
-  return hasMiscellaneous || count >= 3;
+  return statement1HasLabeledDetail(text, /miscellaneous/i);
 }
 
 /** True when `amount` matches a Stmt-1 detail row (not the Total line). */
 export function statement1DetailAmountMatches(text: string, amount: number): boolean {
   const target = Math.round(Math.abs(amount));
-  if (target < 100) return false;
+  if (target < 1 || isFormReferenceNumber(target) || (target >= 1990 && target <= 2035)) {
+    return false;
+  }
   for (const block of iterStatement1Blocks(text)) {
     let pastHeader = false;
     for (const rawLine of block.split(/\n/)) {
@@ -2158,18 +2151,5 @@ export function statement1DetailAmountMatches(text: string, amount: number): boo
 
 /** Stmt 1 rows labeled "Other Income" (workbook often nets these to zero on the summary line). */
 export function statement1HasOtherIncomeDetailLine(text: string): boolean {
-  for (const block of iterStatement1Blocks(text)) {
-    for (const rawLine of block.split(/\n/)) {
-      const line = rawLine.replace(/\s+/g, " ").trim();
-      if (/^total\b|^description\b/i.test(line)) continue;
-      if (/line\s*5|statement\s*1|form\s*1120|page\s*1|federal\s+statements/i.test(line)) continue;
-      if (/other\s+income/i.test(line) && !/discount/i.test(line)) return true;
-    }
-  }
-  return false;
-}
-
-/** Count Stmt 1 detail rows (multi-item stmt often nets to zero on Form 1120-S line 5). */
-export function countStatement1DetailLines(text: string): number {
-  return statement1DetailStats(text).count;
+  return statement1HasLabeledDetail(text, /other\s+income/i);
 }

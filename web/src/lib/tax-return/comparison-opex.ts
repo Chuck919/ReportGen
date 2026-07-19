@@ -4,7 +4,7 @@ import {
   shrinkToYearColumns,
 } from "@/lib/two-year-comparison-parser";
 import type { parseTwoYearComparisonBlock } from "@/lib/two-year-comparison-parser";
-import { scanStmt2MiscLineAmounts, scanDocumentWideStmt2Exclusions } from "./statement-extractors";
+import { scanDocumentWideStmt2Exclusions } from "./statement-extractors";
 import { scanFormLine20OtherDeductionsTotal, scanFormLineOtherDeductionsTotalBest } from "./form-anchors";
 import type { TaxFormKind } from "./detect-tax-form";
 import { detectTaxForm } from "./detect-tax-form";
@@ -138,25 +138,30 @@ export function scanComparisonOtherDeductionsTotal(
   allText: string,
   targetYear: number,
 ): number | undefined {
-  const blockStart =
-    allText.search(
-      /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|(?:\bg\s*)?ross\s+receipts?\s+or\s+sales/i,
-    ) ?? -1;
-  if (blockStart < 0) return undefined;
-  const searchText = allText.slice(blockStart, blockStart + 30_000);
+  const tryWindow = (blockStart: number): number | undefined => {
+    if (blockStart < 0) return undefined;
+    const searchText = allText.slice(blockStart, blockStart + 30_000);
+    for (const rawLine of searchText.split(/\n/)) {
+      const line = rawLine.replace(/\s+/g, " ").trim();
+      if (!isOtherDeductionsComparisonLine(line)) continue;
+      if (/\b20\b/i.test(line) && /attach|stmt\s*2|see\s+stmt/i.test(line)) continue;
+      const nums = keepableWorksheetMoneyTokens(line);
+      const pair = shrinkToYearColumns(nums);
+      if (!pair) continue;
+      const years = headerYearsNearLine(allText, line);
+      const col = years ? pickComparisonColumnIndex(years[0], years[1], targetYear) : 1;
+      return Math.round(col === 0 ? pair[0] : pair[1]);
+    }
+    return undefined;
+  };
 
-  for (const rawLine of searchText.split(/\n/)) {
-    const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!isOtherDeductionsComparisonLine(line)) continue;
-    if (/\b20\b/i.test(line) && /attach|stmt\s*2|see\s+stmt/i.test(line)) continue;
-    const nums = keepableWorksheetMoneyTokens(line);
-    const pair = shrinkToYearColumns(nums);
-    if (!pair) continue;
-    const years = headerYearsNearLine(allText, line);
-    const col = years ? pickComparisonColumnIndex(years[0], years[1], targetYear) : 1;
-    return Math.round(col === 0 ? pair[0] : pair[1]);
-  }
-  return undefined;
+  // Prefer comparison-worksheet anchors, but fall back to an earlier Form/gross window —
+  // some packs print the two-year OD row near page-1 sales before the "comparison" heading.
+  const comparisonStart = allText.search(
+    /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|comparison\s+worksheet/i,
+  );
+  const grossStart = allText.search(/(?:\bg\s*)?ross\s+receipts?\s+or\s+sales/i);
+  return tryWindow(comparisonStart) ?? tryWindow(grossStart);
 }
 
 /** Comparison worksheet present but OTHER DEDUCTIONS row amounts not OCR'd for target year. */
@@ -198,33 +203,11 @@ export function computeComparisonOpexResidual(
     }
   }
 
-  // Misc bank guesses: exclude year tokens and the stmt footer itself — not a stmt×% cap.
-  const misc = scanStmt2MiscLineAmounts(allText).filter(
-    (n) => n >= 1 && n < stmt2Total && (!targetYear || n !== targetYear),
-  );
-  let residual = Math.round(stmt2Total - attachment);
-  if (residual >= 1 && residual > Math.max(prof, util, bank, 0)) {
-    const existingBank = resolved?.values.bank_credit_card;
-    for (const bankGuess of misc.sort((a, b) => b - a)) {
-      if (bankGuess >= stmt2Total) continue;
-      const trial = Math.round(stmt2Total - prof - util - bankGuess);
-      if (trial < 1) continue;
-      // Misc-line amounts already in attachmentSum are not independent bank substitutes.
-      if (
-        existingBank !== undefined &&
-        attachmentSum > prof + util + Math.round(Math.abs(existingBank)) &&
-        Math.round(bankGuess) !== Math.round(Math.abs(existingBank))
-      ) {
-        continue;
-      }
-      const trialAttach = Math.round(prof + util + bankGuess);
-      // Dollar-exact close (trial is constructed as TOTAL − trialAttach).
-      if (trialAttach + trial !== Math.round(stmt2Total)) continue;
-      attachment = trialAttach;
-      residual = trial;
-      break;
-    }
-  }
+  // Unlabeled miscellaneous amounts are not bank evidence. The old path substituted
+  // a misc amount when the residual exceeded selected categories; that comparison was
+  // a magnitude heuristic and its "exact closure" was tautological (trial = TOTAL − parts).
+  // Labeled bank/merchant extraction is handled by pickStmt2BankCreditCard.
+  const residual = Math.round(stmt2Total - attachment);
 
   if (attachment < 1) return undefined;
   // Residual is the footer itself, or empty — must leave a proper remainder.

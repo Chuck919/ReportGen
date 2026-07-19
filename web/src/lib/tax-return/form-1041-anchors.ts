@@ -3,6 +3,7 @@ import {
   bracketLineAmount,
   formLineAmount,
   isForm1120Line,
+  isKeepableWorksheetAmountOnLine,
   lineMoneyTokens,
   scheduleLineAmount,
 } from "./money";
@@ -63,7 +64,7 @@ export function extractForm1041Anchors(text: string): FieldExtraction {
 
     if (isForm1120Line(line, 1) && /interest\s+income/i.test(line)) {
       const oi = formLineAmount(line, "1") ?? lineAmt(line);
-      if (oi !== undefined && oi < 500_000) setField(out, "other_income", oi, "Form 1041 line 1 interest income", 95);
+      if (oi !== undefined) setField(out, "other_income", oi, "Form 1041 line 1 interest income", 95);
     }
     if (isForm1120Line(line, 3) && /business\s+income/i.test(line)) {
       setField(out, "sales", lineAmt(line), "Form 1041 line 3 business income");
@@ -133,7 +134,10 @@ export function extractForm1041Anchors(text: string): FieldExtraction {
     }
     if (isForm1120Line(line, 16) && /corporate\s+stock/i.test(line)) {
       const amt = lineAmt(line);
-      if (amt !== undefined && amt >= 1000) setField(out, "common_stock", amt, "Form 1041 Schedule B line 16");
+      // Keepable worksheet dollars only (line-number crumbs / years out) — no `$1k` floor.
+      if (amt !== undefined && isKeepableWorksheetAmountOnLine(amt, line)) {
+        setField(out, "common_stock", amt, "Form 1041 Schedule B line 16");
+      }
     }
     if (isForm1120Line(line, 17) && /other\s+asset/i.test(line)) {
       setField(out, "other_assets", lineAmt(line), "Form 1041 Schedule B line 17");
@@ -149,9 +153,10 @@ export function extractForm1041Anchors(text: string): FieldExtraction {
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
     if (!/gross\s+receipt|gross\s+sales|total\s+income.*business/i.test(line)) continue;
-    const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 100_000);
+    // Rightmost keepable cell (amount column position) — no `$100k` size floor.
+    const nums = lineMoneyTokens(line).filter((n) => isKeepableWorksheetAmountOnLine(n, line));
     if (!nums.length) continue;
-    const best = Math.max(...nums.map(Math.abs));
+    const best = Math.abs(nums[nums.length - 1]!);
     if (out.values.sales === undefined || best > (out.values.sales ?? 0)) {
       setField(out, "sales", best, "Form 1041 attached business schedule", 94);
     }

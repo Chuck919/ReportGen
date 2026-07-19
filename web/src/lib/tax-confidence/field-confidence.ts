@@ -65,11 +65,9 @@ function statementLine18NeedsReview(
   const crossCheck = statementLine18CrossCheckSnapshots(snapshots);
   if (!crossCheck.length) return true;
   if (crossCheck.some((s) => valuesExactlyEqual(s.value, value))) return false;
-  return crossCheck.some(
-    (s) =>
-      !valuesExactlyEqual(s.value, value) &&
-      Math.abs(s.value - value) / Math.max(Math.abs(value), 1) >= 0.08,
-  );
+  // Any dollar-exact disagreement from an independent Form/comparison read is
+  // review-worthy. The old 8% band hid small absolute errors on large companies.
+  return crossCheck.some((s) => !valuesExactlyEqual(s.value, value));
 }
 
 function ocrCoverageFlags(coverage: OcrCoverageDiagnostics): ConfidenceFlag[] {
@@ -114,6 +112,8 @@ function propagateDocumentOcrFlags(
   if (!STMT_ATTACHMENT_FIELD_IDS.has(fieldId)) return [];
   if (/form 1120|page 1 block/i.test(source ?? "")) return [];
   if (/two-year comparison/i.test(source ?? "")) return [];
+  // Exact OD partition identity should not inherit document-level OCR incompleteness.
+  if (/stmt total\s*[−\-]\s*stmt lines in top-8/i.test(source ?? "")) return [];
   if (!isStatementSourcedField(source)) return [];
   if (
     value !== undefined &&
@@ -176,31 +176,6 @@ export function applyFieldConfidence(input: ApplyFieldConfidenceInput): {
       (/coherence:|routed to/i.test(input.source ?? "") ||
         (input.fieldId === "amortization" && /no intangibles/i.test(input.source ?? "")))
     )
-  ) {
-    codes.push("low_trust_source");
-  }
-
-  if (
-    input.fieldId === "depreciation" &&
-    input.value > 100_000 &&
-    !/form 1120|schedule|comparison/i.test(input.source ?? "")
-  ) {
-    codes.push("low_trust_source");
-  }
-
-  if (
-    input.fieldId === "interest_expense" &&
-    input.value > 1_000 &&
-    !/form 1120|schedule|comparison/i.test(input.source ?? "")
-  ) {
-    codes.push("low_trust_source");
-  }
-
-  if (
-    (input.fieldId === "taxes_paid" || input.fieldId === "other_current_liabilities") &&
-    input.value > 0 &&
-    input.value < 100_000 &&
-    !/form 1120|schedule|comparison|statement\s*\(?\s*line/i.test(input.source ?? "")
   ) {
     codes.push("low_trust_source");
   }

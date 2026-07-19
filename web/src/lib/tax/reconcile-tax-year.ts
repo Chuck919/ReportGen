@@ -9,6 +9,7 @@ import type { ResolvedFields } from "@/lib/tax-return/merge";
 import type { FieldExtraction } from "@/lib/tax-return/form-anchors";
 import type { FieldTrustTier } from "./field-trust-tier";
 import { resolveFieldTrustTier, hasHardFieldFlag } from "./field-trust-tier";
+import { computeWorkbookFormulas } from "./workbook-formulas";
 import {
   buildSourceSnapshots,
   classifySourceFamily,
@@ -123,75 +124,14 @@ function isTrustedSingleSource(source: string | undefined, parserConf: number): 
 function shouldFlagMaterialDisagreement(
   snaps: SourceSnapshot[],
   chosen: number,
-  source: string | undefined,
-  parserConf: number,
 ): boolean {
-  if (!hasMaterialDisagreement(chosen, snaps)) return false;
-  if (isTrustedSingleSource(source, parserConf)) {
-    const credibleAgree = snaps.filter(
-      (s) =>
-        (s.family === "form" || s.family === "schedule-l" || s.family === "comparison") &&
-        valuesExactlyEqual(s.value, chosen) &&
-        s.confidence >= parserConf - 12,
-    );
-    if (credibleAgree.length >= 1) return false;
-  }
-  return true;
+  return hasMaterialDisagreement(chosen, snaps);
 }
 
 function addFlag(flags: Record<string, string[]>, id: string, msg: string): void {
   const list = flags[id] ?? [];
   if (!list.includes(msg)) list.push(msg);
   flags[id] = list;
-}
-
-function roundSum(values: Record<string, number>, ids: string[]): number | undefined {
-  const present = ids.filter((id) => values[id] !== undefined);
-  // One present bucket is enough — missing siblings count as 0 when only a few lines are filled.
-  if (present.length < 1) return undefined;
-  return Math.round(present.reduce((s, id) => s + values[id]!, 0));
-}
-
-function netFixed(values: Record<string, number>): number | undefined {
-  if (values.gross_fixed_assets === undefined) return undefined;
-  const acc = values.accumulated_depreciation ?? 0;
-  return Math.round(values.gross_fixed_assets - Math.abs(acc));
-}
-
-function netIntangible(values: Record<string, number>): number | undefined {
-  if (values.gross_intangible_assets === undefined) return undefined;
-  const acc = values.accumulated_amortization ?? 0;
-  return Math.round(values.gross_intangible_assets - Math.abs(acc));
-}
-
-function computeTotalAssets(values: Record<string, number>): number | undefined {
-  const current = roundSum(values, ["cash", "accounts_receivable", "inventory", "other_current_assets"]);
-  const nf = netFixed(values);
-  const ni = netIntangible(values);
-  const other = values.other_assets;
-  const parts = [current, nf, ni, other].filter((n): n is number => n !== undefined);
-  if (parts.length < 3) return undefined;
-  return Math.round(parts.reduce((a, b) => a + b, 0));
-}
-
-function computeTotalLiabilitiesEquity(values: Record<string, number>): number | undefined {
-  const currentLiab = roundSum(values, [
-    "accounts_payable",
-    "short_term_debt",
-    "current_portion_ltd",
-    "other_current_liabilities",
-  ]);
-  const ltLiab = roundSum(values, ["notes_minus_short_term", "subordinated", "other_long_term_liabilities"]);
-  const equity = roundSum(values, [
-    "preferred_stock",
-    "common_stock",
-    "additional_paid_in_capital",
-    "other_stock_equity",
-    "unclassified_equity",
-  ]);
-  const parts = [currentLiab, ltLiab, equity].filter((n): n is number => n !== undefined);
-  if (parts.length < 2) return undefined;
-  return Math.round(parts.reduce((a, b) => a + b, 0));
 }
 
 /** Math + source-trust checks. Cheap — safe for all OCR modes. */
@@ -217,8 +157,12 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     }
   }
 
-  const totalAssets = computeTotalAssets(values);
-  const totalLE = computeTotalLiabilitiesEquity(values);
+  // Reconcile the exact totals displayed/pasted by the workbook. Keeping a second
+  // BS formula engine here previously produced different totals based on arbitrary
+  // "3 asset parts / 2 L+E parts" presence counts.
+  const workbookFormulas = computeWorkbookFormulas(values);
+  const totalAssets = workbookFormulas.total_assets;
+  const totalLE = workbookFormulas.total_liabilities_equity;
   // Balance sheet identity must be exact (within $1). A $100 equity miss is a real error.
   if (totalAssets !== undefined && totalLE !== undefined && Math.abs(totalAssets - totalLE) > 1) {
     const gap = totalAssets - totalLE;
@@ -300,7 +244,7 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
       } else if (
         isStatementLine18Source(source) &&
         snaps.length &&
-        shouldFlagMaterialDisagreement(snaps, value, source, parserConf)
+        shouldFlagMaterialDisagreement(snaps, value)
       ) {
         addFlag(fieldFlags, id, "Statement Line 18 — corroborating source disagrees");
       } else if (
@@ -338,7 +282,7 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
       addFlag(fieldFlags, id, "Likely form line number or OCR noise — verify");
     }
 
-    const materialDisagree = shouldFlagMaterialDisagreement(snaps, value, source, parserConf);
+    const materialDisagree = shouldFlagMaterialDisagreement(snaps, value);
     const disagreeMsg = materialDisagree ? sourceDisagreementDetail(snaps, value) : undefined;
     if (disagreeMsg) addFlag(fieldFlags, id, disagreeMsg);
 
@@ -351,7 +295,7 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
           ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
           : agreement >= 2
             ? Math.min(parserConf, DISPLAY_CONF_CAP_AGREED)
-            : materialDisagree && !isTrustedSingleSource(source, parserConf)
+            : materialDisagree
               ? Math.min(parserConf, DISPLAY_CONF_CAP_SINGLE)
               : isTrustedSingleSource(source, parserConf)
                 ? Math.min(parserConf, parserConf >= 92 ? DISPLAY_CONF_CAP_HIGH_PARSER : DISPLAY_CONF_CAP_TRUSTED)
@@ -368,7 +312,7 @@ export function reconcileTaxYear(input: ReconcileInput): ReconcileResult {
     const needsReview =
       hardFlags.length > 0 ||
       suspicious ||
-      (materialDisagree && !isTrustedSingleSource(source, parserConf)) ||
+      materialDisagree ||
       parserConf < 65 ||
       (family === "ocr" && agreement < 2) ||
       isWeakSource(source) ||

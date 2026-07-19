@@ -4,8 +4,8 @@
  * The Tax tab does more than one mergeParsedTaxYears([], rows) call:
  *   1. onTierParsed → progressive mergeParsedTaxYears(prev, [row]) per PDF
  *   2. startParse final → mergeParsedTaxYears(baseColumns, json.parsed)
- *   3. session hydrate → finalizeTaxColumns(saved columns) again
- *   4. field edit / label edit → finalizeTaxColumns again
+ *   3. session hydrate → restore the finalized saved snapshot
+ *   4. field edit / label edit → finalizeTaxColumns from parserBaseline
  *
  * Backend/batch scoring can be green while a second finalize drops taxes from top-8
  * or clears formOrdinaryBusinessIncome / fieldFlags. This script gates that.
@@ -22,7 +22,6 @@ import { getEmbeddedPdfText } from "./lib/pdf-embedded-text";
 import { parseTaxReturnFromText } from "../src/lib/tax-return/parse-from-text";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";
 import { mergeParsedTaxYears } from "../src/lib/tax/client-merge";
-import { finalizeTaxColumns } from "../src/lib/tax/merge-years";
 import { actualTop8Amounts } from "../src/lib/tax/fixture-top8";
 import { OPERATING_EXPENSE_SLOT_IDS } from "../src/lib/tax/operating-expenses";
 import { TAX_BENCHMARK_CLIENTS, type TaxBenchmarkClient } from "./lib/tax-benchmark-clients";
@@ -237,12 +236,12 @@ function routeUiStartParse(incoming: ParsedTaxYear[]): TaxYearValues[] {
   return mergeParsedTaxYears([], incoming).columns;
 }
 
-/** Session hydrate / edit path: finalize already-finalized columns again. */
+/** Session hydrate path: JSON round-trip the already-finalized saved snapshot. */
 function routeSessionRestore(columns: TaxYearValues[]): TaxYearValues[] {
-  return finalizeTaxColumns(columns.map((c) => ({ ...c, values: { ...c.values } })));
+  return JSON.parse(JSON.stringify(columns)) as TaxYearValues[];
 }
 
-/** Progressive then an extra finalize (worst-case UI + hydrate). */
+/** Progressive accumulation followed by a session-storage round trip. */
 function routeProgressiveThenRestore(
   incoming: ParsedTaxYear[],
   order: "asc" | "desc",

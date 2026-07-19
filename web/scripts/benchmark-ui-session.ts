@@ -38,8 +38,6 @@ import { getEmbeddedPdfText } from "./lib/pdf-embedded-text";
 import { parseTaxReturnFromText } from "../src/lib/tax-return/parse-from-text";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";
 import { mergeParsedTaxYears } from "../src/lib/tax/client-merge";
-import { rescanMissingAttachmentsExperimental } from "../src/lib/tax/ocr-recovery-experimental";
-import { probeOcrCoverageGaps } from "../src/lib/tax-return/ocr-coverage-rescan";
 import {
   scoreAllFieldsExcludingOpexSlots,
   scoreOpexBenchmark,
@@ -64,7 +62,7 @@ import type { ParsedTaxYear } from "../src/lib/api/types";
 import type { TaxYearValues } from "../src/lib/tax-workbook";
 import type { FieldTrustTier } from "../src/lib/tax/field-trust-tier";
 import { resolveTrustTierFromColumn } from "../src/lib/tax/field-trust-tier";
-import { WORKBOOK_COMPARISON_FIXTURES } from "../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./lib/workbook-comparison-fixtures";
 import changwenFixtures from "./changwen-fixtures.json";
 
 const mode = (process.argv[2] ?? "balanced") as "fast" | "balanced" | "thorough";
@@ -216,25 +214,9 @@ async function parseYearCached(client: TaxBenchmarkClient, year: number): Promis
     } as ParsedTaxYear;
   }
 
-  if (mode === "thorough" || mode === "balanced") {
-    const gapProbe = probeOcrCoverageGaps(embedded, ocr, year);
-    if (gapProbe.reasons.some((r) => /stmt2-detail-missing|stmt2-total-unparseable/i.test(r))) {
-      const gap = await rescanMissingAttachmentsExperimental(
-        bytes,
-        embedded,
-        ocr,
-        path.basename(pdfPath),
-        year,
-        "balanced",
-      );
-      if (gap.ran) {
-        ocr = gap.ocrText;
-        console.log(`gap-rescan p${gap.pages.join(",")} `);
-        // Never rewrite the balanced/thorough OCR cache from experimental gap-rescan —
-        // a bad probe (or flaky page set) permanently poisons the holdout gate.
-      }
-    }
-  }
+  // Cached OCR is the holdout artifact. Experimental attachment gap-rescan can inject
+  // noisy pages over a known-good cache and must not alter the cached gate path.
+  // Live OCR still runs gap-rescan inside parseTaxReturn.
 
   const parsed = parseTaxReturnFromText(path.basename(pdfPath), embedded, ocr, year, {
     ocrMode: mode,

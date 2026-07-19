@@ -7,12 +7,9 @@ function formulaFieldIds(): Set<string> {
   );
 }
 
-function moneyTolerance(expected: number): number {
-  return Math.max(1, Math.abs(expected) * 0.005);
-}
-
+/** Dollar-exact ($1 rounding tolerance) — no soft % band on formula-mismatch hints. */
 function moneyDiffers(a: number, b: number): boolean {
-  return Math.abs(a - b) > moneyTolerance(b);
+  return Math.abs(Math.round(a) - Math.round(b)) > 1;
 }
 
 export function isFormulaFieldId(fieldId: string): boolean {

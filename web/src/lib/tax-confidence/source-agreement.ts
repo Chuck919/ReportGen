@@ -9,12 +9,10 @@ export {
   getAlternateReads,
   hasMaterialDisagreement,
   hasSourceDisagreement,
-  largestDisagreementPercent,
   pickBestSnapshot,
   resolveValuesFromSnapshots,
   sourceDisagreementDetail,
   valuesExactlyEqual,
-  withinTolerance,
   type SourceFamily,
   type SourceSnapshot,
 } from "@/lib/tax/source-agreement";

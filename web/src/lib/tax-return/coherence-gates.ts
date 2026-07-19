@@ -18,12 +18,6 @@ function nearEqual(a: number, b: number): boolean {
   return Math.round(a) === Math.round(b);
 }
 
-const NOMINAL_PAR_VALUES = new Set([100, 500, 1000, 5000, 10_000]);
-
-function isNominalParCommonStock(value: number): boolean {
-  return NOMINAL_PAR_VALUES.has(Math.round(Math.abs(value)));
-}
-
 function matchesAny(value: number, traps: Array<number | undefined>): boolean {
   return traps.some((t) => t !== undefined && nearEqual(value, t));
 }
@@ -136,7 +130,7 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
     resolved.warnings.push(`Coherence: COGS (${cogs}) exceeds sales (${sales}) — verify`);
   }
 
-  if (sales !== undefined && sales > 50_000) {
+  if (sales !== undefined && sales > 0) {
     const stmt2 =
       inferStmt2AttachmentTotal(ctx.allText, ctx.formKind, resolved, {
         comparisonOpex: ctx.comparison?.values.other_operating_expenses,
@@ -185,32 +179,32 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
   if (
     resolved.values.common_stock !== undefined &&
     resolved.values.common_stock > 0 &&
-    !isNominalParCommonStock(resolved.values.common_stock) &&
     isWeakSource(resolved.sources.common_stock) &&
-    (resolved.values.unclassified_equity !== undefined ||
-      resolved.values.other_stock_equity !== undefined)
+    matchesAny(resolved.values.common_stock, [
+      resolved.values.unclassified_equity,
+      resolved.values.other_stock_equity,
+    ])
   ) {
     const v = resolved.values.common_stock;
     delete resolved.values.common_stock;
     delete resolved.confidence.common_stock;
     delete resolved.sources.common_stock;
     resolved.warnings.push(
-      `Coherence: cleared common_stock=${v} (weak non-par; equity in unclassified/other stock)`,
+      `Coherence: cleared common_stock=${v} (weak duplicate of unclassified/other stock equity)`,
     );
   }
 
   if (
     resolved.values.preferred_stock !== undefined &&
     resolved.values.preferred_stock > 0 &&
-    !isNominalParCommonStock(resolved.values.preferred_stock) &&
     isWeakSource(resolved.sources.preferred_stock) &&
-    resolved.values.unclassified_equity !== undefined
+    matchesAny(resolved.values.preferred_stock, [resolved.values.unclassified_equity])
   ) {
     const v = resolved.values.preferred_stock;
     delete resolved.values.preferred_stock;
     delete resolved.confidence.preferred_stock;
     delete resolved.sources.preferred_stock;
-    resolved.warnings.push(`Coherence: cleared preferred_stock=${v} (weak non-par)`);
+    resolved.warnings.push(`Coherence: cleared preferred_stock=${v} (weak duplicate of unclassified equity)`);
   }
 
   if (
@@ -312,7 +306,7 @@ export function applyCoherenceGates(resolved: ResolvedFields, ctx: CoherenceGate
   if (resolved.values.amortization !== undefined && resolved.values.amortization > 0) {
     const v = resolved.values.amortization;
     const digits = String(Math.abs(Math.round(v))).length;
-    // Digit-run / OMB scrapes are not P&L amort — structural digit length, not a $100k floor.
+    // Digit-run / OMB scrapes are not P&L amort — cell digit length, not a company-size floor.
     if (digits > 7) {
       delete resolved.values.amortization;
       delete resolved.confidence.amortization;

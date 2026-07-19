@@ -48,7 +48,9 @@ function probeComparisonAttachmentGaps(
   ];
 
   for (const cat of ATTACHMENT_DETAIL_CATEGORIES) {
-    const compHits = compLines.filter((l) => cat.labelRe.test(l.label) && l.amount >= 5_000);
+    // Any keepable comparison amount can flag a gap — no `$5k` floor (crumbs are already
+    // rejected inside extractComparisonExpenseLines).
+    const compHits = compLines.filter((l) => cat.labelRe.test(l.label) && l.amount >= 1);
     if (!compHits.length) continue;
     const expected = Math.max(...compHits.map((l) => l.amount));
     const stmtMatch = stmtPool.some((l) => cat.labelRe.test(l.label) && moneyClose(l.amount, expected));
@@ -164,7 +166,7 @@ export function probeOcrCoverageGaps(
   }
 
   /** Stmt-2 total present but itemized bank/prof/util not found — attachment OCR gap. */
-  if (stmt2Total !== undefined && stmt2Total >= 5_000) {
+  if (stmt2Total !== undefined && stmt2Total >= 1) {
     const targeted = extractDocumentWideDeductionLines(allText);
     const stmt = extractStatementExpenseLines(allText);
     const pools = [...targeted, ...stmt];

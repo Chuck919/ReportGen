@@ -4,7 +4,7 @@ import {
   type OpexMultisetDiagnostic,
 } from "../../src/lib/tax/operating-expenses";
 import { TAX_WORKBOOK_ROWS, type TaxYearValues } from "../../src/lib/tax-workbook";
-import { WORKBOOK_COMPARISON_FIXTURES } from "../../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./workbook-comparison-fixtures";
 import changwenFixtures from "../changwen-fixtures.json";
 import {
   buildFieldMissDiagnostics,

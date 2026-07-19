@@ -18,8 +18,8 @@ export type CogsReconcileResult = {
 /**
  * Identity-only COGS reconcile — no sales-% or dollar floors.
  * - Comparison ≈ sales − form → comparison was gross profit; keep Form.
- * - Form much larger than comparison (comparison ≤ half) → comparison is a crumb; keep Form.
- * - Otherwise prefer comparison (two-year column / worksheet is usually the target year).
+ * - Direct Form page-1 line 2 beats a disagreeing comparison row.
+ * - Otherwise prefer comparison (its target-year column is structurally identified).
  */
 export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconcileResult | null {
   const formCogs = input.formCogs;
@@ -29,12 +29,12 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
   const sales = input.sales;
 
   if (comparisonCogs !== undefined && formCogs !== undefined) {
-    const scale = Math.max(Math.abs(formCogs), Math.abs(comparisonCogs), 1);
-    if (Math.abs(formCogs - comparisonCogs) <= Math.max(1, scale * 0.001)) return null;
+    // Exact-dollar agreement only (charter exactClosureTolerance $1 — no relative bands).
+    if (Math.abs(formCogs - comparisonCogs) <= 1) return null;
 
     if (sales !== undefined && sales > formCogs) {
       const grossProfit = sales - formCogs;
-      if (Math.abs(comparisonCogs - grossProfit) <= Math.max(1, Math.abs(grossProfit) * 0.001)) {
+      if (Math.abs(comparisonCogs - grossProfit) <= 1) {
         return {
           value: formCogs,
           confidence: formConfidence || 97,
@@ -43,16 +43,15 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
       }
     }
 
-    // Comparison is a partial read vs Form (e.g. worksheet vs 1125-A) — structural, not sales-%.
-    if (formCogs > 0 && comparisonCogs > 0 && comparisonCogs * 2 <= formCogs) {
+    // Source identity, not a confidence cutoff, establishes Form authority.
+    if (/form\s*1120(?:-s)?\s*(?:page\s*1\s*)?line\s*2\b|page\s*1\s+block/i.test(formSource)) {
       return {
         value: formCogs,
-        confidence: Math.max(formConfidence, 96),
-        source: `${formSource} (preferred over comparison crumb)`,
+        confidence: formConfidence,
+        source: `${formSource} (preferred over comparison disagreement)`,
       };
     }
 
-    // Close or same-order disagreement: comparison year column wins (AZ prior vs current).
     return {
       value: comparisonCogs,
       confidence: input.comparisonConfidence ?? 92,
@@ -60,7 +59,7 @@ export function reconcileCogsFromSources(input: CogsReconcileInput): CogsReconci
     };
   }
 
-  if (formCogs !== undefined && formConfidence >= 96) {
+  if (formCogs !== undefined) {
     return {
       value: formCogs,
       confidence: formConfidence,

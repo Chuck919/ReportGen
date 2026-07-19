@@ -13,10 +13,6 @@ export type CandidateUncertaintyInput = {
     consistencyScore?: number;
     valid?: boolean;
   }>;
-  /** Score gap below which top-two are considered "close". Default 8. */
-  scoreGapThreshold?: number;
-  /** Relative value gap to flag disagreement. Default 0.08 (8%). */
-  valueGapRatio?: number;
 };
 
 export type CandidateUncertaintyResult = {
@@ -28,19 +24,15 @@ export type CandidateUncertaintyResult = {
   runnerUpScore?: number;
 };
 
-function valueGapRatio(a: number, b: number): number {
-  return Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1);
-}
-
 /**
- * Detect when multiple extraction candidates compete with close scores but different values.
+ * Detect when multiple extraction candidates have the same paste-deciding evidence
+ * but different values. This is structural uncertainty: no score-gap, percentage,
+ * or dollar-size thresholds.
  * Generic — no client-specific branches.
  */
 export function analyzeCandidateUncertainty(
   input: CandidateUncertaintyInput,
 ): CandidateUncertaintyResult {
-  const scoreGap = input.scoreGapThreshold ?? 8;
-  const gapRatio = input.valueGapRatio ?? 0.08;
   const flags: ConfidenceFlag[] = [];
   const alternatives: FieldAlternative[] = [];
 
@@ -55,9 +47,6 @@ export function analyzeCandidateUncertainty(
   const winner = pool[0]!;
   const runnerUp = pool.find((c) => c.value !== winner.value) ?? pool[1]!;
 
-  const scoreDelta = winner.totalScore - runnerUp.totalScore;
-  const valueDelta = valueGapRatio(winner.value, runnerUp.value);
-
   for (const c of pool.slice(0, 5)) {
     if (c.value === input.value) continue;
     alternatives.push({
@@ -71,9 +60,9 @@ export function analyzeCandidateUncertainty(
   }
 
   const hasConflict =
-    scoreDelta <= scoreGap &&
-    valueDelta >= gapRatio &&
-    Math.abs(winner.value - runnerUp.value) >= Math.max(500, winner.value * 0.03);
+    winner.value !== runnerUp.value &&
+    (winner.closureScore ?? 0) === (runnerUp.closureScore ?? 0) &&
+    (winner.evidenceScore ?? 0) === (runnerUp.evidenceScore ?? 0);
 
   if (hasConflict) {
     flags.push("candidate_conflict");
@@ -103,7 +92,5 @@ export function opexCandidateUncertainty(
       consistencyScore: c.consistencyScore,
       valid: c.valid,
     })),
-    scoreGapThreshold: 8,
-    valueGapRatio: 0.08,
   });
 }

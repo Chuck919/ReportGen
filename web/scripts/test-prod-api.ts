@@ -6,10 +6,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { OcrMode } from "../src/lib/api/types";
 import { resolveTaxReturnPdf } from "../src/lib/tax-return/resolve-pdf";
-import {
-  TAX_ATTACHMENT_FIELD_IDS,
-  WORKBOOK_COMPARISON_FIXTURES,
-} from "../src/lib/workbook-comparison-fixtures";
+import { TAX_ATTACHMENT_FIELD_IDS } from "../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./lib/workbook-comparison-fixtures";
 import { TAX_WORKBOOK_ROWS } from "../src/lib/tax-workbook";
 
 const INPUT_IDS = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);

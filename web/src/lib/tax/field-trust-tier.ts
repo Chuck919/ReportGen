@@ -155,7 +155,7 @@ export function resolveFieldTrustTier(input: TrustTierInput): FieldTrustTier {
     input.fieldId &&
     isSuspiciousTaxValue(input.fieldId, value, source, input.taxYear)
   ) {
-    return value !== 0 && Math.abs(value) <= 99 ? "low" : "moderate";
+    return "low";
   }
 
   if (flags.some((f) => /verify manually|verify against|inferred from|residual/i.test(f))) {

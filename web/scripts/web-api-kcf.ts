@@ -72,7 +72,7 @@ async function main() {
     }
   }
 
-  const exp = (await import("../src/lib/workbook-comparison-fixtures")).WORKBOOK_COMPARISON_FIXTURES.tax[
+  const exp = (await import("./lib/workbook-comparison-fixtures")).WORKBOOK_COMPARISON_FIXTURES.tax[
     fixtureKey(client, year)
   ]!.values;
   const inputIds = TAX_WORKBOOK_ROWS.filter((r) => r.excelBehavior === "input").map((r) => r.id);

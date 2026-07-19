@@ -1,9 +1,9 @@
 /**
- * Verify TSV paste layout matches KCF Excel workbook (row order, year columns, input rows).
+ * Verify TSV paste layout matches the integrator workbook (rows, years, and formulas).
  * Run: npm run test:excel-paste
  */
 import { buildPasteTsv, TAX_WORKBOOK_ROWS, TAX_YEARS } from "../src/lib/tax-workbook";
-import { WORKBOOK_COMPARISON_FIXTURES } from "../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./lib/workbook-comparison-fixtures";
 import type { TaxYearValues } from "../src/lib/tax-workbook";
 
 let passed = 0;
@@ -37,7 +37,7 @@ for (const row of TAX_WORKBOOK_ROWS) {
   const cells = lines[lineIdx]!.split("\t");
   assert(cells.length === TAX_YEARS.length, `row ${row.row} (${row.id}) has ${TAX_YEARS.length} year columns`);
   if (row.excelBehavior === "formula") {
-    assert(cells.every((c) => c === ""), `formula row ${row.id} leaves year cells empty for Excel formulas`);
+    assert(cells.every((c) => c !== ""), `formula row ${row.id} includes recalculated values`);
   }
   lineIdx++;
 }
@@ -64,12 +64,12 @@ assert(amortCells[0] === "14174.00", "2023 amortization");
 assert(amortCells[1] === "0.00", "2024 amortization");
 assert(amortCells[2] === "0.00", "2025 amortization");
 
-// Partial year upload: only 2024 — other year columns blank (workbook layout)
+// Partial year upload: only 2024 — absent workbook-layout years paste as zero.
 const partial = buildPasteTsv([fixtureToColumn(2024)], { workbookLayout: true, singleColumn: false });
 const partialSales = partial.split("\n")[TAX_WORKBOOK_ROWS.findIndex((r) => r.id === "sales")]!.split("\t");
-assert(partialSales[0] === "", "missing 2025 is blank");
+assert(partialSales[0] === "0.00", "missing 2023 is zero");
 assert(partialSales[1] === "1066455.00", "2024 still in column 2");
-assert(partialSales[2] === "", "missing 2023 is blank");
+assert(partialSales[2] === "0.00", "missing 2025 is zero");
 
 // Single-column paste (UI default): one value per row for latest year
 const singleCol = buildPasteTsv([fixtureToColumn(2024)], { section: "Income Statement Data" });

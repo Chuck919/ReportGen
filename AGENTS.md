@@ -21,6 +21,27 @@ Copy-paste iteration prompt: see [Agent iteration prompt](#agent-iteration-promp
 
 Green-danger = 0 on the three holdouts. Charter smell backlog **S1–S15** is peeled/done.
 
+### Threshold peel (Jul 18) — S16, all four fixtures 100/100 after each batch
+
+All remaining paste-deciding `$`/`%` floors were replaced with structure (benched per batch, session + upload-routes green, sssi included):
+
+| Old gate | Replacement |
+|----------|-------------|
+| Stmt-3 TOTAL `≥$50k`/`≥$15k` + start matching any `Statement 3 - Form 1120…` | Start requires `other deduct`/`RD-108` on the header line; TOTAL read = `readStatementTotalCell` (comma-grouped → trailing-period cell → 4+ digit run, rightmost column, keepable) |
+| OD `readBlockTotal` `≥$1k` + `Math.max` | Same `readStatementTotalCell` (cell shape + column position) |
+| Federal mini Stmt-1 total `<$50k` cap | `miniTableTotalWithClosure` — printed Total accepted only when its own detail rows exactly close to it |
+| Federal residual nominations `≥$1_000` / `stmtTotal ≥$1k` | `≥ 1` (positivity only; residuals are constructed, crumbs already impossible) |
+| Large-corp OD split `stmtTotal ≥ $100k` | `largeDetailSum > 0` — block has detail lines outside the recipe buckets, so recipes cannot partition it (structural) |
+| Entity-caption garbage `>$250k`/`>$100k` + `anchor×2.5` | Label ends in entity suffix (`inc/llc/corp`, ≤8 words); detail line `> block TOTAL` identity; date+clock page-header bleed and `isEinOrPaymentInstructionBleed` rejected at push time |
+| Books other-income `<$50k` token cap | `isKeepableWorksheetAmount` tokens |
+| Coverage-rescan hints `≥$5k` ×2 | `≥ 1` (keepable already enforced upstream) |
+| Form-1041 `common_stock ≥$1000` / sales schedule `≥$100k`+max | `isKeepableWorksheetAmount` + rightmost cell |
+| Formula-hint tolerance `0.5%` (`workbook-display`) | Dollar-exact (±$1) |
+
+Also: dead `scanStmt2AmountsInBand` deleted; `OPERATING_EXPENSE_SLOT_IDS` now lives in leaf module `web/src/lib/tax/opex-slot-ids.ts` (breaks the `workbook-formulas ↔ operating-expenses` import cycle; `operating-expenses` re-exports it).
+
+**Still numeric but charter-acceptable (do not "fix"):** LINE_NUMBER_TRAP ≤$99, tax-year 1990–2035, nominal par set, 7-digit `isReasonableMoneyAmount`, OCR digit-shape repairs in `money.ts`, text scan windows (12k/30k/80k chars), OCR mode timing estimates, YoY flag bands in `cross-year-*` (flag/diagnostic only — never change values; `consistencyScore` is stored but excluded from `totalScore`).
+
 ### What is left
 
 1. **Phase C — sssi** — incomplete top-8 / mega-salary OCR (~63.9% opex historically). Do not peel floors to paper over; extraction-first when started.

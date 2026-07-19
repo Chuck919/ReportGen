@@ -2,7 +2,7 @@ import type { OcrCoverageDiagnostics } from "../../src/lib/tax-return/ocr-covera
 import type { OpexCandidate } from "../../src/lib/tax-return/opex-candidate-ranking";
 import type { TaxYearValues } from "../../src/lib/tax-workbook";
 import { TAX_WORKBOOK_ROWS } from "../../src/lib/tax-workbook";
-import { WORKBOOK_COMPARISON_FIXTURES } from "../../src/lib/workbook-comparison-fixtures";
+import { WORKBOOK_COMPARISON_FIXTURES } from "./workbook-comparison-fixtures";
 import { flagCodeInText } from "../../src/lib/tax-confidence/confidence-flags";
 import changwenFixtures from "../changwen-fixtures.json";
 import {

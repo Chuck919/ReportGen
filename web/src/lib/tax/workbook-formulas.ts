@@ -1,15 +1,35 @@
-import { TAX_WORKBOOK_ROWS } from "@/lib/tax-workbook";
+import { OPERATING_EXPENSE_SLOT_IDS } from "@/lib/tax/opex-slot-ids";
+
+/** Formula rows owned by this engine. Leaf constant keeps tax-workbook → formulas acyclic. */
+export const WORKBOOK_FORMULA_IDS = [
+  "gross_profit",
+  "depreciation_amortization",
+  "overhead_sga",
+  "operating_profit",
+  "net_profit_before_taxes",
+  "adjusted_net_profit_before_taxes",
+  "net_income",
+  "total_current_assets",
+  "net_fixed_assets",
+  "net_intangible_assets",
+  "total_assets",
+  "total_current_liabilities",
+  "long_term_liabilities",
+  "total_liabilities",
+  "total_equity",
+  "total_liabilities_equity",
+] as const;
 
 function n(values: Record<string, number | undefined>, id: string): number {
   const v = values[id];
   return typeof v === "number" && Number.isFinite(v) ? Math.round(v) : 0;
 }
 
-function sum(values: Record<string, number | undefined>, ids: string[]): number {
+function sum(values: Record<string, number | undefined>, ids: readonly string[]): number {
   return Math.round(ids.reduce((s, id) => s + n(values, id), 0));
 }
 
-function anyPresent(values: Record<string, number | undefined>, ids: string[], minCount: number): boolean {
+function anyPresent(values: Record<string, number | undefined>, ids: readonly string[], minCount: number): boolean {
   let present = 0;
   for (const id of ids) if (values[id] !== undefined) present++;
   return present >= minCount;
@@ -21,6 +41,10 @@ function anyPresent(values: Record<string, number | undefined>, ids: string[], m
  */
 export function computeWorkbookFormulas(values: Record<string, number | undefined>): Record<string, number | undefined> {
   const out: Record<string, number | undefined> = { ...values };
+  // Formula rows are derived output. Clear cached parser/display values before
+  // recomputing so a source field that was later corrected or removed cannot
+  // leave a stale net/total in the workbook.
+  for (const id of WORKBOOK_FORMULA_IDS) out[id] = undefined;
 
   // Income statement
   if (out.sales !== undefined || out.cogs !== undefined) {
@@ -29,18 +53,8 @@ export function computeWorkbookFormulas(values: Record<string, number | undefine
   if (out.depreciation !== undefined || out.amortization !== undefined) {
     out.depreciation_amortization = Math.round(n(out, "depreciation") + n(out, "amortization"));
   }
-  const top8Ids = [
-    "officer_compensation",
-    "salaries_wages",
-    "advertising",
-    "rent",
-    "taxes_licenses",
-    "bank_credit_card",
-    "professional_fees",
-    "utilities",
-  ];
-  if (anyPresent(out, top8Ids, 1)) {
-    out.overhead_sga = sum(out, top8Ids);
+  if (anyPresent(out, OPERATING_EXPENSE_SLOT_IDS, 1)) {
+    out.overhead_sga = sum(out, OPERATING_EXPENSE_SLOT_IDS);
   }
 
   if (
@@ -143,9 +157,8 @@ export function computeWorkbookFormulas(values: Record<string, number | undefine
   }
 
   // Ensure all formula IDs exist in output map for callers that iterate workbook rows.
-  for (const row of TAX_WORKBOOK_ROWS) {
-    if (row.excelBehavior !== "formula") continue;
-    if (!(row.id in out)) out[row.id] = undefined;
+  for (const id of WORKBOOK_FORMULA_IDS) {
+    if (!(id in out)) out[id] = undefined;
   }
 
   return out;

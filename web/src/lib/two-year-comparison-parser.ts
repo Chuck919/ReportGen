@@ -43,6 +43,9 @@ function isGrossReceiptsLabel(line: string): boolean {
 
 export function classifyComparisonLine(line: string): string | null {
   const t = line.toLowerCase();
+  // Checkbox / eligibility instruction prose ("Check box if … expenses paid to X% owned
+  // affiliates") — form boilerplate, never a worksheet money row.
+  if (/check\s*(?:the\s*)?box|checkbox/i.test(t)) return null;
   if (/\b20\b/i.test(line) && /other\s+deduct/i.test(line) && /attach|stmt\s*2|see\s+stmt|\[20\]/i.test(line)) {
     return null;
   }
@@ -76,7 +79,17 @@ export function classifyComparisonLine(line: string): string | null {
   if (/employee\s+benefit/i.test(t)) return "employee_benefits";
   if (/gasoline|\bfuel\b/i.test(t) && !/biofuel|heating/i.test(t)) return "gasoline";
   if (/taxes\s+paid/.test(t) && !/net income|per books|per return|ordinary business/i.test(t)) return "taxes_paid";
-  if (/\bcash\b/.test(t) && !/charit|contribut|flow|over\/short|chartable|method/i.test(t)) return "cash";
+  // Schedule L line-1 cash only — not Form page-1 "accounting method: Cash", cash
+  // distributions, or the Schedules L/M-1/M-2 eligibility instruction (whose "M-1"/"M-2"
+  // tokens otherwise parse as money -1/-2).
+  if (
+    /\bcash\b/.test(t) &&
+    !/charit|contribut|flow|over\/short|chartable|method|distribut|schedule\s*l|m-1|m-2|not\s+required\s+to\s+complete/i.test(
+      t,
+    )
+  ) {
+    return "cash";
+  }
   if (/receivable|trade receiv/i.test(t) && !/note|year|overpayment|balance at|beginning|ending/i.test(t)) return "accounts_receivable";
   if (/\binventory\b/.test(t)) return "inventory";
   if (/other\s+current\s+asset/.test(t)) return "other_current_assets";
@@ -100,6 +113,29 @@ export function pickComparisonColumnIndex(leftYear: number, rightYear: number, t
   return Math.abs(targetYear - leftYear) <= Math.abs(targetYear - rightYear) ? 0 : 1;
 }
 
+/**
+ * Comparison row with a blank current-year cell: exactly two money runs where the change
+ * column self-negates the prior column ("78,334 … -78,334"; prior + change = 0). Booking
+ * the surviving positive token would paste the prior year into the current year.
+ * Sign check is textual (leading "-" not part of an EIN/date range) because most token
+ * parsers strip signs.
+ */
+export function comparisonRowHasBlankCurrentColumn(line: string): boolean {
+  const runs = [...line.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?/g)];
+  if (runs.length !== 2) return false;
+  const a = runs[0]![0].replace(/,/g, "");
+  const b = runs[1]![0].replace(/,/g, "");
+  if (a !== b) return false;
+  const signedAt = (m: RegExpMatchArray) => {
+    let i = m.index! - 1;
+    while (i >= 0 && line[i] === " ") i--;
+    if (i < 0 || line[i] !== "-") return false;
+    const before = line[i - 1];
+    return before === undefined || !/[\d.]/.test(before);
+  };
+  return !signedAt(runs[0]!) && signedAt(runs[1]!);
+}
+
 export function shrinkToYearColumns(nums: number[]): [number, number] | null {
   if (nums.length === 0) return null;
   let v = nums.slice();
@@ -109,13 +145,13 @@ export function shrinkToYearColumns(nums: number[]): [number, number] | null {
     const c = v[v.length - 1]!;
     // Drop trailing YoY change column when present (e.g. 3525, 857, -2668).
     const looksLikeChange =
-      Math.abs(Math.abs(a - b) - Math.abs(c)) <= Math.max(2, Math.abs(c) * 0.03);
+      Math.abs(Math.abs(a - b) - Math.abs(c)) <= 1;
     // Legacy: middle equals sum of neighbors (OCR sometimes emits total mid-row).
     const looksLikeSum =
-      Math.abs(Math.abs(b) - Math.abs(a) - Math.abs(c)) <= Math.max(2, Math.abs(c) * 0.03);
+      Math.abs(Math.abs(b) - Math.abs(a) - Math.abs(c)) <= 1;
     // Trailing rollup total (year1 + year2 = total) — keep the two year columns.
     const looksLikeTrailingTotal =
-      Math.abs(Math.abs(c) - Math.abs(a) - Math.abs(b)) <= Math.max(2, Math.abs(c) * 0.03);
+      Math.abs(Math.abs(c) - Math.abs(a) - Math.abs(b)) <= 1;
     if (looksLikeChange || looksLikeSum || looksLikeTrailingTotal) {
       v = v.slice(0, -1);
     }
@@ -131,11 +167,19 @@ function isStructurallyValid(id: string, value: number, line: string, headerYear
   const v = Math.abs(value);
   if (isFormReferenceNumber(v)) return false;
   if (headerYears && (v === headerYears[0] || v === headerYears[1])) return false;
-  if (id === "depreciation" && (value < 0 || /accumulated/i.test(line))) return false;
+  // Blank comparison cells often leave only the printed row number
+  // (`16 Accounts payable`). That line number is not a dollar value.
+  const leadingRow = line.match(/^\s*[\W_]*(\d{1,3})(?=\s|[_\][|.:])/);
+  if (leadingRow && v === Number(leadingRow[1])) return false;
+  if (
+    id === "depreciation" &&
+    (value < 0 || /accumulated|post-?1986|adjustment|form\s*4562/i.test(line))
+  ) {
+    return false;
+  }
   if ((id === "depreciation" || id === "amortization") && value >= 2020 && value <= 2030) return false;
   if ((id === "depreciation" || id === "amortization") && (value === 1986 || value === 1987)) return false;
   if (id === "accounts_receivable" && /balance at|beginning|ending|year/i.test(line)) return false;
-  if ((id === "other_income" || id === "taxes_paid" || id === "depreciation" || id === "amortization") && Math.abs(value) < 100) return false;
   // Form 8990 / IRC §163(j) instruction crumbs — context only, no bare dollar floors.
   if (
     id === "interest_expense" &&
@@ -152,12 +196,20 @@ function isStructurallyValid(id: string, value: number, line: string, headerYear
   ) {
     return false;
   }
-  if (id === "other_operating_expenses" && Math.abs(value) > 5_000_000) return false;
   if (id === "other_income" && /subtraction|subtract|sch\.?\s*k|schedule\s*k|from federal/i.test(line)) return false;
-  if (id === "notes_minus_short_term" && Math.abs(value) < 100) return false;
-  // COGS/rent: no size floor — year/line-number/negative checks above are enough.
+  // Balance-sheet asset seats and COGS/rent are never signed variance columns.
   if (
-    (id === "rent" || id === "taxes_licenses" || id === "cogs" || id === "sales") &&
+    (id === "rent" ||
+      id === "taxes_licenses" ||
+      id === "cogs" ||
+      id === "sales" ||
+      id === "cash" ||
+      id === "accounts_receivable" ||
+      id === "inventory" ||
+      id === "other_current_assets" ||
+      id === "gross_fixed_assets" ||
+      id === "gross_intangible_assets" ||
+      id === "other_assets") &&
     value < 0
   ) {
     return false;
@@ -192,10 +244,12 @@ export function parseTwoYearComparisonBlock(
     /t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison|two\s*year\s*comparison|s\.?\s*,?\s*corp\w*[\s\S]{0,80}comparison|1120[-\s]?s.{0,40}worksheet|worksheet\s+page.{0,20}20\d{2}/gi;
   const starts: number[] = [];
   let sm: RegExpExecArray | null;
-  while ((sm = startRe.exec(fullText)) !== null) starts.push(sm.index);
+  while ((sm = startRe.exec(fullText)) !== null) starts.push(Math.max(0, sm.index - 8000));
   const grossIdx = fullText.search(/(?:\bg\s*)?ross\s+receipts?\s+or\s+sales/i);
   if (grossIdx >= 0) starts.push(Math.max(0, grossIdx - 300));
-  if (!starts.length) return null;
+  // Some OCR exports omit the page-1 comparison header and only identify page 2.
+  // Parse from the document start, but accept it only when real paired columns exist.
+  starts.push(0);
 
   let best: ReturnType<typeof parseTwoYearComparisonAt> = null;
   for (const start of starts) {
@@ -238,6 +292,7 @@ function parseTwoYearComparisonAt(
   const values: Record<string, number> = {};
   const confidence: Record<string, number> = {};
   let linesMatched = 0;
+  let hasComparisonColumns = false;
 
   let pendingSales = false;
   let pendingLabelId: string | null = null;
@@ -245,15 +300,26 @@ function parseTwoYearComparisonAt(
   const blockLines = block.split(/\r?\n/);
 
   const moneyFromLine = (line: string, id: string): number[] => {
+    void id;
     const matches = Array.from(line.matchAll(/\(?\$?\s*-?\d[\d,]*(?:\.\d{2})?\s*\)?/g));
     let nums: number[] = [];
     for (const m of matches) {
+      // Percentage tokens ("250% owned", "0.00%") are ratios, not dollar cells.
+      const after = line.slice(m.index! + m[0].length).match(/^\s*%/);
+      if (after) continue;
       const v = parseMoneyToken(m[0]);
       if (v !== null) nums.push(v);
     }
-    if (id === "other_operating_expenses") {
-      nums = nums.filter((n) => Math.abs(n) >= 1000);
+    const rowRefs = new Set<number>();
+    const leading = line.match(/^\s*[\W_]*(\d{1,3})[a-z]?(?=\s|[_\][|.:])/i);
+    if (leading) rowRefs.add(Number(leading[1]));
+    for (const ref of line.matchAll(/\[\s*(\d{1,3})[a-z]?(?=\s*[|\]])/gi)) {
+      rowRefs.add(Number(ref[1]));
     }
+    for (const ref of line.matchAll(/\bline\s*(\d{1,3})\b/gi)) {
+      rowRefs.add(Number(ref[1]));
+    }
+    nums = nums.filter((n) => !rowRefs.has(Math.abs(Math.round(n))));
     return nums;
   };
 
@@ -311,23 +377,13 @@ function parseTwoYearComparisonAt(
       prevLine = line;
       continue;
     }
-    if (id === "cogs") {
-      const pair = shrinkToYearColumns(
-        Array.from(line.matchAll(/\(?\$?\s*-?\d[\d,]*(?:\.\d{2})?\s*\)?/g))
-          .map((m) => parseMoneyToken(m[0]))
-          .filter((n): n is number => n !== null),
-      );
-      if (pair && Math.abs(pair[0] - pair[1]) < 2 && Math.abs(pair[0]) < 500_000) {
-        prevLine = line;
-        continue;
-      }
-    }
     if (!id || !COMPARISON_VALUE_IDS.has(id)) {
       prevLine = line;
       continue;
     }
 
     const nums = moneyFromLine(line, id);
+    if (nums.length >= 2) hasComparisonColumns = true;
     // Payroll needs a real two-column worksheet row — skip single-token form-page bleed.
     if ((id === "salaries_wages" || id === "officer_compensation") && nums.length < 2) {
       prevLine = line;
@@ -339,25 +395,33 @@ function parseTwoYearComparisonAt(
       continue;
     }
 
+    // Blank current-year cell (prior + self-negating change) — nothing to book for this year.
+    if (col === 1 && comparisonRowHasBlankCurrentColumn(line)) {
+      prevLine = line;
+      continue;
+    }
+
     let picked = col === 0 ? pair[0] : pair[1];
+    // Signed variance/change columns are not book dollars for SG&A / income rows.
     if (
       picked < 0 &&
-      (id === "rent" || id === "taxes_licenses" || id === "cogs" || id === "sales")
+      (id === "rent" ||
+        id === "taxes_licenses" ||
+        id === "cogs" ||
+        id === "sales" ||
+        id === "officer_compensation" ||
+        id === "salaries_wages" ||
+        id === "advertising" ||
+        id === "interest_expense" ||
+        id === "depreciation" ||
+        id === "amortization")
     ) {
-      const positive = nums.filter((n) => n > 1000);
+      const positive = nums.filter((n) => n > 0);
       if (!positive.length) {
         prevLine = line;
         continue;
       }
       picked = col === 0 ? positive[0]! : positive[positive.length - 1]!;
-    }
-    if (
-      id === "taxes_licenses" &&
-      nums.some((n) => Math.abs(n) >= 50_000) &&
-      Math.abs(picked) < 10_000
-    ) {
-      prevLine = line;
-      continue;
     }
     if (!Number.isFinite(picked)) {
       prevLine = line;
@@ -368,23 +432,8 @@ function parseTwoYearComparisonAt(
       continue;
     }
     if (values[id] !== undefined) {
-      const prev = values[id]!;
-      if (
-        (id === "taxes_licenses" || id === "rent") &&
-        Math.abs(prev) < 10_000 &&
-        Math.abs(picked) >= 10_000
-      ) {
-        // Replace garbled first match with a stronger later row
-      } else if (
-        (id === "salaries_wages" || id === "officer_compensation") &&
-        nums.length >= 2 &&
-        Math.abs(prev) >= 2 * Math.min(Math.abs(pair[0]), Math.abs(pair[1]))
-      ) {
-        // Replace single-column form rollup with worksheet year columns
-      } else {
-        prevLine = line;
-        continue;
-      }
+      prevLine = line;
+      continue;
     }
 
     values[id] = Math.round(picked);
@@ -393,7 +442,7 @@ function parseTwoYearComparisonAt(
     prevLine = line;
   }
 
-  if (linesMatched < 3) return null;
+  if (linesMatched === 0 || (!headerM && !assumeHeaderYears && !hasComparisonColumns)) return null;
 
   return {
     values,

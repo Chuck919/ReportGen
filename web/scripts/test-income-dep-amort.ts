@@ -75,8 +75,8 @@ console.log("=== income dep/amort ===");
     targetYear: 2024,
     comparison: { values: { depreciation: 250_000 }, confidence: { depreciation: 86 }, linesMatched: 8 },
   });
-  assert(resolved.values.depreciation === 250_000, "comparison wins over form (no dollar cap)");
-  assert(/two-year comparison/i.test(resolved.sources.depreciation ?? ""), "source is comparison worksheet");
+  assert(resolved.values.depreciation === 50_000, "high-confidence Form line beats comparison disagreement");
+  assert(/form 1120-s line 14/i.test(resolved.sources.depreciation ?? ""), "source remains Form line");
 }
 
 console.log(`\n=== income dep/amort: ${passed} passed, ${failed} failed ===`);

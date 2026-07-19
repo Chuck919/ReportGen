@@ -10,7 +10,6 @@ import { parseTaxReturnFromText } from "@/lib/tax-return/parse-from-text";
 import { probeOcrCoverageGaps } from "@/lib/tax-return/ocr-coverage-rescan";
 import type { CoverageGapProbe } from "@/lib/tax-return/ocr-coverage-rescan";
 import { buildOcrCoverageDiagnostics } from "@/lib/tax-return/ocr-coverage-diagnostics";
-import { detectTaxForm } from "@/lib/tax-return/detect-tax-form";
 import { runLocalOcrPages, runOcrPlan } from "@/lib/tax-return/local-ocr";
 
 const MAX_ATTACHMENT_RESCAN_PAGES = 14;
@@ -125,10 +124,8 @@ export async function rescanMissingAttachmentsExperimental(
   });
   const missingAttach = getMissingAttachmentFieldIds(parsed);
   const allText = `${embeddedText}\n${ocrText}`;
-  const formKind = detectTaxForm(allText).kind;
   const coverage = buildOcrCoverageDiagnostics(
     allText,
-    formKind,
     {
       values: parsed.values,
       confidence: parsed.confidence ?? {},

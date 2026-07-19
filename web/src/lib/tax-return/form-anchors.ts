@@ -4,6 +4,7 @@ import {
   isForm1120Line,
   isFormReferenceNumber,
   isHistoricalGrossReceiptsLine,
+  isKeepableWorksheetAmountOnLine,
   isReasonableMoneyAmount,
   lineMoneyTokens,
   lineMaxAmount,
@@ -11,7 +12,6 @@ import {
   parseMoney,
   scheduleLineAmount,
   substantialMoneyTokens,
-  derailOcrLeadingOne,
   unambiguousFormLineAmount,
   unambiguousFormLineAmountForTag,
 } from "./money";
@@ -59,16 +59,13 @@ function setField(
   const prev = out.confidence[id] ?? 0;
   if (prev > conf) return;
   const rounded = Math.round(value);
-  // Don't let line-number / form-ref crumbs shrink an existing sales figure.
-  // Confidence upgrade only — no $100k / $10k size floors.
+  // Equal-confidence duplicate sales reads must agree exactly. The old "keep the
+  // larger value" rule let a lossy OCR digit concatenation overwrite a correct line.
   if (
     id === "sales" &&
     out.values.sales !== undefined &&
-    rounded < out.values.sales &&
-    (conf <= (out.confidence.sales ?? 0) ||
-      isFormReferenceNumber(rounded) ||
-      Math.abs(rounded) <= 99 ||
-      !isReasonableMoneyAmount(rounded))
+    rounded !== out.values.sales &&
+    conf <= (out.confidence.sales ?? 0)
   ) {
     return;
   }
@@ -81,19 +78,20 @@ function isCogsLine(line: string): boolean {
   return /cost\s*of\s*goods|c\.?o\.?g|costof\s*goods|goods\s*soid/i.test(line);
 }
 
-/** OCR sometimes splits the last group: `3,593,6 368` → `3593368` (drop spurious middle digit). */
+/** OCR sometimes splits the last group: `1,234,5 678` → `1234678` (drop spurious middle digit). */
 function repairOcrSplitThousands(s: string): string {
   return s.replace(/(\d{1,3}(?:,\d{3})),(\d)\s+(\d{3})\b/g, (_, prefix, _middle, tail) => {
     return prefix.replace(/,/g, "") + tail;
   });
 }
 
-/** Keepable Form sales token — form-ref / year / digit-run structure, not $50k floors. */
+/** Keepable Form sales token — form-ref / year / line-number structure, not $50k floors. */
 function keepableSalesAmount(n: number): boolean {
   const abs = Math.abs(Math.round(n));
   if (abs < 1 || !isReasonableMoneyAmount(abs)) return false;
   if (isFormReferenceNumber(abs)) return false;
   if (abs >= 1990 && abs <= 2035) return false;
+  // Form line crumbs (1–99) are never gross receipts.
   if (abs <= 99) return false;
   return true;
 }
@@ -101,21 +99,24 @@ function keepableSalesAmount(n: number): boolean {
 function salesFromLine(line: string): number | undefined {
   if (/balance.*subtract.*line\s*1b.*line\s*1[ac]/i.test(line)) {
     const amt = lineMaxAmount(line) ?? scheduleLineAmount(line);
-    if (amt !== undefined && keepableSalesAmount(amt)) return derailOcrLeadingOne(amt);
+    if (amt !== undefined && keepableSalesAmount(amt)) return amt;
   }
 
   if (!/gross\s+receipt|gross receipts or sales|line\s+1c|\b1c\b/i.test(line)) {
     const tagged = bracketLineAmount(line, "1c");
-    if (tagged !== undefined && keepableSalesAmount(tagged)) return derailOcrLeadingOne(tagged);
+    if (tagged !== undefined && keepableSalesAmount(tagged)) return tagged;
     const one = unambiguousFormLineAmount(line);
-    if (one !== undefined && keepableSalesAmount(one)) return derailOcrLeadingOne(one);
+    if (one !== undefined && keepableSalesAmount(one)) return one;
     const fallback = lineMaxAmount(line) ?? consensusFromLine(line);
-    return fallback !== undefined && keepableSalesAmount(fallback)
-      ? derailOcrLeadingOne(fallback)
-      : undefined;
+    return fallback !== undefined && keepableSalesAmount(fallback) ? fallback : undefined;
   }
 
   const repaired = repairOcrSplitThousands(line);
+  // Explicit Form result cell wins. This handles damaged first-column OCR such as
+  // `1 7 027 ’ 658 ... [1c] 1 027 658` without concatenating unrelated digits.
+  const resultCell = bracketLineAmount(repaired, "1c");
+  if (resultCell !== undefined && keepableSalesAmount(resultCell)) return resultCell;
+
   // Prefer comma-grouped money runs on the gross-receipts caption (layout grammar).
   const commaAmounts = (repaired.match(/\d{1,3}(?:,\d{3})+(?:\.\d{2})?\b/g) ?? [])
     .map((r) => parseMoney(r))
@@ -128,32 +129,16 @@ function salesFromLine(line: string): number | undefined {
     const moneyRun = segment.match(/\d[\d,]{4,}/);
     if (moneyRun) {
       const joined = moneyRun[0].replace(/[^\d]/g, "");
-      // Digit-run length = OCR cell shape (not a dollar floor).
-      if (joined.length >= 6 && joined.length <= 8) {
-        const n = Number(joined);
-        if (Number.isFinite(n) && keepableSalesAmount(n)) return derailOcrLeadingOne(n);
-      }
+      const n = Number(joined);
+      if (Number.isFinite(n) && keepableSalesAmount(n)) return n;
     }
   }
 
-  const beforeLess = repaired.split(/less\s+return/i)[0] ?? repaired;
-  const afterSales = beforeLess.split(/gross\s+receipts?\s+or\s*sales/i)[1] ?? beforeLess;
-  const digitsOnly = afterSales.replace(/[^\d]/g, "");
-  if (digitsOnly.length >= 6 && digitsOnly.length <= 8) {
-    const n = Number(digitsOnly);
-    if (Number.isFinite(n) && keepableSalesAmount(n)) return derailOcrLeadingOne(n);
-  }
-
-  const bracket = bracketLineAmount(repaired, "1c");
-  if (bracket !== undefined && keepableSalesAmount(bracket)) {
-    return derailOcrLeadingOne(bracket);
-  }
-
   const one = unambiguousFormLineAmount(repaired);
-  if (one !== undefined && keepableSalesAmount(one)) return derailOcrLeadingOne(one);
+  if (one !== undefined && keepableSalesAmount(one)) return one;
 
   const tail = lineMaxAmount(repaired) ?? consensusFromLine(repaired);
-  if (tail !== undefined && keepableSalesAmount(tail)) return derailOcrLeadingOne(tail);
+  if (tail !== undefined && keepableSalesAmount(tail)) return tail;
   return undefined;
 }
 
@@ -217,11 +202,6 @@ export function extractFormAnchors(text: string, formKind?: TaxFormKind): FieldE
   return extractForm1120StyleAnchors(text, kind);
 }
 
-/** @deprecated use extractFormAnchors */
-export function extractForm1120Anchors(text: string): FieldExtraction {
-  return extractFormAnchors(text, "1120-s");
-}
-
 function isComparisonWorksheetLine(line: string, text: string, lineIdx: number): boolean {
   const ctx = text.slice(Math.max(0, lineIdx - 800), lineIdx + line.length + 200);
   return /two\s*year\s*comparison|comparison\s+worksheet|t\w{0,3}\s*y\s*ear\s*\w{0,6}\s*omparison/i.test(
@@ -251,7 +231,13 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
     ) {
       setField(out, "sales", salesFromLine(line), salesSource);
     }
-    if ((isForm1120Line(line, 2) || /\[\s*2\s*\]/i.test(line)) && isCogsLine(line) && !/gross profit/i.test(line)) {
+    if (
+      (isForm1120Line(line, 2) || /\[\s*2\s*\]/i.test(line)) &&
+      isCogsLine(line) &&
+      !/gross profit/i.test(line) &&
+      // State / Schedule COGS worksheets reuse "line 2" captions — not Form page-1.
+      !/schedule\s+cogs/i.test(line)
+    ) {
       const cogs = formLineAmount(line, "2");
       if (cogs !== undefined) setField(out, "cogs", cogs, cogsSource);
     }
@@ -308,7 +294,7 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
       }
       if (isForm1120Line(line, 31) && /total\s+tax/i.test(line)) {
         const tax = formLineAmount(line, "31") ?? scheduleLineAmount(line);
-        if (tax !== undefined && substantialMoneyTokens(line).length > 0 && Math.abs(tax) !== 31) {
+        if (tax !== undefined && isKeepableWorksheetAmountOnLine(tax, line)) {
           setField(out, "taxes_paid", tax, "Form 1120 line 31 total tax", 97);
         } else if (/\|\s*31\s*\|[^\d]*\b0\b/.test(line) || /\b31\b[^\d]{0,20}\b0\b/.test(line)) {
           setField(out, "taxes_paid", 0, "Form 1120 line 31 total tax (zero)", 97);
@@ -341,7 +327,7 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
       }
       if (isForm1120Line(line, 10) && /other\s+income/i.test(line)) {
         const amt = scheduleLineAmount(line) ?? lineTailAmount(line);
-        if (amt !== undefined && substantialMoneyTokens(line).length > 0 && Math.abs(amt) !== 10) {
+        if (amt !== undefined && isKeepableWorksheetAmountOnLine(amt, line)) {
           setField(out, "other_income", amt, "Form 1120 line 10");
         }
       }
@@ -363,14 +349,22 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
       /curren\w*\s+ass|ment\s+asel|ronases|curent\s+ass|asses|romm|stmt\s*4/i.test(line) &&
       !/\b14\b.*other\s+ass/i.test(line)
     ) {
-      setField(out, "other_current_assets", scheduleLineAmount(line), "Schedule L line 6");
+      const amt = scheduleLineAmount(line);
+      if (amt === 0 || (amt !== undefined && isKeepableWorksheetAmountOnLine(amt, line))) {
+        setField(out, "other_current_assets", amt, "Schedule L line 6");
+      }
     }
     if (
       /\b14\b/i.test(line) &&
       !/current\s+asset/i.test(line) &&
       /other\s+ass|ot\w*\s+ass|ofer\s+ass|ter\s+ass|stmt\s*4/i.test(line)
     ) {
-      setField(out, "other_assets", scheduleLineAmount(line), "Schedule L line 14");
+      const amt = scheduleLineAmount(line);
+      // A blank row may expose only the leading IRS line number. Explicit zero and
+      // keepable worksheet dollars are valid; the row number itself is not.
+      if (amt === 0 || (amt !== undefined && isKeepableWorksheetAmountOnLine(amt, line))) {
+        setField(out, "other_assets", amt, "Schedule L line 14");
+      }
     }
   }
 
@@ -471,11 +465,11 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
       }
       if (isForm1120Line(line, 5) && /^\s*5\b.*interest/i.test(line) && !/expense/i.test(line)) {
         const oi = form1120Line5Interest(line);
-        if (oi !== undefined && oi < 1_000_000) setField(out, "other_income", oi, "Form 1120 line 5 interest income", 99);
+        if (oi !== undefined) setField(out, "other_income", oi, "Form 1120 line 5 interest income", 99);
       }
       if (isForm1120Line(line, 31) && /total\s+tax/i.test(line)) {
         const tax = formLineAmount(line, "31") ?? scheduleLineAmount(line);
-        if (tax !== undefined && substantialMoneyTokens(line).length > 0 && Math.abs(tax) !== 31) {
+        if (tax !== undefined && isKeepableWorksheetAmountOnLine(tax, line)) {
           setField(out, "taxes_paid", tax, "Form 1120 line 31 total tax", 97);
         } else if (/\|\s*31\s*\|[^\d]*\b0\b/.test(line) || /\b31\b[^\d]{0,20}\b0\b/.test(line)) {
           setField(out, "taxes_paid", 0, "Form 1120 line 31 total tax (zero)", 97);
@@ -507,7 +501,12 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
       }
       // Multi-column OCR bleed: leave unset (do not guess last token).
     }
-    if ((isForm1120Line(line, 2) || /\[\s*2\s*\]/i.test(line)) && isCogsLine(line) && !/gross profit/i.test(line)) {
+    if (
+      (isForm1120Line(line, 2) || /\[\s*2\s*\]/i.test(line)) &&
+      isCogsLine(line) &&
+      !/gross profit/i.test(line) &&
+      !/schedule\s+cogs/i.test(line)
+    ) {
       const cogs = formLineAmount(line, "2");
       if (cogs !== undefined) {
         setField(out, "cogs", cogs, "Form 1120-S line 2 (page 1 block)", 99);
@@ -516,15 +515,41 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
     }
   }
 
-  const form4562 = text.match(/form\s*4562[\s\S]{0,8000}/i)?.[0];
+  // Anchor to the actual Form 4562 page (header carries its title) — page-1 references like
+  // "Depreciation from Form 4562 not claimed…" would slice into unrelated schedules.
+  const form4562 = [...text.matchAll(/(?:form\s*)?4562[\s\S]{0,8000}/gi)
+    ].map((m) => m[0]).find((slice) => /depreciation\s+and\s+amortization/i.test(slice.slice(0, 300)));
   if (form4562 && out.values.gross_intangible_assets === undefined) {
     for (const rawLine of form4562.split(/\n/)) {
       const line = rawLine.replace(/\s+/g, " ").trim();
       if (!/intangible|goodwill|organizational|start-?up/i.test(line)) continue;
+      // GILTI / attach-form captions: "attach Form(s) 5471 and Form 8992" — form numbers are not dollars.
+      if (/low-?taxed|GILTI|subpart\s+F|dividends/i.test(line)) continue;
       const amt = scheduleLineAmount(line) ?? lineTailAmount(line);
-      if (amt !== undefined) {
-        setField(out, "gross_intangible_assets", amt, "Form 4562 amortization schedule", 96);
-        break;
+      if (amt === undefined) continue;
+      const formRefs = [...line.matchAll(/form\(?s?\)?\s*(\d{3,4})\b/gi)].map((m) => Number(m[1]));
+      if (formRefs.includes(Math.round(amt))) continue;
+      setField(out, "gross_intangible_assets", amt, "Form 4562 amortization schedule", 96);
+      break;
+    }
+  }
+
+  // Dense-export Federal Statements: "Form 1120, Page 1, Line 5 - Interest" table.
+  // Bare page-1 cells (e.g. "21") are rejected as potential line-number crumbs; the
+  // attachment table's $-anchored TOTAL corroborates small interest dollars structurally.
+  if (out.values.other_income === undefined) {
+    const line5Table = text.match(
+      /form\s*1120,?\s*page\s*1,?\s*line\s*5\b\s*[-–—]?\s*interest\b[\s\S]{0,600}/i,
+    )?.[0];
+    if (line5Table && !/expense|investment/i.test(line5Table.slice(0, 100))) {
+      const totalRow = line5Table
+        .split(/\n/)
+        .map((r) => r.replace(/\s+/g, " ").trim())
+        .find((r) => /^total\b/i.test(r));
+      const m = totalRow?.match(/\$\s*([\d,]+)\s*$/);
+      const amt = m ? parseMoney(m[1]!) : null;
+      if (amt !== null && amt >= 0 && isReasonableMoneyAmount(amt)) {
+        setField(out, "other_income", amt, "Form 1120 line 5 interest income (statement total)", 97);
       }
     }
   }
@@ -542,21 +567,61 @@ function extractForm1120StyleAnchors(text: string, formKind: TaxFormKind): Field
     } else if (/line\s*14|other\s+ass/i.test(header) && !/current\s+asset/i.test(header)) {
       setField(out, "other_assets", endTotal, "Statement total (Line 14)", 99);
     } else if (/line\s*18|other\s+curren|current\s+liabilit|liabiliti\b|other\s+c\s+t/i.test(header)) {
-      setField(out, "other_current_liabilities", endTotal, "Statement total (Line 18)", 99);
+      // Line-18 statements that itemize only revolving/short-term debt captions
+      // (credit cards payable, line of credit, short-term notes) sit on the
+      // short-term-debt workbook row — same routing as the Schedule L body line
+      // "18 … STMT n" scan which books short_term_debt when readable.
+      const rows = stmtBlock.split(/\n/).map((r) => r.replace(/\s+/g, " ").trim());
+      const totalIdx = rows.findIndex((r) => /^total\b/i.test(r));
+      const detailRows = rows
+        .slice(0, totalIdx === -1 ? rows.length : totalIdx)
+        .filter(
+          (r) =>
+            /[a-z]{3,}/i.test(r) &&
+            !/^description\b|^beginning\b|^statement\b|of\s+year\s*$/i.test(r) &&
+            /\$|\d{1,3}(?:,\d{3})+/.test(r),
+        );
+      const debtRe = /credit\s+cards?\s+payable|line\s+of\s+credit|short[-\s]?term\s+note|revolv/i;
+      const allDebtCaptions = detailRows.length > 0 && detailRows.every((r) => debtRe.test(r));
+      if (allDebtCaptions) {
+        setField(out, "short_term_debt", endTotal, "Statement total (Line 18, revolving debt)", 98);
+      } else {
+        setField(out, "other_current_liabilities", endTotal, "Statement total (Line 18)", 99);
+      }
     }
   }
 
+  const stateSalesDetails: number[] = [];
+  const stateSalesTotals: number[] = [];
   for (const rawLine of text.split(/\n/)) {
     const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!/sales\s+of\s+tangible\s+personal\s+property/i.test(line)) continue;
-    const nums = lineMoneyTokens(line)
-      .filter((n) => keepableSalesAmount(n))
-      .map((n) => derailOcrLeadingOne(Math.abs(n)));
+    const nums = lineMoneyTokens(line).filter((n) => keepableSalesAmount(n));
     if (!nums.length) continue;
-    const best = Math.max(...nums);
-    if (out.values.sales === undefined || best > (out.values.sales ?? 0)) {
-      setField(out, "sales", best, "State apportionment sales detail", 93);
+    const amountCell = Math.abs(nums[nums.length - 1]!);
+    if (/sales\s+of\s+tangible\s+personal\s+property/i.test(line)) {
+      stateSalesDetails.push(amountCell);
+    } else if (/^total\s+sales\b/i.test(line)) {
+      stateSalesTotals.push(amountCell);
     }
+  }
+  // State apportionment OCR can prefix a stray digit to one detail row. Never mutate
+  // a value by digit length: use an exact printed Total-sales corroboration, the
+  // already-extracted Form value, or unanimous repeated detail instead.
+  const corroboratedStateSales = stateSalesDetails.find((value) =>
+    stateSalesTotals.some((total) => total === value),
+  );
+  const stateSales =
+    corroboratedStateSales ??
+    stateSalesDetails.find((value) => out.values.sales === value) ??
+    (stateSalesDetails.length > 0 && stateSalesDetails.every((value) => value === stateSalesDetails[0])
+      ? stateSalesDetails[0]
+      : undefined);
+  if (corroboratedStateSales !== undefined) {
+    out.values.sales = corroboratedStateSales;
+    out.confidence.sales = 96;
+    out.sources.sales = "State apportionment sales detail + Total sales (exact agreement)";
+  } else if (stateSales !== undefined && out.values.sales === undefined) {
+    setField(out, "sales", stateSales, "State apportionment sales detail (exactly corroborated)", 93);
   }
 
   // Strict 1120 only — `unknown` was admitting Line-5 interest into S-corp returns
@@ -594,12 +659,12 @@ function scanOrphanPage1DeductionAmounts(formPage1: string): FieldExtraction {
     // Keepable Form money only — no $1k/$5k/$10k floors for garbled caption rows.
     const keepable = (n: number) => {
       const abs = Math.abs(Math.round(n));
-      return (
-        abs > 99 &&
-        isReasonableMoneyAmount(abs) &&
-        !isFormReferenceNumber(abs) &&
-        !(abs >= 1990 && abs <= 2035)
-      );
+      if (abs < 1 || !isReasonableMoneyAmount(abs) || isFormReferenceNumber(abs)) return false;
+      if (abs >= 1990 && abs <= 2035) return false;
+      const rowRefs = [
+        ...line.matchAll(/(?:^\s*[\W_]*|\[)\s*(\d{1,2})(?=\s|[_\][|.:])/g),
+      ].map((m) => Number(m[1]));
+      return !rowRefs.includes(abs);
     };
     const one = unambiguousFormLineAmount(line);
     const nums = (one !== undefined ? [one] : substantialMoneyTokens(line)).filter(keepable);
@@ -692,12 +757,12 @@ function scanFormLine5OtherIncome(block: string): number | undefined {
     }
     const one = unambiguousFormLineAmountForTag(line, "5");
     if (one !== undefined) {
-      if (isFormReferenceNumber(Math.abs(one)) || Math.abs(one) <= 99) return undefined;
+      if (!isKeepableWorksheetAmountOnLine(one, line)) return undefined;
       return Math.round(one);
     }
     const amt = formLineAmount(line, "5") ?? scheduleLineAmount(line) ?? lineTailAmount(line);
     if (amt !== undefined) {
-      if (isFormReferenceNumber(Math.abs(amt)) || Math.abs(amt) <= 99) return undefined;
+      if (!isKeepableWorksheetAmountOnLine(amt, line)) return undefined;
       return Math.round(amt);
     }
     if (!substantialMoneyTokens(line).length) return 0;

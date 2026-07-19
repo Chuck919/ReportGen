@@ -198,14 +198,6 @@ export function formatTableNumber(value: number | undefined): string {
   return Math.round(value).toLocaleString();
 }
 
-const CONFIRMED_SAFE_TIERS = new Set<FieldTrustTier>([
-  "multi-source",
-  "authoritative",
-  "comparison",
-  "single-good",
-  "user-confirmed",
-]);
-
 export type WorkbookSection = "Income Statement Data" | "Balance Sheet Data";
 
 export type PasteTsvOptions = {
@@ -336,13 +328,4 @@ export function buildFullWorkbookPasteTsv(
     singleColumn: options?.singleColumn ?? columns.length <= 1,
     includeFormulas: options?.includeFormulas ?? true,
   });
-}
-
-function colLabelOverride(columns: TaxYearValues[], rowId: string): string | undefined {
-  for (const col of columns) {
-    const user = col.userOpexSlotLabels?.[rowId];
-    if (user) return user;
-  }
-  const col = columns.find((c) => c.opexSlotLabels && c.opexSlotLabels[rowId]);
-  return col?.opexSlotLabels?.[rowId];
 }

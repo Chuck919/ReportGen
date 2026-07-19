@@ -1,5 +1,4 @@
 import type { ResolvedFields } from "./merge";
-import type { TaxFormKind } from "./detect-tax-form";
 import {
   extractStatementDeductions,
   scanStatement2Total,
@@ -53,7 +52,6 @@ function stmt2DetailIncompleteFlag(
 /** Coverage signals for Stmt 2 / comparison / Schedule L — diagnose OCR vs parse vs selection. */
 export function buildOcrCoverageDiagnostics(
   allText: string,
-  formKind: TaxFormKind,
   resolved: ResolvedFields,
   options?: {
     targetYear?: number;

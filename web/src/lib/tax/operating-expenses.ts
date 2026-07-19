@@ -4,7 +4,7 @@ import {
   extractStatementExpenseLines,
 } from "@/lib/tax-return/statement-extractors";
 import { isForm1120Line, isFormReferenceNumber, isReasonableMoneyAmount, lineTailAmount, parseMoney, scheduleLineAmount, statementLineAmount } from "@/lib/tax-return/money";
-import { repairOcrLabel } from "@/lib/tax-return/ocr-label-repair";
+import { isEinOrPaymentInstructionBleed, repairOcrLabel } from "@/lib/tax-return/ocr-label-repair";
 import { detectTaxForm } from "@/lib/tax-return/detect-tax-form";
 import {
   isPlausibleOtherOperatingExpense,
@@ -23,18 +23,8 @@ import {
   normalizeExtractedExpenseLabel,
 } from "@/lib/tax/opex-pool-quality";
 
-export const OPERATING_EXPENSE_SLOT_IDS = [
-  "officer_compensation",
-  "salaries_wages",
-  "advertising",
-  "rent",
-  "taxes_licenses",
-  "bank_credit_card",
-  "professional_fees",
-  "utilities",
-] as const;
-
-export type OperatingExpenseSlotId = (typeof OPERATING_EXPENSE_SLOT_IDS)[number];
+export { OPERATING_EXPENSE_SLOT_IDS, type OperatingExpenseSlotId } from "@/lib/tax/opex-slot-ids";
+import { OPERATING_EXPENSE_SLOT_IDS, type OperatingExpenseSlotId } from "@/lib/tax/opex-slot-ids";
 
 export type OperatingExpenseLine = {
   label: string;
@@ -70,10 +60,12 @@ function isExpenseRankCrumb(
   if (abs >= 1990 && abs <= 2035) return true;
   const src = meta?.source ?? "";
   const lab = meta?.label ?? "";
+  // Residual-retained lines stay in the pool for other_opex math but never rank in top-8.
+  if (/\(residual crumb\)/i.test(src)) return true;
   const lineM = src.match(/\bline\s*(\d{1,3})\b/i) ?? lab.match(/^\s*(\d{1,3})\b/);
   if (lineM && abs === Number(lineM[1])) return true;
   if (/see\s+instructions|reserved\s+for\s+future|paperwork\s+reduction/i.test(`${src} ${lab}`)) {
-    return abs <= 999;
+    return true;
   }
   return false;
 }
@@ -126,6 +118,8 @@ export function expenseCategoryKey(label: string): string | undefined {
   const t = normalizeWhitespace(label);
   // Apportionment / factor worksheets mention payroll but are not SG&A lines.
   if (/\bapportionment\b|\bpayroll\s+and\s+sales\b|\bfactor\s+only\b/i.test(t)) return undefined;
+  // Stmt-2 payroll processing vendor fees — not Form line 13 wages.
+  if (/\bpayroll\s+processing\b/i.test(t)) return undefined;
   if (/\bnet\s+rental|\brental\s+real\s+estate/i.test(t)) {
     const hits = EXPENSE_CATEGORY_RULES.filter((r) => r.key !== "rent" && r.re.test(t)).map((r) => r.key);
     if (!hits.length) return undefined;
@@ -139,57 +133,10 @@ export function expenseCategoryKey(label: string): string | undefined {
   return hits[0];
 }
 
-/**
- * The bank/credit-card row is sometimes filled by a structural "closes the Statement total" residual
- * guess (`pickStmt2BankCreditCard`) rather than a directly labeled line — a lower-certainty computed
- * figure. When a genuinely itemized category line exists for the same row (e.g. an explicit
- * "Insurance" or "Bank charges" Statement line) and materially disagrees with that guess, prefer the
- * itemized line; the residual guess is folded into other operating expenses instead of being lost.
- */
-function isHeuristicResidualSource(source: string | undefined): boolean {
-  return /closes\s+stmt\s*\d*\s*total|bank\/credit card\s*[-—]\s*verify/i.test(source ?? "");
-}
-
-function heuristicResidualBlocksItemizedLine(
-  slotId: OperatingExpenseSlotId,
-  cur: unknown,
-  curSource: string | undefined,
-  lineAmt: number,
-): cur is number {
-  return (
-    slotId === "bank_credit_card" &&
-    typeof cur === "number" &&
-    isKeepableResidualAmount(cur) &&
-    isHeuristicResidualSource(curSource) &&
-    !withinMoneyTolerance(cur, lineAmt)
-  );
-}
-
-/** Tight tolerance for literal-duplicate detection — much stricter than money-match tolerance,
- * since two genuinely different SG&A categories can easily land within the loose $500/1% band
- * (e.g. rent $18,000 vs repairs $18,046) without being the same line item. */
+/** Rounded-dollar equality for literal duplicate detection. */
 function isExactDuplicateAmount(a: number, b: number): boolean {
   if (b === 0) return a === 0;
   return Math.round(a) === Math.round(b);
-}
-
-/** True when amount equals another slot (literal duplicate line) or the sum of two other slots
- * (double-count guard, e.g. an "other deductions" residual that is really bank + utilities). */
-function isAggregateOfOtherSlots(
-  amount: number,
-  values: Record<string, number | undefined>,
-  slotId: string,
-): boolean {
-  const others = OPERATING_EXPENSE_SLOT_IDS.filter((id) => id !== slotId)
-    .map((id) => values[id])
-    .filter((n): n is number => typeof n === "number" && isKeepableResidualAmount(n));
-  for (let i = 0; i < others.length; i++) {
-    if (isExactDuplicateAmount(others[i]!, amount)) return true;
-    for (let j = i + 1; j < others.length; j++) {
-      if (withinMoneyTolerance(others[i]! + others[j]!, amount)) return true;
-    }
-  }
-  return false;
 }
 
 export function expenseLabelKey(label: string): string {
@@ -236,10 +183,13 @@ function isPlausibleExpenseLabel(label: string): boolean {
     return false;
   }
   if (/\bvehicle\s*\/\s*\/|(?:volvo|mercedes)\s+vehicle\b/i.test(t)) return false;
+  // Broken comparison captions with multiple isolated slash columns are OCR row
+  // fragments, not readable expense labels (e.g. "… bank / / …").
+  if (/(?:\/\s*){2,}/.test(t)) return false;
   if (isBalanceSheetPositionLabel(t)) return false;
   if (isMailingOrFormFooterNoise(t)) return false;
   if (
-    !/\b(fee|fees|rent|util|insur\w*|suppl\w*|office|bank|credit|merchant|profession|legal|account|advert|tax|licen|payroll|repair|maint|travel|telephone|dues|charit|misc|other deduct|benefit\w*|gasoline|fuel|job|vehicle)/i.test(
+    !/\b(fee|fees|rent|util|insur\w*|suppl\w*|office|bank|credit|merchant|profession|legal|account|advert|tax|licen|payroll|repair|maint|travel|telephone|dues|charit|misc|other deduct|benefit\w*|gasoline|fuel|job|vehicle|pension|profit-?shar\w*)/i.test(
       t,
     )
   ) {
@@ -256,38 +206,6 @@ function isPlausibleRankPoolLabel(label: string): boolean {
   if (isPlausibleExpenseLabel(label)) return true;
   if (t.length < 3 || t.length > 80 || !/[a-z]/i.test(t)) return false;
   return /\b(salar|wage|officer|compens|benefit|gasoline|fuel)\b/i.test(t);
-}
-
-/**
- * Form page-1 payroll vs comparison year-column for the same field — when Form OCR
- * carries a multi-year rollup (≥2× the comparison year column), drop the Form line.
- * OCR defense: Form often bleeds year columns into one amount; comparison is year-aligned.
- * Multiplier is structural (rollup vs single year), not a sales-% / company-size floor.
- */
-function isFormFieldRollupVsComparisonRow(
-  line: OperatingExpenseLine,
-  pool: OperatingExpenseLine[],
-): boolean {
-  const src = line.source ?? "";
-  if (!/form\s*1120/i.test(src)) return false;
-  const cat = expenseCategoryKey(line.label);
-  if (cat !== "salaries_wages" && cat !== "officer_compensation") return false;
-  const formAmt = Math.round(Math.abs(line.amount));
-  const compRow = pool.find(
-    (l) =>
-      l !== line &&
-      new RegExp(`\\(${cat}\\s+row\\)`, "i").test(l.source ?? "") &&
-      isKeepableResidualAmount(l.amount),
-  );
-  if (!compRow) return false;
-  const compAmt = Math.round(Math.abs(compRow.amount));
-  // Year crumbs (Form 8879 / calendar headers) must not displace Form page-1 payroll.
-  if (compAmt >= 2015 && compAmt <= 2035) return false;
-  // Form is a multi-year rollup only when comparison is a plausible single-year column
-  // (near digit length). A crumb comparison (e.g. repairs bleed $4212 vs Form $182k) must
-  // not displace Form — digit-length gap ≥2 → keep Form.
-  if (String(formAmt).length - String(compAmt).length >= 2) return false;
-  return formAmt >= 2 * compAmt;
 }
 
 /** Company-name OCR bleed (Inc/LLC entity captions) — not a paste-row label. */
@@ -345,14 +263,6 @@ function isOtherIncomeStatementNoise(line: OperatingExpenseLine): boolean {
   return false;
 }
 
-/** Employee benefit caps lines without a comparison field-row — Stmt residual, not top-8. */
-function isEmployeeBenefitDetailNoise(line: OperatingExpenseLine): boolean {
-  const t = normalizeWhitespace(line.label);
-  if (!/employee\s+benefit/i.test(t)) return false;
-  if (comparisonRowGroupKey(line.source)) return false;
-  return true;
-}
-
 /** Merchant fees on Form 1125-A / COGS other-costs — not SG&A. Other-deductions merchant stays. */
 function isMerchantCogsNoise(line: OperatingExpenseLine): boolean {
   const t = normalizeWhitespace(line.label);
@@ -368,17 +278,6 @@ function isMerchantCogsNoise(line: OperatingExpenseLine): boolean {
   // Mis-tagged Stmt-2 federal-table rows that are really Form 1125-A merchant fees.
   if (/merchant\s+fees?\b/i.test(t) && /federal\s+statements\s+table/i.test(src)) return true;
   return false;
-}
-
-/** Small office/supplies detail — residual other_opex, not integrator top-8. */
-function isOfficeSuppliesResidualNoise(line: OperatingExpenseLine): boolean {
-  const t = normalizeWhitespace(line.label);
-  if (comparisonRowGroupKey(line.source)) return false;
-  if (!/office\s+expense|misc\s+office|office\s+suppl/i.test(t)) return false;
-  // Exclude from top-8 competition; stmt-total − stmt-in-top-8 still counts these in other_opex.
-  return /caps|document|attachment|statement\s*\d|stmt\s*\d|form\s+attachment/i.test(
-    line.source ?? "",
-  );
 }
 
 /** Property / deposit tax captions that are not the Taxes-and-licenses SG&A row. */
@@ -446,34 +345,160 @@ function isStmt2ResidualDetail(line: OperatingExpenseLine): boolean {
   ) {
     return false;
   }
-  return /payroll\s+tax|charitable\s+contr|settlement|staff\s+meetings?|temporary\s+labor|50\s*%\s*of\s+meals|telephone|tolls?|parking|software|dues\s*&?\s*subscriptions?|fuel\s+charg|continuing\s+edu/i.test(
+  return /payroll\s+tax|payroll\s+processing|charitable\s+contr|settlement|staff\s+meetings?|temporary\s+labor|equipment\s+rental|50\s*%\s*of\s+meals|telephone|tolls?|parking|software|dues\s*&?\s*subscriptions?|fuel\s+charg|continuing\s+edu/i.test(
     t,
   );
 }
 
-function expenseLineSourcePriority(source: string | undefined): number {
-  const src = source ?? "";
-  if (/comparison\s*\([^)]+row\)/i.test(src)) return 4;
-  if (/form\s*1120/i.test(src)) return 3;
-  if (/statement\s*\d|stmt\s*\d/i.test(src)) return 2;
-  if (/two.year\s+comparison/i.test(src)) return 2;
-  if (/attachment|caps\s+label|ocr\s+caps/i.test(src)) return 2;
-  if (/document[\s._-]*scan/i.test(src)) return 2;
-  if (/comparison/i.test(src)) return 0;
-  return 0;
+/** Form 1125-A Cost of Labor present — comparison salaries are COGS labor, not SG&A top-8. */
+function poolHas1125aCostOfLabor(lines: OperatingExpenseLine[]): boolean {
+  return lines.some((l) => {
+    const blob = `${l.label} ${l.source ?? ""}`;
+    return (
+      /cost\s+of\s+labor/i.test(blob) &&
+      /1125|federal\s+statements|form\s+attachment|line\s*3\b|cogs|cost\s+of\s+(?:goods|sales)/i.test(blob)
+    );
+  });
 }
 
-function rankPoolLineQuality(line: OperatingExpenseLine): number {
-  let score = expenseLineSourcePriority(line.source) * 100;
-  const cat = expenseCategoryKey(line.label);
-  if (cat) score += 60;
-  if (isNonExpenseAnchorLabel(line.label)) score -= 500;
-  if (isTaxReturnTitleNoise(line.label)) score -= 500;
-  if (isStatementCrossRefNoise(line.label)) score -= 400;
-  if (isRankPoolStructuralNoise(line)) score -= 400;
-  if (/comparison_raw|comparison_deduction_schedule/i.test(line.source ?? "")) score -= 500;
-  if (/caps\s+label/i.test(line.source ?? "") && !cat) score -= 50;
-  return score;
+function poolTextLooksLike1120C(lines: OperatingExpenseLine[]): boolean {
+  const blob = lines.map((l) => `${l.source ?? ""} ${l.label}`).join("\n");
+  if (/form\s+1120-?s\b/i.test(blob)) return false;
+  return /u\.s\.\s+corporation\s+income|form\s+1120\s+return\s+summary|\bform\s+1120\b(?!-)/i.test(blob);
+}
+
+/** Two-year comparison salaries on C-corp 1120 when 1125-A cost of labor exists — not integrator SG&A. */
+function isComparisonSalaries1125aLaborEcho(
+  line: OperatingExpenseLine,
+  pool: OperatingExpenseLine[],
+): boolean {
+  if (expenseCategoryKey(line.label) !== "salaries_wages") return false;
+  const src = line.source ?? "";
+  const isComparisonSalaries =
+    /two[\s.-]?year\s+comparison/i.test(src) || /\(salaries_wages\s+row\)/i.test(src);
+  if (!isComparisonSalaries) return false;
+  if (!poolTextLooksLike1120C(pool)) return false;
+  if (poolHas1125aCostOfLabor(pool)) return true;
+  // Itemized Stmt-2 SG&A pack without comparison salaries in top-8 (C-corp other-deductions detail).
+  const stmt2Sga = pool.filter(
+    (l) =>
+      /statement\s*\d|stmt\s*\d|form\s+attachment|federal\s+statements/i.test(l.source ?? "") &&
+      !!expenseCategoryKey(l.label) &&
+      isKeepableResidualAmount(l.amount),
+  ).length;
+  return stmt2Sga >= 4;
+}
+
+/** Comparison officer row when Form 1120 / 1125-E already has a different officer total. */
+function isDiscreditedComparisonOfficerRow(
+  line: OperatingExpenseLine,
+  pool: OperatingExpenseLine[],
+): boolean {
+  if (!/\(officer_compensation\s+row\)/i.test(line.source ?? "")) return false;
+  const amt = Math.round(line.amount);
+  return pool.some(
+    (l) =>
+      l !== line &&
+      expenseCategoryKey(l.label) === "officer_compensation" &&
+      /form\s*1120\s*line\s*12|form\s+1125|1125-?e|federal\s+statements\s+table/i.test(l.source ?? "") &&
+      isKeepableResidualAmount(l.amount) &&
+      Math.round(l.amount) !== amt,
+  );
+}
+
+/** Form line 24 employee benefits when Stmt-2 insurance is already itemized — duplicate rollup. */
+function isDuplicateFormEmployeeBenefitsWhenStmtInsurance(
+  line: OperatingExpenseLine,
+  pool: OperatingExpenseLine[],
+): boolean {
+  const t = normalizeWhitespace(line.label);
+  if (!/employee\s+benefit/i.test(t)) return false;
+  if (comparisonRowGroupKey(line.source)) return false;
+  const src = line.source ?? "";
+  if (!/form\s*1120|form\s+attachment|line\s*24/i.test(src)) return false;
+  return pool.some(
+    (l) =>
+      l !== line &&
+      /^insurance\b/i.test(normalizeWhitespace(l.label)) &&
+      /statement\s*\d|stmt\s*\d|form\s+attachment|federal\s+statements/i.test(l.source ?? "") &&
+      isKeepableResidualAmount(l.amount),
+  );
+}
+
+/** Comparison row amount = 7-digit EIN suffix (e.g. 12-3456789 → 3456789) — not SG&A. */
+function isComparisonEinSuffixAmountBleed(line: OperatingExpenseLine): boolean {
+  const src = line.source ?? "";
+  if (!/\([a-z_]+\s+row\)/i.test(src)) return false;
+  const amt = Math.round(Math.abs(line.amount));
+  if (String(amt).length !== 7) return false;
+  const t = normalizeWhitespace(line.label);
+  if (/^(?:compensation of officers|salaries and wages)\b/i.test(t)) return false;
+  if (isEinOrPaymentInstructionBleed(`${t} ${src}`, amt)) return true;
+  // Bare 7-digit comparison field-row with no Form/stmt corroboration — EIN bleed.
+  return /employee\s+benefit/i.test(t);
+}
+
+type ExpenseLineSourceClass = "comparison-row" | "form" | "detail" | "weak";
+
+function expenseLineSourceClass(source: string | undefined): ExpenseLineSourceClass {
+  const src = source ?? "";
+  if (/comparison\s*\([^)]+row\)/i.test(src)) return "comparison-row";
+  if (/form\s*1120|form\s*1125/i.test(src)) return "form";
+  if (
+    /statement\s*\d|stmt\s*\d|two.year\s+comparison|attachment|caps\s+label|ocr\s+caps|document[\s._-]*scan/i.test(
+      src,
+    )
+  ) {
+    return "detail";
+  }
+  return "weak";
+}
+
+function isStructurallyRejectedRankLine(line: OperatingExpenseLine): boolean {
+  return (
+    isNonExpenseAnchorLabel(line.label) ||
+    isTaxReturnTitleNoise(line.label) ||
+    isStatementCrossRefNoise(line.label) ||
+    isRankPoolStructuralNoise(line) ||
+    /comparison_raw|comparison_deduction_schedule/i.test(line.source ?? "")
+  );
+}
+
+/** Explicit source precedence; no weighted score whose magic numbers can offset hard noise. */
+function sourceClassOutranks(next: ExpenseLineSourceClass, cur: ExpenseLineSourceClass): boolean | undefined {
+  if (next === cur) return undefined;
+  if (next === "form") return true;
+  if (cur === "form") return false;
+  if (next === "comparison-row") return true;
+  if (cur === "comparison-row") return false;
+  if (next === "detail") return true;
+  if (cur === "detail") return false;
+  return undefined;
+}
+
+function compareRankPoolLineQuality(
+  next: OperatingExpenseLine,
+  cur: OperatingExpenseLine,
+): boolean | undefined {
+  const nextRejected = isStructurallyRejectedRankLine(next);
+  const curRejected = isStructurallyRejectedRankLine(cur);
+  if (nextRejected !== curRejected) return !nextRejected;
+
+  const sourceChoice = sourceClassOutranks(
+    expenseLineSourceClass(next.source),
+    expenseLineSourceClass(cur.source),
+  );
+  if (sourceChoice !== undefined) return sourceChoice;
+
+  const nextCategory = expenseCategoryKey(next.label);
+  const curCategory = expenseCategoryKey(cur.label);
+  if (Boolean(nextCategory) !== Boolean(curCategory)) return Boolean(nextCategory);
+
+  const nextUnknownCaps = /caps\s+label/i.test(next.source ?? "") && !nextCategory;
+  const curUnknownCaps = /caps\s+label/i.test(cur.source ?? "") && !curCategory;
+  if (nextUnknownCaps !== curUnknownCaps) return !nextUnknownCaps;
+
+  return undefined;
 }
 
 function preferRankPoolLine(next: OperatingExpenseLine, cur: OperatingExpenseLine): boolean {
@@ -481,27 +506,27 @@ function preferRankPoolLine(next: OperatingExpenseLine, cur: OperatingExpenseLin
   const cDoc = /document[\s._-]*scan/i.test(cur.source ?? "");
   const nRow = /\([a-z_]+\s+row\)/i.test(next.source ?? "");
   const cRow = /\([a-z_]+\s+row\)/i.test(cur.source ?? "");
-  const nForm = /form\s*1120[-\s]?[sb]?\s*line\s*\d/i.test(next.source ?? "");
+  const nForm = /form\s*1120[-\s]?[sb]?\s*line\s*\d|form\s*1125/i.test(next.source ?? "");
+  const cForm = /form\s*1120[-\s]?[sb]?\s*line\s*\d|form\s*1125/i.test(cur.source ?? "");
   // Comparison field-rows beat document-scan category guesses (e.g. rent 504k vs scan 204k).
   if (nRow && cDoc) return true;
   if (nDoc && cRow) return false;
-  // Form page-1 lines may replace a comparison row for the same category.
+  // Form page-1 / 1125-E lines may replace a comparison row for the same category.
   if (nForm && cRow && expenseCategoryKey(next.label)) return true;
+  if (nRow && cForm && expenseCategoryKey(cur.label)) return false;
   // Prefer the canonical "utilities" caption over narrower utility sub-lines.
   const nUtil = /^utilities\b/i.test(normalizeWhitespace(next.label));
   const cUtil = /^utilities\b/i.test(normalizeWhitespace(cur.label));
   if (nUtil !== cUtil && expenseCategoryKey(next.label) === "utilities") return nUtil;
-  const nq = rankPoolLineQuality(next);
-  const cq = rankPoolLineQuality(cur);
-  if (nq !== cq) return nq > cq;
+  const qualityChoice = compareRankPoolLineQuality(next, cur);
+  if (qualityChoice !== undefined) return qualityChoice;
   return Math.round(next.amount) > Math.round(cur.amount);
 }
 
 /** When two lines share a category, prefer authoritative form/statement sources over comparison noise. */
 function prefersExpenseLineForCategory(next: OperatingExpenseLine, cur: OperatingExpenseLine): boolean {
-  const nq = rankPoolLineQuality(next);
-  const cq = rankPoolLineQuality(cur);
-  if (nq !== cq) return nq > cq;
+  const qualityChoice = compareRankPoolLineQuality(next, cur);
+  if (qualityChoice !== undefined) return qualityChoice;
   return Math.round(next.amount) > Math.round(cur.amount);
 }
 
@@ -509,25 +534,12 @@ function prefersExpenseLineForCategory(next: OperatingExpenseLine, cur: Operatin
  * Extraction pipeline (strict order — do not skip phases):
  *
  * 1. OCR — embedded text + balanced/thorough OCR + attachment-gap rescan when Stmt detail missing.
- * 2. Raw capture — union every label+amount candidate; structural gates only (has letters, ≥ $100).
+ * 2. Raw capture — union every label+amount candidate; structural keepability gates only.
  * 3. Completeness gate — every integrator amount present in raw pool (amount match, any label OK);
  *    production: Stmt detail sum vs comparison OTHER DEDUCTIONS + `buildOcrCoverageDiagnostics`.
- * 4. Label cleaning — `cleanOperatingExpenseLines` (plausibility, sales cap, entity noise) — OFF until phase 3 passes.
- * 5. Ranking / slot assignment — OFF until phases 3–4 pass (`useOpexRankByAmount`).
+ * 4. Label cleaning — `cleanOperatingExpenseLines` (plausibility and document-noise rejection).
+ * 5. Ranking / slot assignment — cross-year amount sum, with labels used for grouping only.
  */
-
-/**
- * Ranking is blocked until every integrator (label, amount) pair is extractable from OCR.
- * Use `auditExpectedPairExtraction` + dump `--human` to verify the pool before re-enabling.
- */
-export function useOpexRankByAmount(): boolean {
-  return true;
-}
-
-/** Label plausibility filters for rank pool — reject OCR noise, keep real expense lines. */
-export function useOpexLabelCleaning(): boolean {
-  return true;
-}
 
 /** Filtered expense-line pool for rank-by-amount (plausibility + sales cap, labels for filtering only). */
 function prepareOpexRankPool(col: TaxYearValues): OperatingExpenseLine[] {
@@ -547,7 +559,7 @@ function prepareOpexRankPool(col: TaxYearValues): OperatingExpenseLine[] {
     if (amount === undefined || !isKeepableResidualAmount(amount)) continue;
     const src = col.fieldSources?.[slotId] ?? "";
     // Comparison field-rows, Form page-1 lines, OCR label matches, cross-year comparison
-    // backfill, statement taxes split, and comparison taxes−taxes_paid (AZ payroll/sales).
+    // backfill, statement taxes split, and the comparison taxes−taxes_paid identity.
     if (
       !/\([a-z_]+\s+row\)/i.test(src) &&
       !/form\s*1120/i.test(src) &&
@@ -574,7 +586,6 @@ function prepareOpexRankPool(col: TaxYearValues): OperatingExpenseLine[] {
       amount: Math.round(Math.abs(amount)),
       source: src,
     };
-    if (isFormFieldRollupVsComparisonRow(reinjectLine, raw)) continue;
     raw.push(reinjectLine);
   }
   // Drop competing Form/OCR taxes roll-ups when payroll+sales split is the field amount.
@@ -595,7 +606,7 @@ function prepareOpexRankPool(col: TaxYearValues): OperatingExpenseLine[] {
 
 /** Sources allowed in the rank pool — Stmt/Form/comparison rows; raw comparison grids excluded. */
 const RANK_POOL_SOURCE_ALLOW =
-  /form\s*1120|statement\s*\d|stmt\s*\d|attachment|other\s+deduct|federal\s+statements|caps\s+label|comparison_rules|comparison\s*deduction|two[\s.-]?year\s+comparison|comparison\s*\(|document[\s._-]*scan|ocr\s+caps|ocr\s+label\s+match|parser\s+field/i;
+  /form\s*1120|form\s*1125|statement\s*\d|stmt\s*\d|attachment|other\s+deduct|federal\s+statements|caps\s+label|comparison_rules|comparison\s*deduction|two[\s.-]?year\s+comparison|comparison\s*\(|document[\s._-]*scan|ocr\s+caps|ocr\s+label\s+match|parser\s+field/i;
 
 const COMPARISON_ROW_FIELD_IDS = new Set([
   "officer_compensation",
@@ -704,6 +715,11 @@ export function filterRankExpensePool(
   for (const line of lines) {
     const amount = Math.round(Math.abs(line.amount));
     const crumbMeta = { source: line.source, label: line.label };
+    // Already-retained residual lines pass through unchanged (re-filter must be idempotent).
+    if (/\(residual crumb\)/i.test(line.source ?? "")) {
+      if (isKeepableResidualAmount(amount)) passed.push({ ...line, amount });
+      continue;
+    }
     // OCR crumbs stay for residual math only; keepable non-crumbs compete in top-8 by amount.
     if (!isKeepableResidualAmount(amount) || isExpenseRankCrumb(amount, crumbMeta)) {
       if (
@@ -720,7 +736,7 @@ export function filterRankExpensePool(
       }
       continue;
     }
-    if (diagnoseIllogicalAmount(line, sales, anchors)) continue;
+    if (diagnoseIllogicalAmount(line, anchors)) continue;
     if (diagnoseRankPoolLineRejection(line, sales, anchors)) continue;
     if (isUnsupportedComparisonRow(line)) continue;
     if (isRankPoolStructuralNoise(line)) continue;
@@ -736,9 +752,30 @@ export function filterRankExpensePool(
     if (isTaxCreditScheduleNoise(line)) continue;
     if (isCalendarYearWorksheetNoise(line)) continue;
     if (isCogsOtherCostsNoise(line)) continue;
-    if (isFormFieldRollupVsComparisonRow(line, lines)) continue;
-    // Stmt-2 "residual detail" (meals, dues, telephone, …) may still be a real top-8
-    // winner at an unseen company — do not demote by caption; rank by amount only.
+    if (isComparisonSalaries1125aLaborEcho(line, lines)) continue;
+    if (isDiscreditedComparisonOfficerRow(line, lines)) continue;
+    if (isDuplicateFormEmployeeBenefitsWhenStmtInsurance(line, lines)) {
+      // Not a top-8 row here, but the Form line 24 dollars sit outside the stmt
+      // partition — keep for the other_opex fold instead of dropping.
+      passed.push({
+        ...line,
+        amount,
+        source: `${line.source ?? "expense"} (residual crumb)`,
+      });
+      continue;
+    }
+    if (isFormPage1ResidualCaption(line.label)) {
+      // Pension / charitable page-1 lines roll into other_opex (same integrator
+      // convention as payroll tax / telephone residual detail) — never top-8 rows.
+      passed.push({
+        ...line,
+        amount,
+        source: `${line.source ?? "expense"} (residual crumb)`,
+      });
+      continue;
+    }
+    if (isComparisonEinSuffixAmountBleed(line)) continue;
+    if (isStmt2ResidualDetail(line)) continue;
     passed.push(line);
   }
 
@@ -1204,7 +1241,7 @@ export function cleanOperatingExpenseLines(
   raw: OperatingExpenseLine[],
   context?: { sales?: number; values?: Record<string, number> },
 ): OperatingExpenseLine[] {
-  return filterIllogicalExpenseAmounts(raw, context).map((line) => ({
+  return filterIllogicalExpenseAmounts(raw, { values: context?.values }).map((line) => ({
     ...line,
     label: normalizeExtractedExpenseLabel(line.label),
   }));
@@ -1332,7 +1369,6 @@ function resolveOtherDeductionsStatementNumber(allText: string): number {
 export function extractOperatingExpenseLinesFromText(allText: string): OperatingExpenseLine[] {
   const out: OperatingExpenseLine[] = [];
   let inStmt2 = false;
-  let inFederalTable = false;
   const stmtN = resolveOtherDeductionsStatementNumber(allText);
   const stmtNPattern = `(?:statement|stmt|tatement)\\s*${stmtN}\\b`;
   const otherStmtPattern = `(?:statement|stmt)\\s*(?!${stmtN}\\b)[1-9]\\d?\\b`;
@@ -1348,7 +1384,6 @@ export function extractOperatingExpenseLinesFromText(allText: string): Operating
         : "";
 
     if (/^description\s+amount\b/i.test(line) && /federal\s+statements/i.test(recentContext)) {
-      inFederalTable = true;
       inStmt2 = true;
       continue;
     }
@@ -1363,12 +1398,10 @@ export function extractOperatingExpenseLinesFromText(allText: string): Operating
         !/two\s*year\s*comparison|comparison\s+worksheet/i.test(recentContext))
     ) {
       inStmt2 = true;
-      inFederalTable = /federal\s+statements/i.test(recentContext + line);
       if (process.env.DEBUG_STMT_N) console.error(`[enter-main]`, JSON.stringify(line));
       continue;
     }
     if (/^description\s+amount\b/i.test(line) && new RegExp(stmtNPattern, "i").test(recentContext)) {
-      inFederalTable = true;
       inStmt2 = true;
       if (process.env.DEBUG_STMT_N) console.error(`[enter-federal]`, JSON.stringify(line));
       continue;
@@ -1376,12 +1409,10 @@ export function extractOperatingExpenseLinesFromText(allText: string): Operating
     if (inStmt2 && new RegExp(otherStmtPattern, "i").test(line) && !/other\s+deduct/i.test(line)) {
       if (process.env.DEBUG_STMT_N) console.error(`[exit-otherStmt]`, JSON.stringify(line));
       inStmt2 = false;
-      inFederalTable = false;
     }
     if (inStmt2 && /two\s*year\s*comparison|comparison\s+worksheet/i.test(line)) {
       if (process.env.DEBUG_STMT_N) console.error(`[exit-comparison]`, JSON.stringify(line));
       inStmt2 = false;
-      inFederalTable = false;
     }
     if (!inStmt2) continue;
 
@@ -1451,6 +1482,34 @@ function pushDirectFormLine(
   if (best) out.push(best);
 }
 
+/** Form 1125-E officer total — page-1 line 12 OCR often loses the amount on dense exports. */
+function push1125eOfficerTotal(allText: string, out: OperatingExpenseLine[]): void {
+  let best: OperatingExpenseLine | undefined;
+  for (const raw of allText.split(/\n/)) {
+    const line = normalizeWhitespace(raw);
+    // Strict Form 1125-E line-2 caption only. Bare "Compensation of officers" also titles
+    // two-year comparison rows, where a blank current year leaves prior-year dollars +
+    // a negative change ("78,334 … -78,334") — matching those steals the prior-year column.
+    if (!/total\s+compensation\s+of\s+officers/i.test(line)) continue;
+    if (/see instructions|\battach\b/i.test(line) && !/\d{1,3}(?:,\d{3})+/.test(line)) continue;
+    if (/schedule\s*l|comparison|balance\s+sheet|screen\s+table/i.test(line)) continue;
+    // Comparison difference rows self-negate (X … -X); a 1125-E total line never does.
+    if (/-\s*\d{1,3}(?:,\d{3})+/.test(line)) continue;
+    const normalized = line.replace(/(\d), (\d{3})\b/g, "$1,$2");
+    const amount = scheduleLineAmount(normalized) ?? lineTailAmount(normalized);
+    if (amount === undefined) continue;
+    const rounded = Math.round(Math.abs(amount));
+    if (!isKeepableResidualAmount(rounded)) continue;
+    const cand: OperatingExpenseLine = {
+      label: "Compensation of officers",
+      amount: rounded,
+      source: "Form 1125-E (total compensation)",
+    };
+    if (!best || rounded >= best.amount) best = cand;
+  }
+  if (best) out.push(best);
+}
+
 export function extractDirectFormExpenseLines(allText: string): OperatingExpenseLine[] {
   const kind = detectTaxForm(allText).kind;
   const out: OperatingExpenseLine[] = [];
@@ -1486,12 +1545,43 @@ export function extractDirectFormExpenseLines(allText: string): OperatingExpense
       skipRe: skipCtx,
     });
     pushDirectFormLine(allText, out, {
+      lineNumber: 17,
+      label: "Taxes and licenses",
+      labelRe: /taxes?\s+and\s+licen/i,
+      source: "Form 1120 line 17",
+      skipRe: skipCtx,
+    });
+    pushDirectFormLine(allText, out, {
       lineNumber: 22,
       label: "Advertising",
       labelRe: /advert/i,
       source: "Form 1120 line 22",
       skipRe: skipCtx,
     });
+    // Page-1-only SG&A outside the Other-deductions statement — needed for the
+    // other_operating_expenses fold (never itemized in Stmt-2 on dense exports).
+    pushDirectFormLine(allText, out, {
+      lineNumber: 19,
+      label: "Charitable contributions",
+      labelRe: /charitable\s+contr/i,
+      source: "Form 1120 line 19",
+      skipRe: skipCtx,
+    });
+    pushDirectFormLine(allText, out, {
+      lineNumber: 23,
+      label: "Pension, profit-sharing plans",
+      labelRe: /pension|profit-?shar/i,
+      source: "Form 1120 line 23",
+      skipRe: skipCtx,
+    });
+    pushDirectFormLine(allText, out, {
+      lineNumber: 24,
+      label: "Employee benefit programs",
+      labelRe: /employee\s+benefit/i,
+      source: "Form 1120 line 24",
+      skipRe: skipCtx,
+    });
+    push1125eOfficerTotal(allText, out);
   } else if (kind === "1120-s" || kind === "1065") {
     pushDirectFormLine(allText, out, {
       lineNumber: 7,
@@ -1566,73 +1656,6 @@ export function supplementOperatingExpenseLines(
     deduped.push(line);
   }
   return deduped.sort((a, b) => b.amount - a.amount);
-}
-
-function filterPlausibleExpenseLines(
-  lines: OperatingExpenseLine[],
-  sales?: number,
-  resolvedValues?: Record<string, number>,
-): OperatingExpenseLine[] {
-  return lines.filter((line) => {
-    const amount = Math.round(line.amount);
-    if (!isKeepableResidualAmount(amount)) return false;
-    if (diagnoseIllogicalAmount(line, sales, resolvedValues)) return false;
-    if (/form\s*1120/i.test(line.source ?? "") && expenseCategoryKey(line.label)) {
-      return isPlausibleExpenseLabel(line.label);
-    }
-    return isPlausibleExpenseLabel(line.label);
-  });
-}
-
-function shouldApplyTop8Policy(
-  _lines: OperatingExpenseLine[],
-  _sales?: number,
-  _priorValues?: Record<string, number>,
-  _priorSources?: Record<string, string>,
-): boolean {
-  // Blocked: do not rank or remap slot amounts until extraction audit shows all integrator pairs.
-  return false;
-}
-
-function selectTop8ForYear(lines: OperatingExpenseLine[]): SharedTop8 {
-  const ranked = [...lines]
-    .filter((l) => isTop8EligibleAmount(l.amount, { source: l.source, label: l.label }))
-    .sort((a, b) => b.amount - a.amount)
-    .slice(0, 8);
-  return {
-    labelKeys: ranked.map((l) => expenseLabelKey(l.label)),
-    labels: ranked.map((l) => l.label),
-    maxAmounts: ranked.map((l) => l.amount),
-  };
-}
-
-/** Per-year top 8 expense groups from an already-filtered pool (one line per group). */
-function selectTop8GroupsForYear(lines: OperatingExpenseLine[]): SharedTop8 {
-  const ranked: OperatingExpenseLine[] = [];
-  const seenGroups = new Set<string>();
-  for (const line of [...lines].sort((a, b) => b.amount - a.amount)) {
-    if (
-      isExpenseRankCrumb(line.amount, {
-        taxYear: undefined,
-        source: line.source,
-        label: line.label,
-      })
-    ) {
-      continue;
-    }
-    // Identity = group key (label category + extraction source spot), NOT dollar amount.
-    // Distinct SG&A lines may share the same or nearly-same amount.
-    const key = crossYearExpenseGroupKey(line);
-    if (seenGroups.has(key)) continue;
-    seenGroups.add(key);
-    ranked.push(line);
-    if (ranked.length >= 8) break;
-  }
-  return {
-    labelKeys: ranked.map((l) => crossYearExpenseGroupKey(l)),
-    labels: ranked.map((l) => l.label),
-    maxAmounts: ranked.map((l) => l.amount),
-  };
 }
 
 /**
@@ -1782,39 +1805,124 @@ function sumStmtAmortization(col: TaxYearValues, lines: OperatingExpenseLine[]):
     if (!isStmtDetailSource(line.source)) continue;
     if (!/^amortization\b/i.test(normalizeWhitespace(line.label))) continue;
     const amt = Math.round(line.amount);
+    // ≤99 = form-line crumbs; $100 with no Form 4562 tag = nominal-par / stock echo in OD OCR.
+    if (amt <= 99) continue;
+    if (amt === 100 && !/form\s*4562/i.test(line.source ?? "")) continue;
+    if (!isKeepableResidualAmount(amt)) continue;
     if (seen.has(amt)) continue;
     seen.add(amt);
     sum += amt;
   }
   if (sum > 0) return sum;
-  // Filtered rank pool may have dropped the amort line — still remove it from stmt total when
-  // the parser already booked amortization on its own workbook row.
+  // Fallback only when the workbook amort row itself came from Stmt / Form 4562 detail.
   const booked = col.values.amortization;
-  if (typeof booked === "number" && isKeepableResidualAmount(booked)) return Math.round(booked);
+  const bookedSrc = col.fieldSources?.amortization ?? "";
+  if (
+    typeof booked === "number" &&
+    booked > 100 &&
+    isKeepableResidualAmount(booked) &&
+    /form\s*4562|statement\s*\d|stmt\s*\d/i.test(bookedSrc)
+  ) {
+    return Math.round(booked);
+  }
   return 0;
+}
+
+/** Page-1-only SG&A captions without a top-8 category key (pension / charitable). */
+function isFormPage1ResidualCaption(label: string): boolean {
+  const t = normalizeWhitespace(label);
+  return /pension|profit-?shar|charitable\s+contr/i.test(t);
+}
+
+/**
+ * True Form page-1 line titles (and OCR truncations like "advertising...") — not OD detail
+ * that merely shares a category word ("equipment maintenance/fuel" → repairs).
+ */
+function isBareFormPage1Caption(label: string): boolean {
+  const t = normalizeWhitespace(label)
+    .toLowerCase()
+    .replace(/\.{2,}.*$/, "")
+    .replace(/[^a-z0-9\s&/-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /^(compensation of officers|salaries and wages(?: less employment credits)?|repairs(?: and maintenance)?|bad debts|rents?|taxes(?: and|&) licenses|interest|depreciation|depletion|advertising|pension(?:[, ]| and |,? profit-?sharing)*|employee benefit(?:s| programs?)?|charitable contributions?)$/i.test(
+    t,
+  );
 }
 
 /**
  * Form page-1 SG&A amounts that lost the top-8 multiset — never part of the Other-deductions
  * stmt residual, so fold into other_operating_expenses (e.g. Form page-1 advertising outside top-8).
  * Source-class only: Form 1120 line / OCR-caps. No paste-seat / category-vs-seat gates.
+ * One amount per caption group (Form line beats caps echoes of comparison change columns);
+ * dollars that duplicate a Stmt detail line are already inside the stmt residual — skipped.
  */
 function sumFormPage1AmountsOutsideTop8(
   lines: OperatingExpenseLine[],
   top8Amounts: number[],
 ): number {
-  let total = 0;
-  const seen = new Set<number>();
+  const stmtDetailAmounts = new Set<number>();
   for (const line of lines) {
-    if (!isFormPage1ExpenseCategory(line.label)) continue;
+    if (!isTraditionalStmtDetailSource(line.source)) continue;
+    if (/\(residual crumb\)/i.test(line.source ?? "")) continue;
+    // Same partition rule as sumStmtAmountsInTop8: form page-1 categories are never
+    // inside the Other-deductions stmt total (their attachments are separate tables).
+    if (isFormPage1ExpenseCategory(line.label) || isFormPage1ResidualCaption(line.label)) continue;
+    stmtDetailAmounts.add(Math.round(line.amount));
+  }
+
+  const byGroup = new Map<string, { amt: number; isFormLine: boolean }>();
+  for (const line of lines) {
+    if (!isFormPage1ExpenseCategory(line.label) && !isFormPage1ResidualCaption(line.label)) {
+      continue;
+    }
     const src = line.source ?? "";
     const amt = Math.round(line.amount);
     if (!isKeepableResidualAmount(amt)) continue;
-    const isFormOrCaps =
-      (/form\s*1120/i.test(src) && /line\s*\d/i.test(src) && !/statement\s*\d/i.test(src)) ||
-      /ocr\s+caps|caps\s+label/i.test(src);
-    if (!isFormOrCaps) continue;
+    const isFormLine =
+      /form\s*1120/i.test(src) && /line\s*\d/i.test(src) && !/statement\s*\d/i.test(src);
+    const isCaps = /ocr\s+caps|caps\s+label/i.test(src);
+    // Benefits / pension / charitable have dedicated page-1 lines on 1120/1120-S/1065 —
+    // their Federal-Statements tables are outside the line-26 Other-deductions total even
+    // when the scanner tagged them Statement-N (same partition rule as sumStmtAmountsInTop8).
+    const isPage1OnlyCategory =
+      expenseCategoryKey(line.label) === "employee_benefits" || isFormPage1ResidualCaption(line.label);
+    const isStmtTaggedPage1 = isPage1OnlyCategory && isTraditionalStmtDetailSource(src);
+    // Schedule K / state charitable & pension OCR-caps are not Form page-1 SG&A — only fold
+    // when the Form line (or its statement table) is the source.
+    if (isFormPage1ResidualCaption(line.label) && !isFormLine && !isStmtTaggedPage1) continue;
+    if (!isFormLine && !isCaps && !isStmtTaggedPage1) continue;
     if (top8Amounts.includes(amt)) continue;
+    // Same dollars already itemized in the Other-deductions statement → inside stmt residual.
+    if (stmtDetailAmounts.has(amt)) continue;
+    // Bare Form page-1 titles collapse by category so Form "advertising" beats caps
+    // "advertising...". Detail captions that only share a category word (equipment
+    // maintenance vs Form repairs) keep their own group so both fold.
+    const residualCaptionGroup = isFormPage1ResidualCaption(line.label)
+      ? /pension|profit-?shar/i.test(line.label)
+        ? "pension"
+        : "charitable"
+      : undefined;
+    const category = expenseCategoryKey(line.label);
+    const captionKey = normalizeWhitespace(line.label)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s&/.-]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const group =
+      residualCaptionGroup ??
+      (isBareFormPage1Caption(line.label) && category
+        ? `cat:${category}`
+        : captionKey || line.label);
+    const existing = byGroup.get(group);
+    if (!existing || (isFormLine && !existing.isFormLine)) {
+      byGroup.set(group, { amt, isFormLine });
+    }
+  }
+
+  let total = 0;
+  const seen = new Set<number>();
+  for (const { amt } of byGroup.values()) {
     if (seen.has(amt)) continue;
     seen.add(amt);
     total += amt;
@@ -1943,6 +2051,11 @@ function applySharedTop8ToColumn(
     stmtTotalRaw !== undefined ? Math.max(0, stmtTotalRaw - stmtAmort) : undefined;
   const stmtInTop8 = sumStmtAmountsInTop8(lines, top8Amounts, stmtTotal);
   const formPage1OutsideTop8 = sumFormPage1AmountsOutsideTop8(lines, top8Amounts);
+  if (process.env.DEBUG_OPEX_FOLD) {
+    console.error(
+      `[opex-fold] year=${col.year} stmtTotalRaw=${stmtTotalRaw} stmtAmort=${stmtAmort} stmtInTop8=${stmtInTop8} fold=${formPage1OutsideTop8} top8=[${top8Amounts.join(",")}]`,
+    );
+  }
 
   let otherOpex: number | undefined;
   let otherOpexSource: string | undefined;
@@ -1950,7 +2063,7 @@ function applySharedTop8ToColumn(
   // Prefer stmt partition when present (Other-deductions total − stmt lines in top-8).
   // Pool residual (sum(all scanned) − top-8) is the charter fallback when stmt total is absent.
   // Authoritative pre-merge residuals (summed detail / comparison OD residual) win when the
-  // stmt partition disagrees materially — AZ 2023 parse had exact 262517 before align overwrote.
+  // stmt partition disagrees materially — an exact pre-merge residual must not be overwritten.
   if (
     stmtTotal !== undefined &&
     isKeepableResidualAmount(stmtTotal) &&
@@ -2022,7 +2135,7 @@ function applySharedTop8ToColumn(
   };
 }
 
-/** Apply top-8 opex policy to a single parsed year (API / benchmark path). */
+/** Clean the per-year extraction pool; cross-year finalization owns top-8 ranking. */
 export function applyOperatingExpensesToSingleYear(col: {
   values: Record<string, number>;
   confidence?: Record<string, number>;
@@ -2036,35 +2149,11 @@ export function applyOperatingExpensesToSingleYear(col: {
   operatingExpenseLines?: OperatingExpenseLine[];
 } {
   const rawLines = col.operatingExpenseLines ?? [];
-  const lines = useOpexLabelCleaning()
-    ? cleanOperatingExpenseLines(rawLines, { sales: col.values.sales, values: col.values })
-    : rawLines;
-  if (!shouldApplyTop8Policy(lines, col.values.sales, col.values, col.fieldSources)) {
-    return { ...col, operatingExpenseLines: lines };
-  }
-
-  const shared = selectTop8ForYear(lines);
-  if (!shared.labelKeys.length) return { ...col, operatingExpenseLines: lines };
-
-  const applied = applySharedTop8ToColumn(
-    {
-      year: 0,
-      source: "parser",
-      values: col.values,
-      confidence: col.confidence,
-      fieldSources: col.fieldSources,
-      operatingExpenseLines: lines,
-    },
-    shared,
-    lines,
-  );
-  return {
-    values: applied.values,
-    confidence: applied.confidence,
-    fieldSources: applied.fieldSources,
-    opexSlotLabels: applied.opexSlotLabels,
-    operatingExpenseLines: lines,
-  };
+  const lines = cleanOperatingExpenseLines(rawLines, {
+    sales: col.values.sales,
+    values: col.values,
+  });
+  return { ...col, operatingExpenseLines: lines };
 }
 
 type SharedTop8 = {
@@ -2137,16 +2226,6 @@ function crossYearSumGroupKey(line: OperatingExpenseLine): string {
   return crossYearExpenseGroupKey(line);
 }
 
-function sumAmountForGroupKey(lines: OperatingExpenseLine[], groupKey: string): number {
-  let sum = 0;
-  for (const line of lines) {
-    if (!lineMatchesGroupKey(line, groupKey)) continue;
-    if (!isTop8EligibleAmount(line.amount, { source: line.source, label: line.label })) continue;
-    sum += Math.round(line.amount);
-  }
-  return sum;
-}
-
 function representativeLineForGroup(lines: OperatingExpenseLine[], groupKey: string): OperatingExpenseLine | undefined {
   let best: OperatingExpenseLine | undefined;
   for (const line of lines) {
@@ -2158,7 +2237,10 @@ function representativeLineForGroup(lines: OperatingExpenseLine[], groupKey: str
 }
 
 function amountForGroupKey(lines: OperatingExpenseLine[], groupKey: string): number {
-  return sumAmountForGroupKey(lines, groupKey);
+  // One seat = one line. Summing Form + comparison duplicates (e.g. advertising 19882×2)
+  // invented paste amounts that never appear on the return.
+  const best = representativeLineForGroup(lines, groupKey);
+  return best ? Math.round(best.amount) : 0;
 }
 
 function displayLabelForGroupKey(groupKey: string, fallbackLabel: string): string {
@@ -2181,6 +2263,8 @@ export function selectSharedTop8ByCrossYearSum(
   const groups = new Map<string, { label: string; crossYearSum: number; bestLine?: OperatingExpenseLine }>();
 
   for (const [, lines] of linesByYear.entries()) {
+    // One contribution per group per year (best line) — do not Σ Form+Stmt+comparison dupes.
+    const yearBest = new Map<string, OperatingExpenseLine>();
     for (const line of lines) {
       if (!isTop8EligibleAmount(line.amount, { source: line.source, label: line.label })) continue;
       if (isRankPoolStructuralNoise(line)) continue;
@@ -2189,6 +2273,10 @@ export function selectSharedTop8ByCrossYearSum(
       // OCR caption junk that outranked real cat:/row: SG&A with mega OCR amounts.
       // Known OCR defense until unlabeled expense vocabulary + noise filters are stronger.
       if (key.startsWith("raw:") || key.startsWith("label:")) continue;
+      const prev = yearBest.get(key);
+      if (!prev || prefersExpenseLineForCategory(line, prev)) yearBest.set(key, line);
+    }
+    for (const [key, line] of yearBest) {
       const amt = Math.round(line.amount);
       const existing = groups.get(key);
       if (!existing) {
@@ -2220,77 +2308,6 @@ export function selectSharedTop8ByCrossYearSum(
   };
 }
 
-function selectSharedTop8AcrossYears(linesByYear: Map<number, OperatingExpenseLine[]>): SharedTop8 {
-  const aggregates = new Map<string, { label: string; maxAmount: number }>();
-  for (const lines of linesByYear.values()) {
-    for (const line of lines) {
-      if (!isTop8EligibleAmount(line.amount, { source: line.source, label: line.label })) continue;
-      const key = expenseLabelKey(line.label);
-      if (!key) continue;
-      const existing = aggregates.get(key);
-      if (!existing) {
-        aggregates.set(key, { label: line.label, maxAmount: line.amount });
-        continue;
-      }
-      if (line.amount > existing.maxAmount) {
-        existing.maxAmount = line.amount;
-        existing.label = line.label;
-      }
-    }
-  }
-
-  const ranked = [...aggregates.entries()]
-    .sort((a, b) => b[1].maxAmount - a[1].maxAmount)
-    .slice(0, 8);
-
-  return {
-    labelKeys: ranked.map(([k]) => k),
-    labels: ranked.map(([, v]) => v.label),
-    maxAmounts: ranked.map(([, v]) => v.maxAmount),
-  };
-}
-
-/** @deprecated Legacy — max-per-year ranking; rank path uses {@link selectSharedTop8ByCrossYearSum}. */
-function amountForLabelKey(lines: OperatingExpenseLine[], labelKey: string): number {
-  return amountForGroupKey(lines, labelKey);
-}
-
-function countStrongOpexSlots(col: TaxYearValues): number {
-  return OPERATING_EXPENSE_SLOT_IDS.filter((id) => {
-    const amt = col.values[id];
-    const src = col.fieldSources?.[id] ?? "";
-    return (
-      typeof amt === "number" &&
-      isKeepableResidualAmount(amt) &&
-      !/top-8|shared top-8|not present this year/i.test(src)
-    );
-  }).length;
-}
-
-/** Keep per-year amounts; only share clean display labels across columns. */
-function unifyOpexLabelsOnly(columns: TaxYearValues[]): TaxYearValues[] {
-  const labels: Record<string, string> = {};
-  for (const id of OPERATING_EXPENSE_SLOT_IDS) {
-    for (const col of columns) {
-      const user = col.userOpexSlotLabels?.[id];
-      if (user) {
-        labels[id] = user;
-        break;
-      }
-      const existing = col.opexSlotLabels?.[id];
-      if (existing && !/statement\s*\|/i.test(existing) && existing.length <= 40) {
-        labels[id] = displayLabelForKey(expenseLabelKey(existing) || id, existing);
-        break;
-      }
-    }
-    if (!labels[id]) labels[id] = slotDefaultLabel(id);
-  }
-  return columns.map((col) => ({
-    ...col,
-    opexSlotLabels: { ...labels, ...(col.userOpexSlotLabels ?? {}) },
-  }));
-}
-
 function sumAmounts(lines: OperatingExpenseLine[]): number {
   return Math.round(lines.reduce((s, l) => s + Math.round(l.amount), 0));
 }
@@ -2313,85 +2330,29 @@ export function slotDefaultLabel(slotId: string): string {
 export function alignOperatingExpensesAcrossYears(columns: TaxYearValues[]): TaxYearValues[] {
   if (columns.length === 0) return columns;
 
-  if (useOpexRankByAmount()) {
-    const prepared = columns.map((col) => ({
-      ...col,
-      operatingExpenseLines: prepareOpexRankPool(col),
-    }));
+  const prepared = columns.map((col) => ({
+    ...col,
+    operatingExpenseLines: prepareOpexRankPool(col),
+  }));
 
-    const linesByYear = new Map<number, OperatingExpenseLine[]>();
-    for (const col of prepared) {
-      linesByYear.set(col.year, col.operatingExpenseLines ?? []);
-    }
-    const shared = selectSharedTop8ByCrossYearSum(linesByYear);
-    if (!shared.labelKeys.length) return prepared;
-
-    const cleanShared: SharedTop8 = {
-      labelKeys: shared.labelKeys,
-      labels: shared.labelKeys.map((k, i) => displayLabelForGroupKey(k, shared.labels[i] ?? k)),
-      maxAmounts: shared.maxAmounts,
-    };
-
-    return prepared.map((col) => {
-      const lines = col.operatingExpenseLines ?? [];
-      if (!lines.length) return col;
-      return applySharedTop8ToColumn(col, cleanShared, lines, { assignByRankOrder: true });
-    });
+  const linesByYear = new Map<number, OperatingExpenseLine[]>();
+  for (const col of prepared) {
+    linesByYear.set(col.year, col.operatingExpenseLines ?? []);
   }
+  const shared = selectSharedTop8ByCrossYearSum(linesByYear);
+  if (!shared.labelKeys.length) return prepared;
 
-  const perYear = columns.map((col) => {
-    const applied = applyOperatingExpensesToSingleYear(col);
-    return {
-      ...col,
-      values: applied.values,
-      confidence: applied.confidence ?? col.confidence,
-      fieldSources: applied.fieldSources ?? col.fieldSources,
-      opexSlotLabels: applied.opexSlotLabels ?? col.opexSlotLabels,
-      operatingExpenseLines: applied.operatingExpenseLines ?? col.operatingExpenseLines,
-    };
-  });
-
-  if (perYear.length === 1) return unifyOpexLabelsOnly(perYear);
-
-  const strongCount = perYear.filter((col) => countStrongOpexSlots(col) >= 4).length;
-  // When the parser already filled most years, only share display labels — do not remap amounts.
-  if (strongCount >= Math.ceil(perYear.length / 2)) {
-    return unifyOpexLabelsOnly(perYear);
-  }
-
-  const byYearLines = new Map<number, OperatingExpenseLine[]>();
-  for (const col of perYear) {
-    const lines = filterPlausibleExpenseLines(
-      supplementOperatingExpenseLines(
-        col.operatingExpenseLines ?? [],
-        col.values,
-        col.fieldSources,
-      ),
-      col.values.sales,
-      col.values,
-    );
-    if (lines.length) byYearLines.set(col.year, lines);
-  }
-  if (byYearLines.size < 2) return unifyOpexLabelsOnly(perYear);
-
-  const shared = selectSharedTop8AcrossYears(byYearLines);
-  if (!shared.labelKeys.length) return unifyOpexLabelsOnly(perYear);
-
-  // Clean display labels (category names, not OCR fragments).
   const cleanShared: SharedTop8 = {
     labelKeys: shared.labelKeys,
-    labels: shared.labelKeys.map((k, i) => displayLabelForKey(k, shared.labels[i] ?? k)),
+    labels: shared.labelKeys.map((k, i) => displayLabelForGroupKey(k, shared.labels[i] ?? k)),
     maxAmounts: shared.maxAmounts,
   };
 
-  const remapped = perYear.map((col) => {
-    // Preserve years that already have strong parser slots.
-    if (countStrongOpexSlots(col) >= 4) return col;
-    const lines = byYearLines.get(col.year);
-    if (!lines?.length) return col;
-    return applySharedTop8ToColumn(col, cleanShared, lines);
+  return prepared.map((col) => {
+    const lines = col.operatingExpenseLines ?? [];
+    if (!lines.length) return col;
+    return applySharedTop8ToColumn(col, cleanShared, lines, { assignByRankOrder: true });
   });
-  return unifyOpexLabelsOnly(remapped);
 }
 
 /** Shared display labels for the eight operating-expense workbook rows. */
@@ -2473,7 +2434,7 @@ function diagnoseRankPoolLineRejection(
     line.source ?? "",
   );
   // Amount/anchor collisions are handled by diagnoseIllogicalAmount (label-aware).
-  if (diagnoseIllogicalAmount(line, sales, resolvedValues)) return "illogical_amount";
+  if (diagnoseIllogicalAmount(line, resolvedValues)) return "illogical_amount";
   if (!opexComparisonRow && isNonExpenseAnchorLabel(line.label)) return "non_expense_anchor";
   if (isTaxReturnTitleNoise(line.label)) return "tax_return_title";
   if (isStatementCrossRefNoise(line.label)) return "statement_cross_ref";
@@ -2496,7 +2457,7 @@ function filterPlausibleRankPoolLines(
   resolvedValues?: Record<string, number>,
 ): OperatingExpenseLine[] {
   return lines.filter((line) => {
-    if (diagnoseIllogicalAmount(line, sales, resolvedValues)) return false;
+    if (diagnoseIllogicalAmount(line, resolvedValues)) return false;
     if (isMailingOrFormFooterNoise(line.label)) return false;
     return isPlausibleRankPoolLabel(line.label) && !isEntityNameExpenseNoise(line.label);
   });

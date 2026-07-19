@@ -30,7 +30,7 @@ function rowCurrentAt(rows: number[][], i: number): number | undefined {
   if (!nums?.length) return undefined;
   if (nums.length >= 2) return nums[1];
   const next = rows[i + 1];
-  if (next && next.length >= 2 && next[1] === 0 && nums[0]! < 1_000_000) return 0;
+  if (next && next.length >= 2 && next[1] === 0) return 0;
   return nums[0];
 }
 
@@ -205,23 +205,36 @@ function extractPairedColumnScheduleL(text: string): FieldExtraction | null {
       setField(out, "other_current_liabilities", cur(liabStart + 1), src);
       setField(out, "common_stock", cur(liabStart + 2), src);
     }
-    for (const nums of rows) {
-      if (nums.length === 1 && nums[0] === 206) {
-        setField(out, "additional_paid_in_capital", 206, src);
+    // APIC (line 23) with begin == end renders as two consecutive single-cell rows of the
+    // same amount (the column pair splits around the taxpayer-name line). Structural match:
+    // adjacent equal singles in the liability/equity section — never a hardcoded dollar value.
+    for (let i = liabStart; i < rows.length - 1; i++) {
+      const a = rows[i]!;
+      const b = rows[i + 1]!;
+      if (
+        a.length === 1 &&
+        b.length === 1 &&
+        a[0] !== undefined &&
+        a[0] === b[0] &&
+        isKeepableWorksheetAmount(a[0])
+      ) {
+        setField(out, "additional_paid_in_capital", a[0], src);
         break;
       }
     }
-    // Equity = last prior|current keepable pair that changed — skip line-number crumbs.
+    // Equity = last prior|current keepable pair that changed — skip line-number / YY-year crumbs.
     for (let i = rows.length - 1; i >= liabStart; i--) {
       const nums = rows[i]!;
+      const end = nums[1];
       if (
         nums.length >= 2 &&
         nums[0] !== undefined &&
-        nums[1]! > 0 &&
-        nums[1]! !== nums[0] &&
-        isKeepableWorksheetAmount(nums[1]!)
+        end !== undefined &&
+        end > 99 &&
+        end !== nums[0] &&
+        isKeepableWorksheetAmount(end)
       ) {
-        setField(out, "other_stock_equity", nums[1], src);
+        setField(out, "other_stock_equity", end, src);
         break;
       }
     }
@@ -230,7 +243,7 @@ function extractPairedColumnScheduleL(text: string): FieldExtraction | null {
   return Object.keys(out.values).length >= 8 ? out : null;
 }
 
-/** Form 1120 dense Schedule L after entity EIN (Judd-style export). */
+/** Form 1120 dense Schedule L after entity EIN (preparer summary-block export). */
 function extractDense1120ScheduleL(text: string): FieldExtraction | null {
   const m = text.match(
     /([A-Z][\w\s,.&'-]{8,60}(?:INC|LLC|CORP)\.?)\s+(\d{2}-\d{7})\s+(\d{1,3}(?:,\d{3})+\s+\d{1,3}(?:,\d{3})+[\s\S]{0,300}?STMT\s+3\s+\d{1,3}(?:,\d{3})+\s+\d{1,3}(?:,\d{3})+)/i,
