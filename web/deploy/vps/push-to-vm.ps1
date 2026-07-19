@@ -43,7 +43,8 @@ $remoteScript = @(
   "export OPEN_UFW=0"
   "bash deploy/vps/install-on-vm.sh"
 ) -join "`n"
-$remoteScript | ssh @sshArgs $target "bash -s"
+$remoteScriptBytes = [System.Text.Encoding]::UTF8.GetBytes($remoteScript)
+$remoteScriptBytes | ssh @sshArgs $target "cat > /tmp/install.sh && bash /tmp/install.sh && rm -f /tmp/install.sh"
 
 Write-Host ""
 Write-Host "App: https://reportgen.duckdns.org/tax"
