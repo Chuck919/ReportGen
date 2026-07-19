@@ -5,6 +5,7 @@ import { TAX_ATTACHMENT_FIELD_IDS } from "@/lib/workbook-comparison-fixtures";
 import { extractFormAnchors, extractFormPage1Block, formAnchorSourceText, type FieldExtraction } from "./form-anchors";
 import { detectTaxForm } from "./detect-tax-form";
 import {
+  formLineAmount,
   lineMoneyTokens,
   lineTailAmount,
   scheduleLineAmount,
@@ -12,8 +13,8 @@ import {
   isForm1120Line,
   isFormReferenceNumber,
   isReasonableMoneyAmount,
-  derailOcrLeadingOne,
-  formLineAmount,
+  isKeepableWorksheetAmount,
+  isKeepableWorksheetAmountOnLine,
 } from "./money";
 import { clientIdentityFromText } from "./extract-business-name";
 import { inferTaxYear } from "./infer-year";
@@ -22,6 +23,7 @@ import {
   applyConfidenceGates,
   refillFromComparison,
   isWeakSource,
+  shouldSkipComparisonOcl,
   type ConfidenceGateOptions,
 } from "./confidence-gates";
 import type { OcrMode } from "./local-ocr";
@@ -37,7 +39,6 @@ import {
 } from "@/lib/tax/reconcile-tax-year";
 import type { SourceSnapshot } from "@/lib/tax/source-agreement";
 import {
-  countStatement1DetailLines,
   extractStatementDeductions,
   extractStatementOtherIncome,
   extractStatementTaxesSplit,
@@ -139,18 +140,6 @@ function tryStructuredTable(text: string) {
   return { values, confidence, sources };
 }
 
-function formLine5AttachmentAmount(formPage1: string): number | undefined {
-  for (const rawLine of formPage1.split(/\n/)) {
-    const line = rawLine.replace(/\s+/g, " ").trim();
-    if (!/other\s+income/i.test(line)) continue;
-    if (!isForm1120Line(line, 5) && !/\b5\b.*attach|\[5\]/i.test(line)) continue;
-    if (!/stmt|statement|attach/i.test(line)) continue;
-    const amt = formLineAmount(line, "5") ?? scheduleLineAmount(line);
-    if (amt !== undefined && amt > 0 && amt < 1_000_000 && Math.abs(amt) !== 5) return amt;
-  }
-  return undefined;
-}
-
 /** Parser-only path (no OCR) — used for fast regression with cached OCR text. */
 export function parseTaxReturnFromText(
   filename: string,
@@ -200,9 +189,12 @@ export function parseTaxReturnFromText(
     parseTwoYearComparisonBlock(embeddedText, year),
     parseTwoYearComparisonBlock(allText, year),
   ].filter((c): c is NonNullable<typeof c> => c !== null);
+  // Prefer a block that resolved header years — OCR-only scans without years often
+  // mis-pick instruction crumbs (e.g. Schedules L/M-1/M-2 "cash" prose → -2).
   const comparison =
     comparisonCandidates.sort(
       (a, b) =>
+        Number(!!b.headerYears) - Number(!!a.headerYears) ||
         b.linesMatched - a.linesMatched ||
         (b.values.other_operating_expenses !== undefined ? 1 : 0) -
           (a.values.other_operating_expenses !== undefined ? 1 : 0),
@@ -276,13 +268,21 @@ export function parseTaxReturnFromText(
       /attach|see\s+stmt|federal\s+statem/i.test(line)
     );
   });
-  const stmt1Lines = countStatement1DetailLines(allText);
   const compOi = comparison?.values.other_income;
   const stmtTotal = stmtIncome.value;
-  const stmtMatchesForm =
+  const stmtMatchesResolvedForm =
     stmtTotal !== undefined &&
     formOi !== undefined &&
     Math.round(stmtTotal) === Math.round(formOi);
+  const stmtMatchesFormPage5 =
+    stmtTotal !== undefined &&
+    formPage1.split(/\n/).some((row) => {
+      const line = row.replace(/\s+/g, " ").trim();
+      if (!isForm1120Line(line, 5) || !/other\s+income/i.test(line)) return false;
+      const amount = formLineAmount(line, "5") ?? scheduleLineAmount(line);
+      return amount !== undefined && Math.round(amount) === Math.round(stmtTotal);
+    });
+  const stmtMatchesForm = stmtMatchesResolvedForm || stmtMatchesFormPage5;
 
   const stmtOiDetail = statement1HasOtherIncomeDetailLine(allText);
   let otherIncomeResolved = false;
@@ -291,7 +291,6 @@ export function parseTaxReturnFromText(
       !stmtOiDetail &&
       stmtMatchesForm &&
       stmtTotal !== undefined &&
-      stmt1Lines >= 2 &&
       statement1ReportsToWorkbookOtherIncome(allText) &&
       !statement1TotalIsTaxRefund(allText, stmtTotal)
     ) {
@@ -299,20 +298,11 @@ export function parseTaxReturnFromText(
       resolved.confidence.other_income = 94;
       resolved.sources.other_income = "Statement 1 total (matches Form line 5)";
     } else {
-      const attachmentOi = formLine5AttachmentAmount(formPage1);
+      // Form line 5 "See Stmt" — never paste the Form box dollars (attachment pointer).
+      // Stmt detail / comparison / zero decide workbook other_income.
       if (
-        attachmentOi !== undefined &&
-        statement1ReportsToWorkbookOtherIncome(allText)
-      ) {
-        resolved.values.other_income = Math.round(attachmentOi);
-        resolved.confidence.other_income = 92;
-        resolved.sources.other_income = "Form line 5 statement attachment";
-      } else if (
         compOi !== undefined &&
-        Math.abs(compOi) > 0 &&
-        Math.abs(compOi) > 99 &&
-        isReasonableMoneyAmount(compOi) &&
-        !isFormReferenceNumber(Math.abs(compOi))
+        isKeepableWorksheetAmount(compOi)
       ) {
         // Keepable comparison amount only — no bare <$2k size invent gate.
         resolved.values.other_income = Math.round(compOi);
@@ -321,7 +311,10 @@ export function parseTaxReturnFromText(
       } else if (
         stmtTotal !== undefined &&
         stmtTotal > 0 &&
-        statement1ReportsToWorkbookOtherIncome(allText)
+        statement1ReportsToWorkbookOtherIncome(allText) &&
+        // "Other income" detail rows on Stmt 1 → Form line 5 See-Stmt nets to workbook zero
+        // unless comparison supplies a keepable amount (handled above).
+        !stmtOiDetail
       ) {
         resolved.values.other_income = Math.round(stmtTotal);
         resolved.confidence.other_income = 94;
@@ -393,7 +386,8 @@ export function parseTaxReturnFromText(
     !otherIncomeResolved &&
     stmtTotal !== undefined &&
     statement1ReportsToWorkbookOtherIncome(allText) &&
-    !statement1TotalIsTaxRefund(allText, stmtTotal)
+    !statement1TotalIsTaxRefund(allText, stmtTotal) &&
+    !statement1HasOtherIncomeDetailLine(allText)
   ) {
     resolved.values.other_income = Math.round(stmtTotal);
     resolved.confidence.other_income = 94;
@@ -407,7 +401,7 @@ export function parseTaxReturnFromText(
   }
   if (!resolved.values.cogs && comparison?.values.cogs) {
     const compCogs = comparison.values.cogs;
-    if (Math.abs(compCogs) > 99) {
+    if (isKeepableWorksheetAmount(compCogs)) {
       resolved.values.cogs = compCogs;
       resolved.confidence.cogs = comparison.confidence.cogs ?? 86;
       resolved.sources.cogs = "Two-year comparison";
@@ -431,7 +425,7 @@ export function parseTaxReturnFromText(
     const oa = resolved.values.other_assets;
     const looksLikeTotalAssets = allText.split(/\n/).some((row) => {
       if (!/\b1[57]\b/i.test(row) || !/total\s+ass|totlassets|towlasses|liabilit.*equit/i.test(row)) return false;
-      return lineMoneyTokens(row).some((n) => Math.abs(n - oa) <= 2);
+      return lineMoneyTokens(row).some((n) => Math.round(n) === Math.round(oa));
     });
     const corroboratedLine14 = allText.split(/\n/).some(
       (row) =>
@@ -457,7 +451,6 @@ export function parseTaxReturnFromText(
   ) {
     const oca = resolved.values.other_current_assets;
     const corroborated =
-      Math.abs(Math.round(oca)) > 99 &&
       allText.split(/\n/).some(
         (row) =>
           (/\b6\b/i.test(row) || /other\s+current\s+ass/i.test(row)) &&
@@ -468,6 +461,25 @@ export function parseTaxReturnFromText(
       delete resolved.values.other_current_assets;
       delete resolved.confidence.other_current_assets;
       delete resolved.sources.other_current_assets;
+    }
+  }
+
+  if (
+    resolved.values.inventory !== undefined &&
+    resolved.sources.inventory === "OCR label match"
+  ) {
+    const inv = resolved.values.inventory;
+    const corroborated = allText.split(/\n/).some(
+      (row) =>
+        /\b3\b/i.test(row) &&
+        /inventor/i.test(row) &&
+        !/lifo|beginning of year|end of year|determining quantities/i.test(row) &&
+        Math.round(scheduleLineAmount(row) ?? lineTailAmount(row) ?? NaN) === Math.round(inv),
+    );
+    if (!corroborated) {
+      delete resolved.values.inventory;
+      delete resolved.confidence.inventory;
+      delete resolved.sources.inventory;
     }
   }
 
@@ -517,7 +529,6 @@ export function parseTaxReturnFromText(
 
   if (
     resolved.values.gross_intangible_assets !== undefined &&
-    Math.abs(resolved.values.gross_intangible_assets) <= 99 &&
     resolved.sources.gross_intangible_assets === "OCR label match"
   ) {
     // Line-number crumb on OCR captions — not a $20k size clear.
@@ -529,8 +540,7 @@ export function parseTaxReturnFromText(
   if (
     resolved.values.unclassified_equity !== undefined &&
     (resolved.values.unclassified_equity < 0 ||
-      (Math.abs(resolved.values.unclassified_equity) <= 99 &&
-        resolved.sources.unclassified_equity === "OCR label match"))
+      resolved.sources.unclassified_equity === "OCR label match")
   ) {
     delete resolved.values.unclassified_equity;
     delete resolved.confidence.unclassified_equity;
@@ -567,21 +577,19 @@ export function parseTaxReturnFromText(
     ] as const) {
       const comp = comparison.values[id];
       if (comp === undefined) continue;
+      // OCL: Schedule L line 18 / Stmt detail is the structural source — never let a
+      // comparison column overwrite or fill past it (source priority, no $ band).
       if (
         id === "other_current_liabilities" &&
-        comp < 40_000 &&
-        /schedule\s+l|statement/i.test(allText)
-      ) {
-        continue;
-      }
-      if (
-        id === "other_current_liabilities" &&
-        /schedule\s+l|statement.*line\s*18|statement\s*5/i.test(resolved.sources[id] ?? "") &&
-        (resolved.confidence[id] ?? 0) >= 97
+        resolved.values[id] !== undefined &&
+        /schedule\s+l|statement.*line\s*18|statement\s*5/i.test(resolved.sources[id] ?? "")
       ) {
         continue;
       }
       const got = resolved.values[id];
+      if (id === "other_current_liabilities" && shouldSkipComparisonOcl(comp, resolved)) {
+        continue;
+      }
       if (got === undefined) {
         resolved.values[id] = comp;
         resolved.confidence[id] = comparison.confidence[id] ?? 86;
@@ -628,10 +636,9 @@ export function parseTaxReturnFromText(
         Math.round(got) !== Math.round(comp)
       ) {
         const formVal = formAnchors.values[id];
-        const formConf = formAnchors.confidence[id] ?? 0;
         if (
           formVal !== undefined &&
-          formConf >= 96 &&
+          /form\s*1120/i.test(formAnchors.sources[id] ?? "") &&
           Math.round(got) === Math.round(formVal)
         ) {
           continue;
@@ -650,7 +657,7 @@ export function parseTaxReturnFromText(
     if (
       /comparison/i.test(resolved.sources[id] ?? "") &&
       Math.round(got) !== Math.round(formVal) &&
-      (formAnchors.confidence[id] ?? 0) >= 96
+      /form\s*1120/i.test(formAnchors.sources[id] ?? "")
     ) {
       resolved.values[id] = formVal;
       resolved.confidence[id] = formAnchors.confidence[id] ?? 97;
@@ -659,15 +666,16 @@ export function parseTaxReturnFromText(
   }
 
   const formDep = formAnchors.values.depreciation;
+  const depLine = formPage1.split(/\n/).find((row) => {
+    const line = row.replace(/\s+/g, " ").trim();
+    return isForm1120Line(line, 14) && /depreciation/i.test(line);
+  });
   if (
     resolved.values.depreciation !== undefined &&
-    Math.abs(resolved.values.depreciation) <= 99 &&
-    !/NET\s+DEPRECIATION|depreciation report/i.test(resolved.sources.depreciation ?? "")
+    !/NET\s+DEPRECIATION|depreciation report/i.test(resolved.sources.depreciation ?? "") &&
+    (/OCR label match|comparison|tail scan/i.test(resolved.sources.depreciation ?? "") ||
+      (depLine !== undefined && !substantialMoneyTokens(depLine).length))
   ) {
-    const depLine = formPage1.split(/\n/).find((row) => {
-      const line = row.replace(/\s+/g, " ").trim();
-      return isForm1120Line(line, 14) && /depreciation/i.test(line);
-    });
     if (formDep !== undefined) {
       resolved.values.depreciation = formDep;
       resolved.confidence.depreciation = formAnchors.confidence.depreciation ?? 97;
@@ -704,9 +712,10 @@ export function parseTaxReturnFromText(
     delete resolved.sources.other_operating_income;
   }
 
+  // Bare OCR label matches for equity are unreliable regardless of size — Schedule L /
+  // comparison / paired-column paths own this field (weak-source clear, no $ band).
   if (
     resolved.values.unclassified_equity !== undefined &&
-    resolved.values.unclassified_equity < 100_000 &&
     resolved.sources.unclassified_equity === "OCR label match"
   ) {
     delete resolved.values.unclassified_equity;
@@ -737,7 +746,10 @@ export function parseTaxReturnFromText(
     formAnalysis.kind === "1120" &&
     resolved.values.other_income !== undefined &&
     resolved.values.other_income > 0 &&
-    /line 5 interest/i.test(resolved.sources.other_income ?? "")
+    /line 5 interest/i.test(resolved.sources.other_income ?? "") &&
+    // Federal-Statements "Line 5 - Interest" table total is itself the corroboration
+    // (page-1 cell is often a bare small integer OCR cannot anchor).
+    !/statement total/i.test(resolved.sources.other_income ?? "")
   ) {
     const page5Interest = formPage1.split(/\n/).some((row) => {
       const line = row.replace(/\s+/g, " ").trim();
@@ -754,7 +766,6 @@ export function parseTaxReturnFromText(
 
   if (
     resolved.values.other_income !== undefined &&
-    resolved.values.other_income > 300 &&
     /comparison/i.test(resolved.sources.other_income ?? "") &&
     /subtraction.*federal|other subtractions from federal/i.test(allText)
   ) {
@@ -799,7 +810,7 @@ export function parseTaxReturnFromText(
       if (!compCtx.test(line) && !compCtx.test(allText.slice(Math.max(0, allText.indexOf(line) - 400), allText.indexOf(line)))) {
         continue;
       }
-      const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 100);
+      const nums = lineMoneyTokens(line).filter((n) => isKeepableWorksheetAmountOnLine(n, line));
       if (nums.length >= 2) {
         const picked = nums.length >= 3 ? nums[nums.length - 2]! : nums[1]!;
         resolved.values.other_income = Math.round(picked);
@@ -818,10 +829,11 @@ export function parseTaxReturnFromText(
       if (!compCtx.test(allText.slice(Math.max(0, allText.indexOf(line) - 400), allText.indexOf(line) + line.length))) {
         continue;
       }
-      const nums = lineMoneyTokens(line).filter((n) => Math.abs(n) >= 100_000);
+      // Keepable worksheet dollars (≥$100, no years/line refs) — not a $100k company-size floor.
+      const nums = lineMoneyTokens(line).filter((n) => isKeepableWorksheetAmountOnLine(n, line));
       if (nums.length >= 2) {
         const picked = nums.length >= 3 ? nums[nums.length - 2]! : nums[1]!;
-        resolved.values.cogs = Math.round(derailOcrLeadingOne(picked));
+        resolved.values.cogs = Math.round(picked);
         resolved.confidence.cogs = 88;
         resolved.sources.cogs = "Two-year comparison (COGS row)";
         break;
@@ -840,7 +852,7 @@ export function parseTaxReturnFromText(
       const line = row.replace(/\s+/g, " ").trim();
       if (!/interest\s+income/i.test(line)) return false;
       const nums = lineMoneyTokens(line);
-      return nums.length >= 3 && Math.abs(nums[nums.length - 1]! - ie) <= 2;
+      return nums.length >= 3 && Math.round(nums[nums.length - 1]!) === Math.round(ie);
     });
     if (fromIncomeVar) {
       delete resolved.values.interest_expense;
@@ -876,7 +888,7 @@ export function parseTaxReturnFromText(
     formAnalysis.kind === "1120" &&
     resolved.values.other_income !== undefined &&
     resolved.values.other_income > 0 &&
-    resolved.values.other_income <= 20 &&
+    Math.abs(Math.round(resolved.values.other_income)) === 5 &&
     /line 5 interest/i.test(resolved.sources.other_income ?? "")
   ) {
     const line10HasAmount = formPage1.split(/\n/).some((row) => {
@@ -884,7 +896,9 @@ export function parseTaxReturnFromText(
       return (
         isForm1120Line(line, 10) &&
         /other\s+income/i.test(line) &&
-        substantialMoneyTokens(line).some((n) => Math.abs(n) >= 100 && Math.abs(n) !== 10)
+        substantialMoneyTokens(line).some(
+          (n) => isKeepableWorksheetAmountOnLine(n, line) && Math.abs(Math.round(n)) !== 10,
+        )
       );
     });
     if (!line10HasAmount) {
@@ -907,10 +921,6 @@ export function parseTaxReturnFromText(
     resolved.values.other_income = 0;
     resolved.confidence.other_income = 72;
     resolved.sources.other_income = "Statement 1 tax refund (not other income)";
-  }
-
-  if (resolved.values.sales !== undefined) {
-    resolved.values.sales = Math.round(derailOcrLeadingOne(resolved.values.sales));
   }
 
   if (comparison && comparison.linesMatched >= 4) {
@@ -1226,13 +1236,24 @@ export function parseTaxReturnFromText(
     resolved.sources.other_income = "Routed to other operating income (workbook split)";
   }
 
-  if (comparison?.values.taxes_licenses !== undefined && comparison.values.taxes_licenses >= 1) {
+  // Identity split when comparison taxes embeds taxes paid — never shrink Form page-1
+  // SG&A taxes (line 17 / 1120-S line 12) by Form line 31 income-tax liability.
+  if (
+    comparison?.values.taxes_licenses !== undefined &&
+    comparison.values.taxes_licenses >= 1 &&
+    !/form\s*1120[-\s]?[sb]?\s*line\s*(?:12|17)/i.test(resolved.sources.taxes_licenses ?? "")
+  ) {
     const paid =
       resolved.values.taxes_paid ??
       comparison.values.taxes_paid ??
       extractStatementTaxesSplit(allText).values.taxes_paid;
-    // Identity split when paid is embedded in the comparison taxes row — no $50k/$10k gates.
-    if (paid !== undefined && paid > 0 && paid < comparison.values.taxes_licenses) {
+    const paidSrc = resolved.sources.taxes_paid ?? "";
+    if (
+      paid !== undefined &&
+      paid > 0 &&
+      paid < comparison.values.taxes_licenses &&
+      !/form\s*1120[-\s]?[sb]?\s*line\s*31|total\s+tax/i.test(paidSrc)
+    ) {
       const split = Math.round(comparison.values.taxes_licenses - paid);
       if (split >= 1) {
         resolved.values.taxes_licenses = split;
@@ -1394,7 +1415,15 @@ function applyPostVerificationWorkbookFixes(
     }
   }
 
-  const stmt18Total = scanStatementLine18Total(ctx.allText);
+  const stmt18TotalRaw = scanStatementLine18Total(ctx.allText);
+  // Line-18 statement already routed to the short-term-debt row (revolving captions) —
+  // same dollars must not refill other_current_liabilities.
+  const stmt18Total =
+    stmt18TotalRaw !== undefined &&
+    values.short_term_debt !== undefined &&
+    Math.round(values.short_term_debt) === Math.round(stmt18TotalRaw)
+      ? undefined
+      : stmt18TotalRaw;
   const compOcl = ctx.comparison?.values.other_current_liabilities;
   const schedLOcl = values.other_current_liabilities;
   const schedLSrc = fieldSources.other_current_liabilities ?? "";
@@ -1429,18 +1458,19 @@ function applyPostVerificationWorkbookFixes(
   const oclSrc = fieldSources.other_current_liabilities ?? "";
   if (
     values.other_current_liabilities !== undefined &&
-    values.other_current_liabilities >= 5_000 &&
     /statement.*line\s*18|statement\s*5\s*total/i.test(oclSrc) &&
     !/schedule\s+l\s+line\s*18/i.test(oclSrc)
   ) {
     const slOcl = ctx.formAnchors.values.other_current_liabilities;
-    if (slOcl === undefined || slOcl < 1_000) {
-      values.other_current_liabilities = compOcl ?? 0;
-      confidence.other_current_liabilities = Math.min(confidence.other_current_liabilities ?? 88, 88);
+    if (
+      slOcl !== undefined &&
+      Math.round(slOcl) !== Math.round(values.other_current_liabilities)
+    ) {
+      values.other_current_liabilities = slOcl;
+      confidence.other_current_liabilities =
+        ctx.formAnchors.confidence.other_current_liabilities ?? 97;
       fieldSources.other_current_liabilities =
-        compOcl !== undefined
-          ? "Two-year comparison (no material other current liabilities)"
-          : "Cleared — Statement Line 18 without Schedule L corroboration";
+        ctx.formAnchors.sources.other_current_liabilities ?? "Schedule L line 18";
     }
   }
 
@@ -1512,12 +1542,22 @@ function applyPostVerificationWorkbookFixes(
     }
   }
 
-  if (ctx.comparison?.values.taxes_licenses !== undefined && ctx.comparison.values.taxes_licenses >= 1) {
+  if (
+    ctx.comparison?.values.taxes_licenses !== undefined &&
+    ctx.comparison.values.taxes_licenses >= 1 &&
+    !/form\s*1120[-\s]?[sb]?\s*line\s*(?:12|17)/i.test(fieldSources.taxes_licenses ?? "")
+  ) {
     const paid =
       values.taxes_paid ??
       ctx.comparison.values.taxes_paid ??
       extractStatementTaxesSplit(ctx.allText).values.taxes_paid;
-    if (paid !== undefined && paid > 0 && paid < ctx.comparison.values.taxes_licenses) {
+    const paidSrc = fieldSources.taxes_paid ?? "";
+    if (
+      paid !== undefined &&
+      paid > 0 &&
+      paid < ctx.comparison.values.taxes_licenses &&
+      !/form\s*1120[-\s]?[sb]?\s*line\s*31|total\s+tax/i.test(paidSrc)
+    ) {
       const split = Math.round(ctx.comparison.values.taxes_licenses - paid);
       if (split >= 1) {
         values.taxes_licenses = split;
@@ -1628,12 +1668,12 @@ function applyPostVerificationWorkbookFixes(
       delete confidence.interest_expense;
       delete fieldSources.interest_expense;
       warnings.push(`Cleared interest_expense=${trapped} (Form 8990 / §163(j) instruction crumb)`);
-    } else if (trapped <= 999) {
+    } else {
       const lineRef = src.match(/\bline\s*(\d{1,3})\b/i);
+      const leadingRef = src.match(/^\s*(\d{1,3})\s+interest/i);
       const isLineTrap =
-        trapped <= 50 ||
         (lineRef !== null && trapped === Number(lineRef[1])) ||
-        /^\s*\d{1,3}\s+interest/i.test(src);
+        (leadingRef !== null && trapped === Number(leadingRef[1]));
       if (isLineTrap) {
         delete values.interest_expense;
         delete confidence.interest_expense;
@@ -1663,7 +1703,7 @@ function applyPostVerificationWorkbookFixes(
   }
 
   const interestTrapLine = ctx.allText.split(/\n/).some((row) => {
-    if (values.interest_expense === undefined || values.interest_expense < 100) return false;
+    if (values.interest_expense === undefined || values.interest_expense <= 0) return false;
     const ie = Math.round(values.interest_expense);
     const line = row.replace(/\s+/g, " ").trim();
     return new RegExp(`^\\W*${ie}\\s+interest`, "i").test(line) && !/expense/i.test(line);
@@ -1689,9 +1729,6 @@ function applyPostVerificationWorkbookFixes(
 
   normalizeEquityBuckets(post);
 
-  // Schedule L line-24 can land after bucket normalization during verification.
-  normalizeEquityBuckets(post);
-
   // Down-rank derived / single-source attachment fields so they show as "verify" in the UI
   for (const id of Object.keys(values)) {
     const src = fieldSources[id] ?? "";
@@ -1713,7 +1750,7 @@ function applyPostVerificationWorkbookFixes(
     warnings,
   });
 
-  const ocrCoverage = buildOcrCoverageDiagnostics(ctx.allText, ctx.formKind, post, {
+  const ocrCoverage = buildOcrCoverageDiagnostics(ctx.allText, post, {
     targetYear: ctx.year,
     opex: values.other_operating_expenses,
     ocrPageCount: (ctx.allText.match(/---\s*OCR\s*PAGE/gi) ?? []).length || undefined,

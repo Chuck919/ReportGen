@@ -23,6 +23,8 @@ const MATERIAL_AMOUNT_FIELDS = new Set([
   "accounts_receivable",
   "cash",
   "inventory",
+  "notes_minus_short_term",
+  "other_stock_equity",
 ]);
 
 const WEAK_SOURCE =
@@ -34,6 +36,8 @@ const AUTHORITATIVE_SOURCE =
 /** Derived / residual opex — must not paint as green "authoritative" form lines. */
 export function isResidualOpexSource(source?: string): boolean {
   if (/P&L reverse math|ordinary income/i.test(source ?? "")) return false;
+  // Exact OD partition identity (stmtTOTAL − stmtInTop8) is not a soft residual guess.
+  if (/stmt total\s*[−\-]\s*stmt lines in top-8/i.test(source ?? "")) return false;
   return /minus\s+slot|federal\s+table\s+minus|residual|summed detail|itemized closure|misc detail closes|stmt total|operating expenses \(stmt|sum\(all\)\s*[−\-]|top-8\)|includes form lines outside top-8/i.test(
     source ?? "",
   );
@@ -53,7 +57,24 @@ export function isAuthoritativeSource(source?: string): boolean {
   return AUTHORITATIVE_SOURCE.test(source ?? "");
 }
 
-/** OCR junk: line numbers, form refs, tax years, tiny amounts on material rows. */
+function sourceLineNumberEqualsValue(value: number, source?: string): boolean {
+  const lineRef = source?.match(/\bline\s*(\d{1,3})\b/i);
+  return lineRef != null && Math.abs(Math.round(value)) === Number(lineRef[1]);
+}
+
+function isInterestReferenceBleed(value: number, source?: string): boolean {
+  if (sourceLineNumberEqualsValue(value, source)) return true;
+  if (/^\s*\d{1,3}\s+interest/i.test(source ?? "")) return true;
+  // §163(j) / Form 8990 instruction captions are references, not interest-expense rows.
+  return /million|form\s*8990|163\s*\(\s*j\s*\)|section\s*163|business\s+interest\s+limitation/i.test(
+    source ?? "",
+  );
+}
+
+/**
+ * OCR junk: form refs, tax years, line-number crumbs (abs ≤ 99 on trap fields).
+ * ≤99 is IRS form-line vocabulary — not a company-size floor.
+ */
 export function isSuspiciousTaxValue(
   id: string,
   value: number,
@@ -65,25 +86,25 @@ export function isSuspiciousTaxValue(
   if (taxYear && abs === taxYear) return true;
   if (taxYear && abs === taxYear % 100) return true;
   if (taxYear && abs >= 2020 && abs <= 2035) return true;
+  if (sourceLineNumberEqualsValue(value, source)) return true;
 
-  // Size floors removed — only structural noise (year-as-amount, form refs) above.
-  // Tiny non-authoritative COGS/rent still look like column crumbs when source is weak.
+  // Tiny non-authoritative COGS/rent/sales still look like column crumbs when source is weak.
   if (id === "cogs" && abs > 0 && abs <= 99 && !isAuthoritativeSource(source)) return true;
   if (id === "rent" && abs > 0 && abs <= 99 && !isAuthoritativeSource(source)) return true;
   if (id === "sales" && abs > 0 && abs <= 99 && !isAuthoritativeSource(source)) return true;
   if (id === "depreciation" && abs > 0 && abs < 100 && !isAuthoritativeSource(source)) return true;
-  /** Form line number misread as interest dollars (e.g. line 13 → $13, line 113 → $113). */
+
+  // Form 1120 line 31 tiny positives are often OCR crumbs from neighboring line labels.
+  if (id === "taxes_paid" && abs > 0 && abs <= 99 && /form\s*1120\s*line\s*31/i.test(source ?? "")) {
+    return true;
+  }
+
   if (id === "interest_expense" && abs > 0 && abs <= 999) {
     if (abs <= 50) return true;
-    const lineRef = source?.match(/\bline\s*(\d{1,3})\b/i);
-    if (lineRef && abs === Number(lineRef[1])) return true;
-    if (/^\s*\d{1,3}\s+interest/i.test(source ?? "")) return true;
-    // Form 8990 / §163(j) instruction bleed — context only (no bare $163 / <$200 floors).
-    if (/million|form\s*8990|163\s*\(\s*j\s*\)|section\s*163|business\s+interest\s+limitation/i.test(source ?? "")) {
-      return true;
-    }
+    if (isInterestReferenceBleed(value, source)) return true;
     if (abs === 163 && /(?:^|[^\d])163(?:[^\d]|$)|8990|limitation/i.test(source ?? "")) return true;
   }
+
   /** "Post-1986 depreciation adjustment" OCR — year 1986 read as dollars. */
   if (
     (id === "depreciation" || id === "amortization") &&
@@ -91,7 +112,6 @@ export function isSuspiciousTaxValue(
   ) {
     return true;
   }
-  // Amortization: line-number / form-ref crumbs only — no bare <$500 or >$100k size clears.
   if (id === "depreciation" && isFormReferenceNumber(abs)) return true;
 
   // Exact zero is a valid cleared amount (e.g. no intangibles → amort=0); $1 crumbs stay suspicious.
@@ -110,10 +130,12 @@ export function isSuspiciousTaxValue(
     "short_term_debt",
     "current_portion_ltd",
     "other_current_assets",
+    "notes_minus_short_term",
+    "other_stock_equity",
+    "unclassified_equity",
   ]);
   if (LINE_NUMBER_TRAP_FIELDS.has(id) && abs > 0 && abs <= 99) return true;
-  // accounts_payable / gross_fixed: no bare <$1000 size floor — LINE_NUMBER_TRAP + form-ref
-  // catch crumbs; small legitimate AP / fixed assets must survive.
+
   // S-corp Schedule L often has nominal-par common stock — not OCR line noise.
   if (
     (id === "common_stock" || id === "preferred_stock") &&
@@ -164,6 +186,7 @@ export function applyConfidenceGates(resolved: ResolvedFields, options: Confiden
 
     if (!suspicious && !(weak && Math.abs(value) <= 1)) continue;
 
+    // Year crumbs / line-number traps on Schedule L must clear even when the source is authoritative.
     if (suspicious && isAuthoritativeSource(source) && Math.abs(Math.round(value)) <= 99) {
       delete resolved.values[id];
       delete resolved.confidence[id];
@@ -194,8 +217,6 @@ export function applyConfidenceGates(resolved: ResolvedFields, options: Confiden
       continue;
     }
 
-    // Tiny AP is almost always a Schedule L / comparison line-number crumb ($16 → BS gap).
-    // Same ≤$99 trap as other BS fields — no bare <$1000 wipe.
     if (
       id === "accounts_payable" &&
       suspicious &&
@@ -237,6 +258,19 @@ const SKIP_THOROUGH_REFILL = new Set([
   "depreciation",
 ]);
 
+/**
+ * True when comparison data should NOT fill other_current_liabilities.
+ * OCL is structurally sourced from Schedule L line 18 / Statement totals;
+ * a positive comparison value is a prior-year echo or column misread.
+ */
+export function shouldSkipComparisonOcl(comp: number | undefined, resolved: ResolvedFields): boolean {
+  if (comp === undefined || comp <= 0) return false;
+  // Already have a structural source — never overwrite with comparison.
+  if (resolved.values.other_current_liabilities !== undefined) return true;
+  // Do not invent OCL from comparison alone; this row requires Schedule L or Statement support.
+  return true;
+}
+
 export function refillFromComparison(
   resolved: ResolvedFields,
   comparison: {
@@ -249,6 +283,7 @@ export function refillFromComparison(
     if (SKIP_THOROUGH_REFILL.has(id)) continue;
     const comp = comparison.values[id];
     if (comp === undefined) continue;
+    if (id === "other_current_liabilities" && shouldSkipComparisonOcl(comp, resolved)) continue;
     if (isSuspiciousTaxValue(id, comp, "Two-year comparison", taxYear)) continue;
 
     const cur = resolved.values[id];
