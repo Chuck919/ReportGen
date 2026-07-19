@@ -23,16 +23,16 @@ Pop-Location
 
 $sshArgs = @("-i", $SshKey, "-o", "StrictHostKeyChecking=accept-new")
 $target = "${User}@${VmIp}"
+$parent = (Split-Path $RemoteDir -Parent) -replace '\\', '/'
 
 Write-Host "Creating $RemoteDir on VM..."
-ssh @sshArgs $target "sudo mkdir -p $RemoteDir && sudo chown -R ${User}:${User} $(Split-Path $RemoteDir -Parent)"
+ssh @sshArgs $target "sudo mkdir -p $RemoteDir && sudo chown -R ${User}:${User} $parent"
 
 Write-Host "Uploading archive..."
 scp @sshArgs $Tar "${target}:${parent}/reportgen-web.tar.gz"
 
 Write-Host "Extracting and rebuilding..."
-$parent = (Split-Path $RemoteDir -Parent) -replace '\\', '/'
-$remote = @"
+$remoteScript = @"
 set -e
 mkdir -p $RemoteDir
 tar -xzf $parent/reportgen-web.tar.gz -C $RemoteDir
@@ -43,7 +43,7 @@ export ENV_TEMPLATE=deploy/vps/.env.production.example
 export OPEN_UFW=0
 bash deploy/vps/install-on-vm.sh
 "@
-ssh @sshArgs $target $remote
+$remoteScript | ssh @sshArgs $target "bash -s"
 
 Write-Host ""
 Write-Host "App: https://reportgen.duckdns.org/tax"
