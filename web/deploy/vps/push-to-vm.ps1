@@ -32,17 +32,17 @@ Write-Host "Uploading archive..."
 scp @sshArgs $Tar "${target}:${parent}/reportgen-web.tar.gz"
 
 Write-Host "Extracting and rebuilding..."
-$remoteScript = @"
-set -e
-mkdir -p $RemoteDir
-tar -xzf $parent/reportgen-web.tar.gz -C $RemoteDir
-rm -f $parent/reportgen-web.tar.gz
-cd $RemoteDir
-chmod +x deploy/vps/install-on-vm.sh
-export ENV_TEMPLATE=deploy/vps/.env.production.example
-export OPEN_UFW=0
-bash deploy/vps/install-on-vm.sh
-"@ -replace "`r`n", "`n"
+$remoteScript = @(
+  "set -e"
+  "mkdir -p $RemoteDir"
+  "tar -xzf $parent/reportgen-web.tar.gz -C $RemoteDir"
+  "rm -f $parent/reportgen-web.tar.gz"
+  "cd $RemoteDir"
+  "chmod +x deploy/vps/install-on-vm.sh"
+  "export ENV_TEMPLATE=deploy/vps/.env.production.example"
+  "export OPEN_UFW=0"
+  "bash deploy/vps/install-on-vm.sh"
+) -join "`n"
 $remoteScript | ssh @sshArgs $target "bash -s"
 
 Write-Host ""
