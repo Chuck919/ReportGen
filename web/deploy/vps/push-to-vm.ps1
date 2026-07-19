@@ -32,7 +32,8 @@ Write-Host "Uploading archive..."
 scp @sshArgs $Tar "${target}:${parent}/reportgen-web.tar.gz"
 
 Write-Host "Extracting and rebuilding..."
-$remoteScript = @(
+$scriptFile = Join-Path $env:TEMP "remote-install.sh"
+$scriptContent = @(
   "set -e"
   "mkdir -p $RemoteDir"
   "tar -xzf $parent/reportgen-web.tar.gz -C $RemoteDir"
@@ -43,8 +44,10 @@ $remoteScript = @(
   "export OPEN_UFW=0"
   "bash deploy/vps/install-on-vm.sh"
 ) -join "`n"
-$remoteScriptBytes = [System.Text.Encoding]::UTF8.GetBytes($remoteScript)
-$remoteScriptBytes | ssh @sshArgs $target "cat > /tmp/install.sh && bash /tmp/install.sh && rm -f /tmp/install.sh"
+[System.IO.File]::WriteAllText($scriptFile, $scriptContent, [System.Text.Encoding]::UTF8)
+scp @sshArgs $scriptFile "${target}:/tmp/install.sh"
+ssh @sshArgs $target "bash /tmp/install.sh && rm -f /tmp/install.sh"
+Remove-Item $scriptFile -Force
 
 Write-Host ""
 Write-Host "App: https://reportgen.duckdns.org/tax"
