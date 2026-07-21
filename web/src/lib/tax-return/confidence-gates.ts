@@ -231,12 +231,11 @@ export function applyConfidenceGates(resolved: ResolvedFields, options: Confiden
     }
 
     if (strict && (suspicious || weak) && !isAuthoritativeSource(source)) {
-      // Cap confidence only — clearing made thorough worse than balanced on live OCR.
-      const cappedStrict = Math.min(conf, SUSPICIOUS_CONF_CAP);
-      if (cappedStrict < conf) {
-        resolved.confidence[id] = cappedStrict;
-        resolved.warnings.push(`Thorough: low-trust ${id}=${value} (confidence ${conf}→${cappedStrict})`);
-      }
+      // Thorough mode: clear suspicious non-authoritative values so comparison refill can replace them.
+      delete resolved.values[id];
+      delete resolved.confidence[id];
+      delete resolved.sources[id];
+      resolved.warnings.push(`Thorough: cleared ${id}=${value} (low-trust OCR)`);
       continue;
     }
 
@@ -248,15 +247,7 @@ export function applyConfidenceGates(resolved: ResolvedFields, options: Confiden
   }
 }
 
-const SKIP_THOROUGH_REFILL = new Set([
-  "interest_expense",
-  "other_income",
-  "other_operating_income",
-  "other_operating_expenses",
-  "taxes_paid",
-  "amortization",
-  "depreciation",
-]);
+// Thorough mode clears suspicious values above; refill should be able to replace them from comparison.
 
 /**
  * True when comparison data should NOT fill other_current_liabilities.
@@ -280,7 +271,6 @@ export function refillFromComparison(
   taxYear?: number,
 ): void {
   for (const id of INPUT_ROW_IDS) {
-    if (SKIP_THOROUGH_REFILL.has(id)) continue;
     const comp = comparison.values[id];
     if (comp === undefined) continue;
     if (id === "other_current_liabilities" && shouldSkipComparisonOcl(comp, resolved)) continue;
