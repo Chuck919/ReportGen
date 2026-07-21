@@ -2,6 +2,14 @@ import Link from "next/link";
 import { SUPPORTED_TAX_FORMS_LABEL } from "@/lib/tax/tax-form-copy";
 
 const TOOLS = [
+  {
+    href: "/valuation",
+    title: "Valuation draft",
+    subtitle: "Tax-first report generation",
+    description:
+      "Upload tax returns, add missing MSA or NAICS details, and generate an editable Main Current-style valuation draft with free macro and market context.",
+    cta: "Open valuation tool",
+  },
   { href: "/tax", title: "Tax returns", subtitle: SUPPORTED_TAX_FORMS_LABEL, description: "Extract income statement and balance sheet lines for paste into your tax entry table.", cta: "Open tax tool" },
   { href: "/benchmark", title: "Benchmark PDF", subtitle: "Industry reports", description: "Pull financial ratios and common-size percentages from IBIS-style narrative PDFs.", cta: "Open benchmark tool" },
 ];
@@ -10,7 +18,7 @@ export function ToolCards() {
   return (
     <section className="mt-14">
       <h2 className="text-xl font-semibold text-stone-900">Tools</h2>
-      <div className="mt-6 grid gap-4 sm:grid-cols-2">
+      <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {TOOLS.map((tool) => (
           <Link key={tool.href} href={tool.href} className="group rounded-2xl border border-stone-200 bg-white p-6 shadow-sm transition hover:border-stone-400 hover:shadow-md">
             <p className="text-xs font-medium uppercase tracking-wide text-stone-500">{tool.subtitle}</p>

@@ -27,7 +27,6 @@ export function TaxPage() {
       </header>
 
       <TaxUploadPanel
-        hasData={upload.hasData}
         ocrMode={upload.ocrMode}
         onOcrModeChange={upload.setOcrMode}
         queuedFiles={upload.queuedFiles}
@@ -43,6 +42,7 @@ export function TaxPage() {
         progressPercent={upload.progressPercent}
         error={upload.error}
         queueError={upload.queueError}
+        uploadNotice={upload.uploadNotice}
       />
 
       {!upload.busy && (

@@ -50,7 +50,14 @@
     "test:user-corrections": "npx --yes tsx scripts/test-user-correction-pipeline.ts",
     "benchmark:direct": "npx --yes tsx scripts/benchmark-direct-parse.ts thorough",
     "benchmark:all-cached": "npx --yes tsx scripts/benchmark-all-cached.ts",
-    "score:embedded": "npx --yes tsx scripts/score-all-embedded.ts"
+    "score:embedded": "npx --yes tsx scripts/score-all-embedded.ts",
+    "test:valuation": "npx --yes tsx scripts/test-valuation-math.ts",
+    "test:valuation:docx": "npx --yes tsx scripts/test-valuation-docx-export.ts",
+    "qa:valuation:charts": "npx --yes tsx scripts/qa-valuation-charts.ts",
+    "prepare:reportgen-template": "npx --yes tsx scripts/prepare-reportgen-template.ts",
+    "test:valuation:pdf": "npx --yes tsx scripts/test-valuation-pdf-export.ts",
+    "test:valuation:e2e": "npx --yes tsx scripts/test-valuation-e2e.ts",
+    "test:valuation:user-workflow": "npx --yes tsx scripts/test-valuation-user-workflow.ts"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.0",
@@ -58,7 +65,12 @@
     "pdf-parse": "^2.4.5",
     "react": "^18",
     "react-dom": "^18",
-    "tesseract.js": "^7.0.0"
+    "tesseract.js": "^7.0.0",
+    "docx": "^9.7.1",
+    "docxtemplater": "^3.69.0",
+    "pdf-lib": "^1.17.1",
+    "pizzip": "^3.2.0",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/node": "^20",

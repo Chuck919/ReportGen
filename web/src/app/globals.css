@@ -16,4 +16,35 @@ body {
   .text-balance {
     text-wrap: balance;
   }
+
+  .print-break-inside-avoid {
+    break-inside: avoid;
+  }
+}
+
+@media print {
+  header,
+  button,
+  input,
+  textarea,
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  header.sticky {
+    display: none;
+  }
+
+  .valuation-report-print {
+    width: 100%;
+  }
+
+  .valuation-report-print svg {
+    max-width: 100%;
+    height: auto;
+  }
 }
