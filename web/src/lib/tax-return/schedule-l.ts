@@ -132,6 +132,8 @@ export function scheduleLLine1CashAmount(line: string): number | undefined {
   const isCashRow =
     /^1\s*cash\b/i.test(normalized) ||
     /^1?\s*t?csh\b/i.test(normalized) ||
+    /^1\s*[\[|]?\s*cash\b/i.test(normalized) ||
+    /^1\s*[\[|]?\s*bank\s+funds?\b/i.test(normalized) ||
     (/^\[1\b/i.test(normalized) && /\d{1,3}(?:,\d{3})+/.test(normalized));
   if (!isCashRow) return undefined;
   if (/cash\s*regist|fixed\s+asset|form\s*4562|depreciat/i.test(normalized)) return undefined;

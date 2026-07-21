@@ -139,6 +139,7 @@ export function finalizeTaxColumns(columns: TaxYearValues[]): TaxYearValues[] {
     const refreshed = refreshTaxYearVerification(col);
     return {
       ...refreshed,
+      // Capture initial baseline; will be refreshed after opex alignment below
       parserFormulaBaseline:
         refreshed.parserFormulaBaseline ??
         snapshotParserFormulaBaseline(refreshed.parserBaseline ?? refreshed.values),
@@ -147,6 +148,11 @@ export function finalizeTaxColumns(columns: TaxYearValues[]): TaxYearValues[] {
   cols = alignOperatingExpensesAcrossYears(cols)
     .map(refreshTaxYearVerification)
     .map(reflagPnlIdentityAfterOpexAlign);
+  // Refresh formula baseline after OPEX alignment so "From extraction" shows final aligned values
+  cols = cols.map((col) => ({
+    ...col,
+    parserFormulaBaseline: snapshotParserFormulaBaseline(col.values),
+  }));
   return applyCrossYearFlags(cols);
 }
 

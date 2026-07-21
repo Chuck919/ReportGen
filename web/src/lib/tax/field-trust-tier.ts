@@ -60,8 +60,8 @@ export const TRUST_TIER_LEGEND: TrustTierMeta[] = [
     tier: "single-good",
     label: "Single source (OK)",
     description: "One trusted source, good confidence",
-    cellClass: "bg-sky-200 text-sky-950",
-    swatchClass: "bg-sky-500",
+    cellClass: "bg-lime-200 text-lime-950",
+    swatchClass: "bg-lime-500",
   },
   {
     tier: "moderate",

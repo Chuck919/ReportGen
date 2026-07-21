@@ -228,9 +228,12 @@ function pickCrossReferenced(
   }
 
   if (field === "amortization" && hasNoIntangibleAssets(resolved)) {
+    // When balance sheet shows no intangible assets at all (gross=0, accum=0),
+    // amortization expense must be $0 — veto any non-zero candidates as OCR noise.
     const zero = valid.find((c) => c.value === 0);
     if (zero) return zero;
-    return valid.sort((a, b) => b.confidence - a.confidence)[0];
+    // No zero candidate found — return undefined instead of the best non-zero guess
+    return undefined;
   }
 
   // Prefer Form / statement / Form-4562 / NET DEPRECIATION over comparison worksheet.

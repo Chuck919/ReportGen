@@ -52,8 +52,27 @@ export function applyCrossYearFlags(columns: TaxYearValues[]): TaxYearValues[] {
 
       const maxAbs = Math.max(Math.abs(current), Math.abs(prior));
       if (maxAbs < YOY_MIN_ABS) continue;
-      // 0 → first real amount (or reverse) is common across years; ratio is infinite noise.
-      if (current === 0 || prior === 0) continue;
+      // When one value is non-trivial ($1K+) and the other is zero, it's likely extraction
+      // failure rather than a real $0 — flag this as anomalous regardless of direction.
+      if (current === 0 || prior === 0) {
+        const nonZero = current !== 0 ? current : prior;
+        if (Math.abs(nonZero) >= YOY_MIN_ABS) {
+          const msg = `YoY ${older.year}→${newer.year}: ${formatCompact(prior)} → ${formatCompact(current)} (zero transition) — verify`;
+          const newerCol = byYear.get(newer.year)!;
+          const olderCol = byYear.get(older.year)!;
+          addFlag(newerCol.fieldFlags!, id, msg);
+          addFlag(olderCol.fieldFlags!, id, msg);
+          const setYoYReview = (col: TaxYearValues) => {
+            if (col.fieldStatus?.[id] !== "missing") {
+              col.fieldStatus = { ...(col.fieldStatus ?? {}), [id]: "review" };
+            }
+            col.fieldTrustTier = { ...(col.fieldTrustTier ?? {}), [id]: "moderate" as FieldTrustTier };
+          };
+          setYoYReview(newerCol);
+          setYoYReview(olderCol);
+        }
+        continue;
+      }
 
       const ratio = yoyRatio(current, prior);
       const signFlip = (current < 0) !== (prior < 0) && current !== 0 && prior !== 0;
